@@ -1,171 +1,13 @@
-//! 内置插件启动自愈：随安装包分发的内置插件（条目位于
-//! `internal-plugins.json`，产物目录 `resources/internal-plugins/<id>` 由构建期
-//! `scripts/prebuild.ts` 拉取）在服务启动前核对「是否已安装 + 安装路径是否仍
-//! 指向当前捆绑目录」：未安装 / 路径不正确 / 用户卸载后残留缺失 → 一律走常规
-//! 安装流程强制重装，保证桌面外壳依赖的桥接层（如 dsh-tauri）随包可用。
-//!
-//! debug 构建可用仓库根 `.env` 的 `DEV_INTERNAL_PLUGINS_DIR` 把安装目标指到
-//! 本地插件源码（热更新迭代，见 [`super::preset::bundled_plugin_dir`]）。
-//!
-//! 为什么放在启动而非安装流程：安装是用户主动行为，内置插件是应用自身的完整性
-//! 要求——用户怎么卸载、何时卸载都不影响下次启动自动恢复，无需任何用户操作。
+//! profile 清单与 `node_modules` 入口文件操作：内置插件就绪判定、待重装包声明
+//! 的精准移除（保留其它插件）、原子写回清单与失效入口清理。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 #[cfg(windows)]
 use std::os::windows::fs::FileTypeExt;
 use std::path::Path;
-use tauri::{AppHandle, Emitter};
-
-use super::installed::{installed_name, profile_dir, ProfilePackageJson};
-use super::preset::{bundled_dep_spec, bundled_plugin_dir, load_presets, PreinstallPluginInfo};
-
-/// 核对并强制安装缺失/路径不正确/被卸载的内置插件，在服务进程启动前调用。
-///
-/// 最佳努力：任何失败只记告警（调用方不阻断启动）；捆绑目录缺失（开发环境未跑
-/// prebuild）时跳过，交由常规引导流程处理；批量待装列表为空则不触发任何安装。
-/// 内置插件阶段事件载荷：「loading」= 核对/安装进行中（前端加载屏显示
-/// `status.loading_internal`），「done」= 结束（回到常规 `status.loading`）。
-#[derive(serde::Serialize, Clone)]
-struct InternalPluginsPhase {
-    phase: &'static str,
-}
-
-/// 串行化内置插件核对/安装：auto_start（Rust 侧 start→launch）与前端 boot 流程
-/// （新增的 boot 期 ensure 命令）可能并发触发，而安装会启动 `dsh plugin add`
-/// 子进程——两个 pnpm 抢同一档案目录会互相打断。若另一路正在执行，这里等它
-/// 完成后再核对（幂等：上次已装好则本轮全部 no-op）。
-static ENSURE_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
-
-pub(crate) async fn ensure(app_handle: &AppHandle) -> Result<(), String> {
-    let presets = load_presets(app_handle);
-    let internal: Vec<_> = presets.iter().filter(|p| p.internal).collect();
-    if internal.is_empty() {
-        return Ok(());
-    }
-
-    let _guard = ENSURE_LOCK
-        .get_or_init(|| tokio::sync::Mutex::new(()))
-        .lock()
-        .await;
-    // 前端据此在「Loading internal plugins…」与「Loading plugins…」间切换；
-    // 事件在服务进程启动前发出，于健康轮询期间到达，先于 dsh 自家的 boot 输出。
-    let _ = app_handle.emit(
-        "internal-plugins-phase",
-        InternalPluginsPhase { phase: "loading" },
-    );
-    let outcome = ensure_inner(app_handle, &internal).await;
-    let _ = app_handle.emit(
-        "internal-plugins-phase",
-        InternalPluginsPhase { phase: "done" },
-    );
-    outcome
-}
-
-/// 实际的核对与安装：遍历 internal 预设，未安装 / 路径不对 / 被卸载 → 批量重装。
-async fn ensure_inner(
-    app_handle: &AppHandle,
-    internal: &[&PreinstallPluginInfo],
-) -> Result<(), String> {
-    log::info!(
-        "checking {} internal preset plugins for install state",
-        internal.len()
-    );
-
-    // 一次读取当前档案；缺失时按「全部未安装」处理，由安装流程自行初始化。已有但
-    // 损坏的清单不能静默覆盖，否则可能丢失用户其它插件，故直接给出可诊断错误。
-    let profile = profile_dir(app_handle);
-    let manifest_path = profile.join("package.json");
-    let mut manifest = match std::fs::read_to_string(&manifest_path) {
-        Ok(raw) => Some(
-            serde_json::from_str::<serde_json::Value>(&raw)
-                .map_err(|e| format!("INTERNAL_PLUGIN_MANIFEST_PARSE_FAILED: {e}"))?,
-        ),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(format!("INTERNAL_PLUGIN_MANIFEST_READ_FAILED: {e}")),
-    };
-    let dependencies: HashMap<String, String> = match manifest.as_ref() {
-        Some(value) => {
-            serde_json::from_value::<ProfilePackageJson>(value.clone())
-                .map_err(|e| format!("INTERNAL_PLUGIN_MANIFEST_SCHEMA_FAILED: {e}"))?
-                .dependencies
-        }
-        None => HashMap::new(),
-    };
-
-    let mut need: Vec<(String, String, std::path::PathBuf)> = Vec::new();
-    for preset in internal {
-        let Some(bundled) = bundled_plugin_dir(app_handle, &preset.id) else {
-            // 未找到内置插件目录：release 说明构建期 prebuild 未拉取（发布缺陷，
-            // 由 prebuild 响亮失败）；debug 可用 .env 的 DEV_INTERNAL_PLUGINS_DIR
-            // 指向本地源码目录，未配置/缺 id 时跳过（「找不到则不装」）。
-            log::warn!(
-                "INTERNAL_PLUGIN_BUNDLE_MISSING: {}（release 需构建期 prebuild；debug 可配 .env DEV_INTERNAL_PLUGINS_DIR）",
-                preset.id
-            );
-            continue;
-        };
-        let name = installed_name(preset).to_string();
-        let expected = bundled_dep_spec(&bundled);
-        // ① 依赖声明：未声明，或声明的值不再指向当前捆绑目录（路径变更/被改
-        // 写）→ 重装；② 依赖真实性：node_modules 链接/拷贝须真实存在（用户
-        // 手动清过 node_modules 时声明可能残留但产物已不在）→ 重装。
-        let dep_ok = dependencies
-            .get(&name)
-            .is_some_and(|actual| dep_matches_spec(actual, &expected));
-        let entry = profile.join("node_modules").join(&name);
-        let link_ok = internal_plugin_entry_is_ready(&entry);
-        if !dep_ok || !link_ok {
-            log::info!(
-                "INTERNAL_PLUGIN_NEEDS_REINSTALL: {name}（dep_ok={dep_ok}, link_ok={link_ok}, expected={expected}）"
-            );
-            // 应用升级会移动 `.app` 内的捆绑目录，旧 profile 可能留下指向上个
-            // 版本资源的悬空链接。pnpm 在处理这些入口时会在真正改写依赖前以
-            // 254 退出；先只清理 node_modules 入口（绝不跟随链接删除目标），再
-            // 走常规 add，令 pnpm 从当前捆绑目录重建链接。
-            need.push((preset.id.clone(), name, entry));
-        }
-    }
-    if need.is_empty() {
-        return Ok(());
-    }
-
-    let ids: Vec<String> = need.iter().map(|(id, _, _)| id.clone()).collect();
-    log::info!("Reinstalling internal preset plugins: {ids:?}");
-
-    // pnpm add 会先解析清单里的所有既有依赖。0.9.0 将随包目录从
-    // `preset-plugins` 迁至 `internal-plugins` 后，旧 file:/link: 路径已不存在，pnpm
-    // 会在真正改写依赖前以 ENOENT/254 退出。仅移除本轮即将重装的 internal 包声明
-    // 与 bundle 引用，保留所有其它插件；add 成功后 dsh 会把它们按当前路径写回。
-    if let Some(value) = manifest.as_mut() {
-        let names: HashSet<&str> = need.iter().map(|(_, name, _)| name.as_str()).collect();
-        if remove_internal_plugins_from_manifest(value, &names) {
-            write_profile_manifest(&manifest_path, value)?;
-        }
-    }
-
-    // 必须等全部检查完成后再删除旧入口：多个 internal id 可能映射到同一 npm 包，
-    // 边遍历边删除会让后续原本健康的别名被误判缺失。统一去重后只删一次。
-    let mut entries = HashSet::new();
-    for (_, _, entry) in &need {
-        if entries.insert(entry.clone()) {
-            remove_stale_plugin_entry(entry).map_err(|e| {
-                format!(
-                    "INTERNAL_PLUGIN_STALE_ENTRY_REMOVE_FAILED: {}: {e}",
-                    entry.display()
-                )
-            })?;
-        }
-    }
-    // 复用常规安装编排（环境准备/补齐 pnpm/`dsh plugin add file:<dir>`）；
-    // 启动阶段无持有进程，install 内部不会停服务。失败同样交给调用方告警。
-    if let Err(e) = super::install::install(app_handle, &ids).await {
-        return Err(format!("INTERNAL_PLUGIN_INSTALL_FAILED: {e}"));
-    }
-    Ok(())
-}
 
 /// 读取并解析入口清单，避免仅凭文件存在就把截断或不可读的内置插件视为健康。
-fn internal_plugin_entry_is_ready(entry: &Path) -> bool {
+pub(super) fn internal_plugin_entry_is_ready(entry: &Path) -> bool {
     let Ok(raw) = std::fs::read(entry.join("package.json")) else {
         return false;
     };
@@ -173,7 +15,7 @@ fn internal_plugin_entry_is_ready(entry: &Path) -> bool {
 }
 
 /// 从 profile 清单精准移除待重装 internal 包的依赖与 bundle 引用。
-fn remove_internal_plugins_from_manifest(
+pub(super) fn remove_internal_plugins_from_manifest(
     manifest: &mut serde_json::Value,
     names: &HashSet<&str>,
 ) -> bool {
@@ -200,7 +42,10 @@ fn remove_internal_plugins_from_manifest(
 }
 
 /// 经同目录临时文件原子替换 profile 清单，失败时保留原文件。
-fn write_profile_manifest(path: &Path, manifest: &serde_json::Value) -> Result<(), String> {
+pub(super) fn write_profile_manifest(
+    path: &Path,
+    manifest: &serde_json::Value,
+) -> Result<(), String> {
     use std::io::Write;
 
     let rendered = serde_json::to_string_pretty(manifest)
@@ -217,10 +62,7 @@ fn write_profile_manifest(path: &Path, manifest: &serde_json::Value) -> Result<(
         let _ = std::fs::remove_file(&temp);
         return Err(format!("INTERNAL_PLUGIN_MANIFEST_WRITE_FAILED: {e}"));
     }
-    log::info!(
-        "Removed stale internal plugin declarations from profile manifest: {}",
-        path.display()
-    );
+    log::info!("Profile manifest rewritten: {}", path.display());
     Ok(())
 }
 
@@ -255,7 +97,7 @@ fn replace_manifest_file(temp: &Path, path: &Path) -> std::io::Result<()> {
 ///
 /// 正常目录只可能是 pnpm 留下的损坏产物，可以递归清理；Unix 符号链接与 Windows
 /// junction 则只删除入口本身。入口不存在（包括已被并发清掉）视为幂等成功。
-fn remove_stale_plugin_entry(entry: &Path) -> std::io::Result<()> {
+pub(super) fn remove_stale_plugin_entry(entry: &Path) -> std::io::Result<()> {
     let metadata = match std::fs::symlink_metadata(entry) {
         Ok(metadata) => metadata,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -279,7 +121,7 @@ fn remove_stale_plugin_entry(entry: &Path) -> std::io::Result<()> {
 ///
 /// 容忍：`link:`/`file:` 前缀缺失或两者混写（历史遗留 `file:` 安装值）；Windows
 /// 下路径大小写不敏感；尾部斜杠差异（pnpm 各版本落盘形式略有出入）。
-fn dep_matches_spec(actual: &str, expected: &str) -> bool {
+pub(super) fn dep_matches_spec(actual: &str, expected: &str) -> bool {
     let norm = |spec: &str| {
         let stripped = spec
             .strip_prefix("link:")
