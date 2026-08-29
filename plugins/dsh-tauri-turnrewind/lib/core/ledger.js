@@ -124,6 +124,23 @@ export function skipTurn(db, turn, reason) {
   `).run(turn.turnId, turn.sessionId, turn.workspaceKey, turn.startedAt, reason)
 }
 
+export function listReversibleTurns(db, sessionId, workspaceKey) {
+  return db.prepare(`
+    SELECT * FROM turns
+    WHERE session_id = ? AND workspace_key = ?
+      AND reversible = 1
+      AND status IN ('settled', 'interrupted')
+    ORDER BY started_at DESC
+  `).all(sessionId, workspaceKey)
+}
+
+export function markTurnSnapshotMissing(db, turnId) {
+  db.prepare(`
+    UPDATE turns SET reversible = 0, error = 'snapshot ref missing (snapshot repository was wiped)'
+    WHERE turn_id = ?
+  `).run(turnId)
+}
+
 export function recordSkippedTurn(db, turn, reason) {
   db.exec('BEGIN')
   try {

@@ -3,9 +3,9 @@ import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import process from 'node:process'
 import { createDialogProjection } from './core/dialog-projection.js'
-import { captureSnapshot, createSnapshotStore, currentState, gitAvailable, restorePath, snapshotDiff, stateAt } from './core/git-snapshot.js'
+import { captureSnapshot, createSnapshotStore, currentState, gitAvailable, gitRef, restorePath, snapshotDiff, stateAt } from './core/git-snapshot.js'
 import { assessWorkspace } from './core/guard.js'
-import { claimRewindNotices, completeUndoWithNotice, createOperation, failTurn, getLatestSnapshotRef, getLatestTurn, getLatestTurnSummary, getTurn, insertTurn, openLedger, recordSkippedTurn, registerWorkspace, settleInterruptedTurn, settleNoopTurn, settleOperation, settleTurn, skipTurn } from './core/ledger.js'
+import { claimRewindNotices, completeUndoWithNotice, createOperation, failTurn, getLatestSnapshotRef, getLatestTurnSummary, getTurn, insertTurn, listReversibleTurns, markTurnSnapshotMissing, openLedger, recordSkippedTurn, registerWorkspace, settleInterruptedTurn, settleNoopTurn, settleOperation, settleTurn, skipTurn } from './core/ledger.js'
 import { classifyUndo } from './core/planner.js'
 
 const name = 'dsh-tauri-turnrewind'
@@ -154,6 +154,15 @@ async function settleSessionTurns(ledger, active, sessionId, exceptKey, reason) 
   }
 }
 
+async function turnRefsExist(store, turn) {
+  if (!turn.before_ref || !turn.after_ref)
+    return false
+  return Boolean(
+    await gitRef(store.repoDir, store.workspaceDir, turn.before_ref)
+    && await gitRef(store.repoDir, store.workspaceDir, turn.after_ref),
+  )
+}
+
 async function applyUndo(runtime, active, invocation) {
   const parsed = parseUndoInput(invocation.rawInput)
   if (parsed.error)
@@ -169,9 +178,27 @@ async function applyUndo(runtime, active, invocation) {
   if (runtime.undoing)
     return { kind: 'error', text: 'Another undo operation is already running in this workspace.' }
 
-  const target = parsed.turnId
-    ? getTurn(runtime.db, parsed.turnId)
-    : getLatestTurn(runtime.db, invocation.agent.session.id, workspaceKey)
+  let target
+  if (parsed.turnId) {
+    target = getTurn(runtime.db, parsed.turnId)
+    if (target && !await turnRefsExist(runtime.store, target)) {
+      return {
+        kind: 'error',
+        text: `The snapshot data for turn ${parsed.turnId} no longer exists (the snapshot repository was previously wiped); its changes can no longer be undone.`,
+      }
+    }
+  }
+  else {
+    // Walk newest-first and skip turns whose snapshot refs died with a wiped
+    // snapshot repository, marking them so later /undo runs never re-check.
+    for (const candidate of listReversibleTurns(runtime.db, invocation.agent.session.id, workspaceKey)) {
+      if (await turnRefsExist(runtime.store, candidate)) {
+        target = candidate
+        break
+      }
+      markTurnSnapshotMissing(runtime.db, candidate.turn_id)
+    }
+  }
   if (!target) {
     const latest = getLatestTurnSummary(runtime.db, invocation.agent.session.id)
     const detail = latest
