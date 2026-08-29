@@ -117,13 +117,17 @@ export function settleNoopTurn(db, turnId, afterRef) {
     .run(new Date().toISOString(), afterRef, 'no file changes', turnId)
 }
 
+export function skipTurn(db, turn, reason) {
+  db.prepare(`
+    INSERT OR REPLACE INTO turns(turn_id, session_id, parent_turn_id, workspace_key, status, started_at, reversible, error)
+    VALUES (?, ?, NULL, ?, 'skipped', ?, 0, ?)
+  `).run(turn.turnId, turn.sessionId, turn.workspaceKey, turn.startedAt, reason)
+}
+
 export function recordSkippedTurn(db, turn, reason) {
   db.exec('BEGIN')
   try {
-    db.prepare(`
-      INSERT OR REPLACE INTO turns(turn_id, session_id, parent_turn_id, workspace_key, status, started_at, reversible, error)
-      VALUES (?, ?, NULL, ?, 'skipped', ?, 0, ?)
-    `).run(turn.turnId, turn.sessionId, turn.workspaceKey, turn.startedAt, reason)
+    skipTurn(db, turn, reason)
     // Queue one heads-up per session and workspace; repeated skips stay silent.
     const existing = db.prepare(`
       SELECT 1 FROM rewind_notices WHERE session_id = ? AND workspace_key = ? AND kind = 'unsupported' LIMIT 1

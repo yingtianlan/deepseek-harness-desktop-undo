@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { it } from 'vitest'
-import { captureSnapshot, createSnapshotStore, currentState, restorePath, snapshotDiff, stateAt } from '../lib/core/git-snapshot.js'
+import { captureSnapshot, createSnapshotStore, currentState, gitAvailable, restorePath, snapshotDiff, stateAt } from '../lib/core/git-snapshot.js'
 import { completeUndoWithNotice, getLatestTurn, insertTurn, openLedger, settleInterruptedTurn, settleTurn } from '../lib/core/ledger.js'
 
 it('captures and restores modified, added, and deleted files', async () => {
@@ -15,19 +15,19 @@ it('captures and restores modified, added, and deleted files', async () => {
     await writeFile(join(workspace, 'deleted.txt'), 'to delete')
 
     const store = createSnapshotStore(join(root, 'data'), workspace)
-    const before = captureSnapshot(store, 'refs/turnrewind/test-before', 'before')
+    const before = await captureSnapshot(store, 'refs/turnrewind/test-before', 'before')
 
     await writeFile(join(workspace, 'modified.txt'), 'after')
     await rm(join(workspace, 'deleted.txt'))
     await writeFile(join(workspace, 'added.txt'), 'new')
-    const after = captureSnapshot(store, 'refs/turnrewind/test-after', 'after', before.commit)
+    const after = await captureSnapshot(store, 'refs/turnrewind/test-after', 'after', before.commit)
 
-    assert.deepEqual(snapshotDiff(store, before.commit, after.commit).sort(), ['added.txt', 'deleted.txt', 'modified.txt'])
-    assert.notEqual(stateAt(store, before.commit, 'modified.txt').digest, stateAt(store, after.commit, 'modified.txt').digest)
+    assert.deepEqual((await snapshotDiff(store, before.commit, after.commit)).sort(), ['added.txt', 'deleted.txt', 'modified.txt'])
+    assert.notEqual((await stateAt(store, before.commit, 'modified.txt')).digest, (await stateAt(store, after.commit, 'modified.txt')).digest)
 
-    restorePath(store, before.commit, 'modified.txt')
-    restorePath(store, before.commit, 'deleted.txt')
-    restorePath(store, before.commit, 'added.txt')
+    await restorePath(store, before.commit, 'modified.txt')
+    await restorePath(store, before.commit, 'deleted.txt')
+    await restorePath(store, before.commit, 'added.txt')
 
     assert.equal(await readFile(join(workspace, 'modified.txt'), 'utf8'), 'before')
     assert.equal(await readFile(join(workspace, 'deleted.txt'), 'utf8'), 'to delete')
@@ -47,9 +47,9 @@ it('allows sequential undo of an interrupted turn after a later turn', async () 
   try {
     await mkdir(workspace, { recursive: true })
     const store = createSnapshotStore(join(root, 'data'), workspace)
-    const beforeA = captureSnapshot(store, 'refs/turnrewind/a-before', 'A before')
+    const beforeA = await captureSnapshot(store, 'refs/turnrewind/a-before', 'A before')
     for (const file of filesA) await writeFile(join(workspace, file), 'A')
-    const afterA = captureSnapshot(store, 'refs/turnrewind/a-after', 'A after', beforeA.commit)
+    const afterA = await captureSnapshot(store, 'refs/turnrewind/a-after', 'A after', beforeA.commit)
     insertTurn(db, {
       turnId: 'session:A',
       sessionId: 'session',
@@ -59,9 +59,9 @@ it('allows sequential undo of an interrupted turn after a later turn', async () 
     })
     settleInterruptedTurn(db, 'session:A', 'refs/turnrewind/a-after', 'interrupted')
 
-    const beforeB = captureSnapshot(store, 'refs/turnrewind/b-before', 'B before', afterA.commit)
+    const beforeB = await captureSnapshot(store, 'refs/turnrewind/b-before', 'B before', afterA.commit)
     for (const file of filesB) await writeFile(join(workspace, file), 'B')
-    const afterB = captureSnapshot(store, 'refs/turnrewind/b-after', 'B after', beforeB.commit)
+    const afterB = await captureSnapshot(store, 'refs/turnrewind/b-after', 'B after', beforeB.commit)
     insertTurn(db, {
       turnId: 'session:B',
       sessionId: 'session',
@@ -71,7 +71,7 @@ it('allows sequential undo of an interrupted turn after a later turn', async () 
     })
     settleTurn(db, 'session:B', 'refs/turnrewind/b-after')
 
-    for (const file of snapshotDiff(store, beforeB.commit, afterB.commit)) restorePath(store, beforeB.commit, file)
+    for (const file of await snapshotDiff(store, beforeB.commit, afterB.commit)) await restorePath(store, beforeB.commit, file)
     completeUndoWithNotice(db, 'session:B', {
       noticeId: 'notice-b',
       sessionId: 'session',
@@ -82,7 +82,7 @@ it('allows sequential undo of an interrupted turn after a later turn', async () 
     })
     assert.equal(getLatestTurn(db, 'session', workspace.toLowerCase()).turn_id, 'session:A')
 
-    for (const file of snapshotDiff(store, beforeA.commit, afterA.commit)) restorePath(store, beforeA.commit, file)
+    for (const file of await snapshotDiff(store, beforeA.commit, afterA.commit)) await restorePath(store, beforeA.commit, file)
     for (const file of [...filesA, ...filesB]) await assert.rejects(stat(join(workspace, file)))
   }
   finally {
@@ -99,11 +99,11 @@ it('handles non-ASCII paths without reporting a false restore', async () => {
     await mkdir(workspace, { recursive: true })
     await writeFile(join(workspace, fileName), 'before')
     const store = createSnapshotStore(join(root, 'data'), workspace)
-    const before = captureSnapshot(store, 'refs/turnrewind/unicode-before', 'before')
+    const before = await captureSnapshot(store, 'refs/turnrewind/unicode-before', 'before')
     await writeFile(join(workspace, fileName), 'after')
-    const after = captureSnapshot(store, 'refs/turnrewind/unicode-after', 'after', before.commit)
-    assert.deepEqual(snapshotDiff(store, before.commit, after.commit), [fileName])
-    restorePath(store, before.commit, fileName)
+    const after = await captureSnapshot(store, 'refs/turnrewind/unicode-after', 'after', before.commit)
+    assert.deepEqual(await snapshotDiff(store, before.commit, after.commit), [fileName])
+    await restorePath(store, before.commit, fileName)
     assert.equal(await readFile(join(workspace, fileName), 'utf8'), 'before')
   }
   finally {
@@ -118,11 +118,11 @@ it('does not treat CRLF conversion as a file conflict', async () => {
     await mkdir(workspace, { recursive: true })
     await writeFile(join(workspace, 'line-endings.txt'), 'before\nline\n')
     const store = createSnapshotStore(join(root, 'data'), workspace)
-    const before = captureSnapshot(store, 'refs/turnrewind/crlf-before', 'before')
+    const before = await captureSnapshot(store, 'refs/turnrewind/crlf-before', 'before')
     await writeFile(join(workspace, 'line-endings.txt'), 'after\nline\n')
-    const after = captureSnapshot(store, 'refs/turnrewind/crlf-after', 'after', before.commit)
+    const after = await captureSnapshot(store, 'refs/turnrewind/crlf-after', 'after', before.commit)
     await writeFile(join(workspace, 'line-endings.txt'), 'after\r\nline\r\n')
-    assert.equal(currentState(workspace, 'line-endings.txt').digest, stateAt(store, after.commit, 'line-endings.txt').digest)
+    assert.equal(currentState(workspace, 'line-endings.txt').digest, (await stateAt(store, after.commit, 'line-endings.txt')).digest)
   }
   finally {
     await rm(root, { recursive: true, force: true })
@@ -139,4 +139,39 @@ it('rejects paths outside the workspace', async () => {
   finally {
     await rm(root, { recursive: true, force: true })
   }
+})
+
+it('rebuilds a fresh baseline when the parent snapshot is gone', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'turnrewind-orphan-test-'))
+  const workspace = join(root, 'workspace')
+  try {
+    await mkdir(workspace, { recursive: true })
+    await writeFile(join(workspace, 'a.txt'), 'one')
+    const store = createSnapshotStore(join(root, 'data'), workspace)
+    const first = await captureSnapshot(store, 'refs/turnrewind/orphan-first', 'first')
+
+    // Simulate the snapshot repository being wiped out from under the ledger:
+    // without the fallback, every later capture would fail on read-tree.
+    // The parent is passed by ref name, exactly like the ledger stores it.
+    await rm(store.repoDir, { recursive: true, force: true })
+    await writeFile(join(workspace, 'a.txt'), 'two')
+    const rebuilt = await captureSnapshot(store, 'refs/turnrewind/orphan-second', 'second', 'refs/turnrewind/orphan-first')
+    assert.notEqual(rebuilt.commit, first.commit)
+    assert.equal((await stateAt(store, rebuilt.commit, 'a.txt')).kind, 'file')
+
+    // The next turn keeps building on the recovered chain.
+    await writeFile(join(workspace, 'b.txt'), 'new')
+    const third = await captureSnapshot(store, 'refs/turnrewind/orphan-third', 'third', rebuilt.commit)
+    assert.deepEqual(await snapshotDiff(store, rebuilt.commit, third.commit), ['b.txt'])
+  }
+  finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+it('probes git availability once per process', async () => {
+  const first = await gitAvailable()
+  const second = await gitAvailable()
+  assert.equal(first, second)
+  assert.equal(typeof first, 'boolean')
 })

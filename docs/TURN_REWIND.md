@@ -246,6 +246,16 @@ operation_paths(operation_id, path, expected_current_digest,
 
 预扫描是同步、带早停的元数据遍历，只发生在 turn 领取时；即使面对 250 GB 目录，代价也是一次有界的扫描而不是全量哈希。配套提供 `purge-workspace` 维护命令，用于清掉旧版本在错误工作区上生成的快照仓库与账本记录。
 
+### 5.4 Git 执行模型（已落地）
+
+首版用 `spawnSync` 执行全部 git 命令，大工作区上会冻结整个 Host（所有会话、Web UI、健康检查），叠加 Windows Defender 实时扫描时可达分钟级。现已全部改为异步 `spawn`：
+
+- 同一会话的捕获、结算按 FIFO 链串行，`turn/end` 的结算自动排队在基线捕获之后；不同会话之间并行；
+- `agent/inbox/claimed` 同步占位 active 表条目，保证异步基线捕获期间 `/undo` 无法插入；
+- 命令 handler 返回 Promise（内核以 `Promise.resolve(output)` 结算），`/undo` 的 diff、冲突检测与恢复均异步执行；
+- git 可用性在进程内探测一次，缺失时 turn 显式记为 `skipped`（`TURNREWIND_GIT_UNAVAILABLE`），不再静默失败；
+- `parentRef` 指向的快照不存在时（快照目录被清理/损坏），捕获降级为无父基线并在日志留一条 warning，快照链自愈而不是级联失败。
+
 ## 6. 撤销语义
 
 ### 6.1 默认单回合 Undo
@@ -564,7 +574,7 @@ Agent 文本回复成功不是「可撤销」的判断标准；只有结算扫�
 
 - 大仓库索引优化、排除规则；
 - Git 仓库工作区的增量基线（参考 OpenCode：共享用户仓库 object database、按 `git status` 语义只 stage 变更路径、未跟踪大文件写入快照仓库 `info/exclude`）；
-- 快照/恢复全链路异步化，避免阻塞 Host 事件循环；
+- snapshot ref 的数量/容量/保留期治理与定期 gc。
 - 配额与 GC；
 - worktree 专用恢复域与 UI 状态；
 - 诊断页和可导出审计。

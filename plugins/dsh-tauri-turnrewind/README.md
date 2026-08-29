@@ -10,6 +10,9 @@
 
 - 为已领取的 Agent turn 建立私有 Git 快照；
 - 将快照映射记录到 `$DSH_HOME/ledger.sqlite`；
+- **git 全程异步执行**：快照、diff、恢复都不阻塞 Host 事件循环；同一会话的捕获/结算按 FIFO 串行，不同会话并行；
+- **git 可用性探测**：系统没有 git 时，turn 显式记为 `skipped`（原因 `TURNREWIND_GIT_UNAVAILABLE`），而不是静默失败；
+- **快照链自愈**：私有快照仓库被删/损坏后，下一次捕获自动降级重建基线（日志有一条 warning），后续 turn 照常可撤销；
 - **工作区资格守卫**：家目录、家目录的祖先、盘根目录，以及超过快照预算（文件数 / 总大小 / 单文件大小）的目录不做快照，turn 记为 `skipped` 并向 `/undo` 说明原因（见「工作区资格与快照预算」）；
 - **不可用弹窗**：客户端半（`lib/client.js`）通过 `turnrewind` 会话投影检测到不可用提示时，在 Web UI 内弹出模态对话框（中英双语、每个浏览器只弹一次）；
 - 注册人类命令 `/undo`；
@@ -295,10 +298,14 @@ coverage/
 *.pem
 *.key
 id_rsa*
-credentials*
-*secret*
-*token*
+credentials.*      # 仅根目录
+secrets.*          # 仅根目录
 ```
+
+注意两点边界：
+
+- 工作区自己的 `.gitignore` 和用户全局 gitignore 同样生效（`git add` 语义），被忽略的文件不会进入快照，也不会被 undo 恢复；
+- 曾经使用的 `*token*`、`*secret*` 等子串规则已移除——它们会静默排除 `token.ts`、`tokenizer.py` 这类正当源码，且被排除路径不出现在 dry-run 列表中，导致 undo 静默漏恢复。
 
 这些规则意味着：被排除文件的变化不会进入本 turn 的 Undo 范围。插件仍是实验原型，不应把它当作秘密信息保护工具。
 
@@ -331,11 +338,10 @@ pnpm exec vitest run plugins/dsh-tauri-turnrewind/test --testTimeout=30000
 
 - 接入受控的宿主 sandbox/Tauri bridge；
 - 完成 DSH lifecycle integration tests；
-- 快照/扫描改为异步执行（当前 `spawnSync` 会阻塞 Host 事件循环）；
+- 快照容量治理：按 turn 数/容量/保留期清理旧 snapshot ref（当前只做断链自愈，不清理历史）；
 - 完善 Git 仓库工作区的增量基线（参考 OpenCode：共享用户对象库 + 仅 stage 变更路径）；
 - 完善多 workspace 并发锁；
 - 实现父对话递归 undo；
 - 实现 redo 和冲突处理 UI；
 - 实现消息旁 Undo 按钮；
-- 增加 snapshot 数量/容量清理；
 - 明确二进制、重命名、权限位和特殊文件策略。
