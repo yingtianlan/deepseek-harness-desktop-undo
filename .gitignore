@@ -1,4 +1,5 @@
 node_modules
+.pnpm-store
 dist
 src-tauri/target
 src-tauri/gen
@@ -15,5 +16,6 @@ src-tauri/resources/internal-plugins/
 release-msi-version.tmp.json
 skills
 .serena
+.cargo/config.toml
 source/
 .gitmodules
