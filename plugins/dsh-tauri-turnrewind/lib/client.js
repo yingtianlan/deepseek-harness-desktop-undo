@@ -204,7 +204,28 @@ globalThis.__ModuleLoader__.load({
       const totals = parsed.files.reduce((sum, file) => ({ additions: sum.additions + file.additions, deletions: sum.deletions + file.deletions }), { additions: 0, deletions: 0 })
       const hasDiff = withDiff.length > 0
       const summary = parsed.summary || (state === 'error' ? '失败' : state === 'running' ? '运行中' : '完成')
+      // Remember the user's collapse choice per command: a refresh must not
+      // re-expand a card the user deliberately folded.
+      const expandKey = `turnrewind.expanded.${node.id ?? parsed.planId ?? parsed.summary}`
       const [expanded, setExpanded] = React.useState(hasDiff)
+      React.useEffect(() => {
+        try {
+          const stored = globalThis.localStorage.getItem(expandKey)
+          if (stored === '0' || stored === '1')
+            setExpanded(stored === '1')
+        }
+        catch {}
+      }, [expandKey])
+      function toggleExpanded() {
+        setExpanded((v) => {
+          const next = !v
+          try {
+            globalThis.localStorage.setItem(expandKey, next ? '1' : '0')
+          }
+          catch {}
+          return next
+        })
+      }
       const [submitted, setSubmitted] = React.useState(null)
       const [submitError, setSubmitError] = React.useState(null)
       const [resultText, setResultText] = React.useState(null)
@@ -290,7 +311,7 @@ globalThis.__ModuleLoader__.load({
         ? `执行确认失败：${submitError}`
         : resultText || (planStatus === 'applied' || submitted === 'confirm'
           ? '已提交，等待执行结果…'
-          : planStatus === 'cancelled' || submitted === 'cancel' ? 'undo 已取消' : planStatus === 'gone' ? '该计划已过期，重新执行 /undo 可生成新预览' : '执行将恢复下方文件到本轮改动前')
+          : planStatus === 'cancelled' || submitted === 'cancel' ? '已取消' : planStatus === 'gone' ? '该计划已过期，重新执行 /undo 可生成新预览' : '执行将恢复下方文件到本轮改动前')
       const hintColor = submitError
         ? 'var(--dsw-alias-state-error-primary, #f85149)'
         : resultText || planStatus === 'applied'
@@ -319,7 +340,7 @@ globalThis.__ModuleLoader__.load({
         children: [
           jsxs('button', {
             type: 'button',
-            onClick() { setExpanded(v => !v) },
+            onClick() { toggleExpanded() },
             style: { display: 'flex', alignItems: 'center', gap: 8, width: '100%', textAlign: 'left', background: 'transparent', border: 'none', cursor: 'pointer', padding: '8px 12px', color: titleColor, fontSize: 13 },
             children: [
               jsx('span', { style: { transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform .12s', display: 'inline-block', color: 'var(--dsw-alias-label-tertiary, #8b8b8b)' }, children: '▸' }),
