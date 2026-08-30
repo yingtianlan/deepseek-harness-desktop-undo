@@ -78,7 +78,10 @@
    - 文件数上限：默认 50,000（环境变量 `TURNREWIND_MAX_FILES`）；
    - 总大小上限：默认 1 GiB（环境变量 `TURNREWIND_MAX_BYTES`）；
    - 单文件上限：64 MB（与恢复读取上限一致，超限文件永远无法恢复，因此整个工作区拒绝快照）；
+   - 目录嵌套深度 20 层、目录总数 10,000（ensureRuntime 探测层专属，`config.guard` 可覆盖）；
    - `.git`、`node_modules`、`dist`、`build`、`coverage`、`.turnrewind` 目录不计入预算。
+
+预算数值在 turn 领取守卫与 ensureRuntime 探测两层之间共用同一来源（环境变量对两层同时生效）；两条路径产生的被拒 turn 都会写入 skipped 记录并向 `/undo` 与弹窗说明原因，不存在静默拒绝。
 
 被拒绝的 turn 仍正常执行，只是不提供 undo。同时该会话会收到一条一次性提示（`[Turn rewind unavailable]`），说明工作区被拒绝的原因；每个会话只提示一次，后续 turn 不再重复打扰。提示会以两种形态呈现：
 

@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path'
 import process from 'node:process'
 import { createDialogProjection } from './core/dialog-projection.js'
 import { captureSnapshot, classifyPathChange, createSnapshotStore, currentState, diffAgainstDisk, gitAvailable, gitRef, probeWorkspace, restorePath, snapshotDiff, snapshotFileDiff, stateAt } from './core/git-snapshot.js'
-import { assessWorkspace } from './core/guard.js'
+import { assessWorkspace, defaultBudget } from './core/guard.js'
 import { claimRewindNotices, completeRedoWithNotice, completeUndoWithNotice, createOperation, failTurn, getLatestAppliedUndo, getLatestSnapshotRef, getLatestTurnSummary, getTurn, insertTurn, listReversibleTurns, markTurnSnapshotMissing, openLedger, recordSkippedTurn, registerWorkspace, settleInterruptedTurn, settleNoopTurn, settleOperation, settleTurn, skipTurn } from './core/ledger.js'
 import { classifyUndo } from './core/planner.js'
 
@@ -332,8 +332,14 @@ async function applyUndo(runtime, active, invocation) {
     return { kind: 'error', text: parsed.error }
 
   const workspaceDir = workspaceForAgent(invocation.agent)
-  if (!workspaceDir)
+  if (!workspaceDir) {
+    // The hard guard refused the cwd; report the actual reason when there is one.
+    const cwd = invocation.agent?.session?.header?.cwd
+    const assessment = typeof cwd === 'string' && cwd.length > 0 ? assessWorkspace(resolve(cwd)) : undefined
+    if (assessment && !assessment.eligible)
+      return { kind: 'error', text: `Undo is unavailable for this workspace. ${assessment.reason}` }
     return { kind: 'error', text: 'Undo is unavailable because this session has no workspace.' }
+  }
   const workspaceKey = workspaceKeyFor(workspaceDir)
   if (workspaceHasActiveTurn(active, workspaceKey)) {
     return { kind: 'error', text: 'Undo is unavailable while an Agent turn is still active in this workspace.' }
@@ -457,10 +463,15 @@ function apply(ctx, config = {}) {
   // plugin settings. Defaults keep a normal small/mid workspace trackable while
   // blocking the huge-directory disaster (node_modules-heavy repos, build trees,
   // and anything resembling $HOME).
+  // Probe limits share one source of truth with the claim-time guard: the
+  // defaultBudget values (and their TURNREWIND_* env overrides) feed the probe,
+  // so a workspace either passes both layers or gets the same numbers in both.
+  // Depth/dir caps stay probe-only (the metadata guard has no recursion caps).
+  const budget = defaultBudget()
   const guard = Object.assign({
-    maxFileCount: 10000,
-    maxTotalBytes: 512 * 1024 * 1024,
-    maxFileBytes: 50 * 1024 * 1024,
+    maxFileCount: budget.maxFiles,
+    maxTotalBytes: budget.maxTotalBytes,
+    maxFileBytes: budget.maxFileBytes,
     maxDepth: 20,
     maxDirs: 10000,
   }, config.guard)
@@ -538,8 +549,30 @@ function apply(ctx, config = {}) {
     const sessionId = payload.agent.session.id
     const key = activeKey(sessionId, payload.turn)
     const workspaceDir = workspaceForAgent(payload.agent)
-    if (!workspaceDir)
+    if (!workspaceDir) {
+      // The hard guard in workspaceForSession refused the cwd (e.g. $HOME).
+      // The turn still gets a skipped record so /undo explains why instead of
+      // pretending the session has no workspace at all.
+      const cwd = payload.agent?.session?.header?.cwd
+      if (typeof cwd === 'string' && cwd.length > 0) {
+        const assessment = assessWorkspace(resolve(cwd))
+        if (!assessment.eligible) {
+          try {
+            recordSkippedTurn(ledger, {
+              turnId: key,
+              sessionId,
+              workspaceKey: workspaceKeyFor(resolve(cwd)),
+              startedAt: new Date().toISOString(),
+            }, assessment.reason)
+          }
+          catch (error) {
+            console.error(`turnrewind: failed to record skipped turn ${key}: ${String(error)}`)
+          }
+          console.error(`turnrewind: skipped turn ${key}: ${assessment.reason}`)
+        }
+      }
       return
+    }
     const issue = workspaceIssue(workspaceDir)
     if (issue) {
       // Record the refusal and queue a one-time heads-up so the user sees why
@@ -559,8 +592,26 @@ function apply(ctx, config = {}) {
       return
     }
     const runtime = ensureRuntime(payload.agent)
-    if (!runtime)
+    if (!runtime) {
+      // Passed the metadata guard but refused by the deeper probe probe
+      // (depth/dir caps): surface that reason instead of staying silent.
+      const reason = rejectedWorkspaces.get(workspaceKeyFor(workspaceDir))
+      if (reason) {
+        try {
+          recordSkippedTurn(ledger, {
+            turnId: key,
+            sessionId,
+            workspaceKey: workspaceKeyFor(workspaceDir),
+            startedAt: new Date().toISOString(),
+          }, `TURNREWIND_WORKSPACE_TOO_LARGE: ${reason}`)
+        }
+        catch (error) {
+          console.error(`turnrewind: failed to record skipped turn ${key}: ${String(error)}`)
+        }
+        console.error(`turnrewind: skipped turn ${key}: ${reason}`)
+      }
       return
+    }
     if (runtime.undoing || active.has(key)) {
       console.error(`turnrewind: skipped turn ${key} while an undo is running or on duplicate claim`)
       return
@@ -664,14 +715,25 @@ function apply(ctx, config = {}) {
     input: { hint: '[turn-id] [--dry-run]' },
     handler: (invocation) => {
       const workspaceDir = workspaceForAgent(invocation.agent)
-      if (!workspaceDir)
+      if (!workspaceDir) {
+        // The hard guard refused the cwd; report the actual reason when there is one.
+        const cwd = invocation.agent?.session?.header?.cwd
+        const assessment = typeof cwd === 'string' && cwd.length > 0 ? assessWorkspace(resolve(cwd)) : undefined
+        if (assessment && !assessment.eligible)
+          return { kind: 'error', text: `Undo is unavailable for this workspace. ${assessment.reason}` }
         return { kind: 'error', text: 'Undo is unavailable because this session has no workspace.' }
+      }
       const issue = workspaceIssue(workspaceDir)
       if (issue)
         return { kind: 'error', text: `Undo is unavailable for this workspace. ${issue}` }
       const runtime = ensureRuntime(invocation.agent)
-      if (!runtime)
+      if (!runtime) {
+        // Refused by the deeper probe (depth/dir caps) — surface that reason.
+        const reason = rejectedWorkspaces.get(workspaceKeyFor(workspaceDir))
+        if (reason)
+          return { kind: 'error', text: `Undo is unavailable for this workspace. TURNREWIND_WORKSPACE_TOO_LARGE: ${reason}` }
         return { kind: 'error', text: 'Undo is unavailable because this session has no workspace.' }
+      }
       return applyUndo(runtime, active, invocation)
     },
   }), 'turnrewind command')
