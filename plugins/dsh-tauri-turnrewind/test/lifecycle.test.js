@@ -3,9 +3,9 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { it } from 'vitest'
-import { applyUndo } from '../lib/index.js'
 import { captureSnapshot, createSnapshotStore } from '../lib/core/git-snapshot.js'
 import { getTurn, insertTurn, openLedger, settleTurn } from '../lib/core/ledger.js'
+import { applyUndo } from '../lib/index.js'
 
 async function setupTurn() {
   const root = await mkdtemp(join(tmpdir(), 'turnrewind-lifecycle-test-'))
@@ -17,7 +17,7 @@ async function setupTurn() {
   const before = await captureSnapshot(store, 'refs/turnrewind/t1-before', 'before')
   await writeFile(join(workspace, 'a.txt'), 'v2\n')
   await writeFile(join(workspace, 'c.txt'), 'new\n')
-  const after = await captureSnapshot(store, 'refs/turnrewind/t1-after', 'after', before.commit)
+  await captureSnapshot(store, 'refs/turnrewind/t1-after', 'after', before.commit)
   insertTurn(db, {
     turnId: 'session:1',
     sessionId: 'session',

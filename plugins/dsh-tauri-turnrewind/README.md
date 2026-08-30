@@ -271,11 +271,11 @@ notice 只消费一次。下一次模型 step 后不会重复注入。
       name: dsh-tauri-turnrewind
       config:
         guard:
-          maxFileCount: 10000     # 最多追踪文件数
-          maxTotalBytes: 536870912   # 总大小上限(512MB)
-          maxFileBytes: 52428800     # 单个文件上限(50MB)
-          maxDepth: 20               # 目录嵌套深度上限
-          maxDirs: 10000             # 目录数上限
+          maxFileCount: 10000 # 最多追踪文件数
+          maxTotalBytes: 536870912 # 总大小上限(512MB)
+          maxFileBytes: 52428800 # 单个文件上限(50MB)
+          maxDepth: 20 # 目录嵌套深度上限
+          maxDirs: 10000 # 目录数上限
 ```
 
 被护栏拒绝的工作区会在日志里输出 `turnrewind: skip snapshot tracking for <dir>: <reason>`，且结果被缓存（不会每回合重扫大目录）。与 `$HOME` 防护互为兜底：会话 cwd 为家目录时直接拒绝，其他大目录由本护栏拦截。

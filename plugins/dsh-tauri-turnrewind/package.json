@@ -3,14 +3,14 @@
   "type": "module",
   "version": "0.1.0-dev.4",
   "description": "Local turn-aware workspace undo for DeepSeek Harness",
-  "main": "lib/index.js",
-  "files": ["README.md", "cordis.patch.yml", "lib"],
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
+  "main": "lib/index.js",
+  "files": ["README.md", "cordis.patch.yml", "lib"],
   "dsh": {
     "runtime": "host",
     "bundle": {

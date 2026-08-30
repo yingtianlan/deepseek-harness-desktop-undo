@@ -1,7 +1,7 @@
 import { Buffer } from 'node:buffer'
 import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import process from 'node:process'
 import { TextDecoder, TextEncoder } from 'node:util'
@@ -184,11 +184,11 @@ function isExcludedPath(relPath, isDir) {
     return EXCLUDE_DIRS.has(base)
   // Files excluded by EXCLUDE_PATHS: .env, .env.*, *.pem, *.key, id_rsa*,
   // credentials.*, secrets.*
-  if (/^\.env($|\.)/.test(base))
+  if (/^\.env(?:$|\.)/.test(base))
     return true
-  if (/\.(pem|key)$/i.test(base))
+  if (/\.(?:pem|key)$/i.test(base))
     return true
-  if (/^id_rsa/.test(base) || /^credentials\./.test(base) || /^secrets\./.test(base))
+  if (base.startsWith('id_rsa') || /^credentials\./.test(base) || /^secrets\./.test(base))
     return true
   return false
 }
@@ -406,7 +406,12 @@ export async function diffAgainstDisk(store, commit, path, maxLines) {
   if (from === to)
     return ''
   const output = await runGit(store.repoDir, store.workspaceDir, [
-    'diff', '--no-renames', '--src-prefix=snapshot/', '--dst-prefix=disk/', from, to,
+    'diff',
+    '--no-renames',
+    '--src-prefix=snapshot/',
+    '--dst-prefix=disk/',
+    from,
+    to,
   ])
   return truncateDiff(output.toString('utf8'), maxLines)
 }

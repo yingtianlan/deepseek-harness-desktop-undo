@@ -253,9 +253,11 @@ async function settleSessionTurns(ledger, active, sessionId, exceptKey, reason) 
   }
 }
 
-/** Redo the most recently applied undo. Restores each touched path to the turn's
+/**
+ * Redo the most recently applied undo. Restores each touched path to the turn's
  * after-snapshot (its post-image), but only if disk still matches the undone
- * state — otherwise the undo result would silently clobber later human edits. */
+ * state — otherwise the undo result would silently clobber later human edits.
+ */
 async function applyRedo(runtime, invocation, workspaceDir, workspaceKey) {
   const op = getLatestAppliedUndo(runtime.db, invocation.agent.session.id, workspaceKey)
   if (!op) {

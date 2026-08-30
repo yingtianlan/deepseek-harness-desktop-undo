@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { Buffer } from 'node:buffer'
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -228,7 +229,10 @@ it('probes a small workspace as trackable and refuses oversized / deep ones', as
 
     // deep nesting
     let dir = workspace
-    for (let i = 0; i < 6; i++) { dir = join(dir, 'd'); await mkdir(dir) }
+    for (let i = 0; i < 6; i++) {
+      dir = join(dir, 'd')
+      await mkdir(dir)
+    }
     const deep = probeWorkspace(workspace, { maxDepth: 3 })
     assert.equal(deep.ok, false)
     assert.match(deep.reason, /nesting depth/)
