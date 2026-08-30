@@ -12,11 +12,14 @@
 - 将快照映射记录到 `$DSH_HOME/turnrewind/ledger.sqlite`；
 - 注册人类命令 `/undo`；
 - `/undo` 只处理当前会话最新的单个可恢复 turn；
-- `/undo --dry-run` 只输出预检计划，不修改文件；
-- 恢复前比较当前文件与 turn 完成时的快照，发现变化则拒绝覆盖；
+- `/undo --dry-run` 只输出预检计划（逐文件分类：修改/新建/删除），不修改文件；
+- `/undo --preview` 额外输出每个文件撤销时将应用的 unified diff；
+- 恢复前比较当前文件与 turn 完成时的快照，发现变化则拒绝覆盖，并给出「turn 产物 → 当前磁盘」的冲突 diff；
+- 冲突可用 `--skip-conflicts`（只恢复无冲突文件）或 `--force`（强制覆盖）处理；
+- `/undo --redo` 重做最近一次已应用的 undo（磁盘在 undo 后被改动则拒绝）；
 - 同一 workspace 的活动 turn 或 undo 操作互斥；
 - 插件重启时将未完成 turn 标记为 abandoned；
-- 每次 Undo 的回退提示独立持久化；下一次模型 step 一次性注入全部 pending notice；
+- 每次 Undo/Redo 的回退提示独立持久化；下一次模型 step 一次性注入全部 pending notice；
 - 不修改用户项目的 HEAD、分支、index、stash 或提交历史。
 
 ## 使用方法
@@ -46,7 +49,11 @@
 ```text
 /undo
 /undo --dry-run
+/undo --preview
 /undo <turn-id>
+/undo --skip-conflicts
+/undo --force
+/undo --redo
 ```
 
 当前不支持：
@@ -55,7 +62,7 @@
 /undo --subtree
 ```
 
-父对话递归撤销、redo、消息旁 Undo 按钮和设置页模式切换尚未实现。
+父对话递归撤销、消息旁 Undo 按钮和设置页模式切换尚未实现。
 
 ## Undo 的工作区范围
 
@@ -189,7 +196,7 @@ Undo preflight: turn <turn-id>; 5 file(s); 5 conflict(s): 4.txt, 5.txt, 6.txt, 7
 
 Windows 的 `CRLF` 与 Unix 的 `LF` 换行差异会被文本状态比较规范化，不应单独造成冲突。二进制文件仍按原始字节比较。
 
-当前没有“跳过冲突文件”和“强制覆盖冲突文件”的用户命令；遇到冲突应先检查文件，再决定是否手动处理。
+冲突可用 `--skip-conflicts`（只恢复无冲突文件）或 `--force`（强制覆盖）处理；默认遇到冲突则拒绝并给出「人改了什么」的 diff。
 
 ## 多次 Undo 与模型提示
 
@@ -217,6 +224,27 @@ C、B、A
 notice 只消费一次。下一次模型 step 后不会重复注入。
 
 ## Git 与快照存储
+
+### 快照护栏（建 git 追踪前先预估）
+
+在创建任何私有 Git 快照仓库之前，插件会先**预估该工作区会被追踪多少内容**：统计文件数、总大小、单个最大文件、目录嵌套深度（复用与真实快照相同的排除规则，如 node_modules/.git/dist 等不统计）。只要任意一项超过配置阈值，就**不建立 git 追踪**，该工作区的 turn 不会做快照、`/undo` 也不可用（因为没有可恢复内容）。这能避免把巨大或极深的目录（node_modules 密集仓库、构建树、以及任何类似家目录的东西）整盘塞进私有仓库。
+
+阈值是插件设置，可在 profile 的 `cordis.patch.yml` 的插件 config 里调整：
+
+```yaml
+- insert:
+    - id: turnrewind
+      name: dsh-tauri-turnrewind
+      config:
+        guard:
+          maxFileCount: 10000     # 最多追踪文件数
+          maxTotalBytes: 536870912   # 总大小上限(512MB)
+          maxFileBytes: 52428800     # 单个文件上限(50MB)
+          maxDepth: 20               # 目录嵌套深度上限
+          maxDirs: 10000             # 目录数上限
+```
+
+被护栏拒绝的工作区会在日志里输出 `turnrewind: skip snapshot tracking for <dir>: <reason>`，且结果被缓存（不会每回合重扫大目录）。与 `$HOME` 防护互为兜底：会话 cwd 为家目录时直接拒绝，其他大目录由本护栏拦截。
 
 快照存放在插件私有目录：
 

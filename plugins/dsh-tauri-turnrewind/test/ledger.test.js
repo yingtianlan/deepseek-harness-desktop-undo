@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { it } from 'vitest'
-import { claimRewindNotices, completeUndoWithNotice, getLatestSnapshotRef, getLatestTurn, getTurn, insertTurn, openLedger, queueRewindNotice, settleInterruptedTurn, settleNoopTurn, settleTurn } from '../lib/core/ledger.js'
+import { claimRewindNotices, completeRedoWithNotice, completeUndoWithNotice, createOperation, getLatestAppliedUndo, getLatestSnapshotRef, getLatestTurn, getTurn, insertTurn, openLedger, queueRewindNotice, settleInterruptedTurn, settleNoopTurn, settleOperation, settleTurn } from '../lib/core/ledger.js'
 
 it('persists turn lifecycle and resumes from the latest durable snapshot', async () => {
   const root = await mkdtemp(join(tmpdir(), 'turnrewind-ledger-test-'))
@@ -209,6 +209,66 @@ it('selects an interrupted turn after a later turn is undone', async () => {
       createdAt: '2026-01-01T00:02:00.000Z',
     })
     assert.equal(getLatestTurn(db, 'session', 'workspace').turn_id, 'session:interrupted')
+  }
+  finally {
+    db.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+it('redoes an applied undo and queues a redo notice atomically', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'turnrewind-redo-test-'))
+  const db = openLedger(root)
+  try {
+    insertTurn(db, {
+      turnId: 'session:1',
+      sessionId: 'session',
+      workspaceKey: 'workspace',
+      startedAt: '2026-01-01T00:00:00.000Z',
+      beforeRef: 'refs/turnrewind/turn-1-before',
+    })
+    settleTurn(db, 'session:1', 'refs/turnrewind/turn-1-after')
+    createOperation(db, {
+      operationId: 'op-undo',
+      kind: 'undo',
+      targetTurnId: 'session:1',
+      requestedAt: '2026-01-01T00:01:00.000Z',
+      beforeRef: 'refs/turnrewind/operation-op-undo',
+    })
+    settleOperation(db, 'op-undo', 'applied')
+    completeUndoWithNotice(db, 'session:1', {
+      noticeId: 'notice-undo',
+      sessionId: 'session',
+      workspaceKey: 'workspace',
+      targetTurnId: 'session:1',
+      paths: ['a.ts'],
+      createdAt: '2026-01-01T00:01:01.000Z',
+    })
+    assert.equal(getTurn(db, 'session:1').status, 'undone')
+    assert.equal(getLatestAppliedUndo(db, 'session', 'workspace').operation_id, 'op-undo')
+
+    // The undo notice is delivered first.
+    const undoNotices = claimRewindNotices(db, 'session', 'workspace')
+    assert.equal(undoNotices.length, 1)
+    assert.equal(undoNotices[0].kind, 'undo')
+
+    completeRedoWithNotice(db, 'op-undo', 'session:1', {
+      noticeId: 'notice-redo',
+      sessionId: 'session',
+      workspaceKey: 'workspace',
+      targetTurnId: 'session:1',
+      paths: ['a.ts'],
+      createdAt: '2026-01-01T00:02:00.000Z',
+    })
+    assert.equal(getTurn(db, 'session:1').status, 'settled')
+    assert.equal(getTurn(db, 'session:1').reversible, 1)
+    // A redone operation is no longer a redo candidate.
+    assert.equal(getLatestAppliedUndo(db, 'session', 'workspace'), undefined)
+
+    const redoNotices = claimRewindNotices(db, 'session', 'workspace')
+    assert.equal(redoNotices.length, 1)
+    assert.equal(redoNotices[0].kind, 'redo')
+    assert.deepEqual(redoNotices[0].paths, ['a.ts'])
   }
   finally {
     db.close()
