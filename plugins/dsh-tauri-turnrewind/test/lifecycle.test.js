@@ -14,10 +14,10 @@ async function setupTurn() {
   await writeFile(join(workspace, 'a.txt'), 'v1\n')
   const db = openLedger(join(root, 'ledger'))
   const store = createSnapshotStore(join(root, 'data'), workspace)
-  const before = captureSnapshot(store, 'refs/turnrewind/t1-before', 'before')
+  const before = await captureSnapshot(store, 'refs/turnrewind/t1-before', 'before')
   await writeFile(join(workspace, 'a.txt'), 'v2\n')
   await writeFile(join(workspace, 'c.txt'), 'new\n')
-  const after = captureSnapshot(store, 'refs/turnrewind/t1-after', 'after', before.commit)
+  const after = await captureSnapshot(store, 'refs/turnrewind/t1-after', 'after', before.commit)
   insertTurn(db, {
     turnId: 'session:1',
     sessionId: 'session',

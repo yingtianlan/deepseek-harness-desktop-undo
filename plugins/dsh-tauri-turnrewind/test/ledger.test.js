@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { it } from 'vitest'
-import { claimRewindNotices, completeRedoWithNotice, completeUndoWithNotice, createOperation, getLatestAppliedUndo, getLatestSnapshotRef, getLatestTurn, getTurn, insertTurn, openLedger, queueRewindNotice, settleInterruptedTurn, settleNoopTurn, settleOperation, settleTurn } from '../lib/core/ledger.js'
+import { claimRewindNotices, completeRedoWithNotice, completeUndoWithNotice, createOperation, getLatestAppliedUndo, getLatestSnapshotRef, getLatestTurn, getTurn, insertTurn, listReversibleTurns, markTurnSnapshotMissing, openLedger, queueRewindNotice, recordSkippedTurn, settleInterruptedTurn, settleNoopTurn, settleOperation, settleTurn } from '../lib/core/ledger.js'
 
 it('persists turn lifecycle and resumes from the latest durable snapshot', async () => {
   const root = await mkdtemp(join(tmpdir(), 'turnrewind-ledger-test-'))
@@ -95,6 +95,33 @@ it('merges multiple pending rewind notices and delivers them once', async () => 
     assert.deepEqual(notices.map(notice => notice.turns), [['session:1'], ['session:2']])
     assert.deepEqual(notices.map(notice => notice.paths), [['src/old.ts'], ['src/new.ts']])
     assert.deepEqual(claimRewindNotices(db, 'session', 'workspace'), [])
+  }
+  finally {
+    db.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+it('records a skipped turn with a single unsupported-workspace heads-up', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'turnrewind-skip-test-'))
+  const db = openLedger(root)
+  try {
+    const turn = {
+      sessionId: 'session',
+      workspaceKey: 'c:\\users\\someone',
+      startedAt: '2026-01-01T00:00:00.000Z',
+    }
+    recordSkippedTurn(db, { ...turn, turnId: 'session:1' }, 'TURNREWIND_WORKSPACE_UNSUPPORTED: home directory')
+    recordSkippedTurn(db, { ...turn, turnId: 'session:2' }, 'TURNREWIND_WORKSPACE_UNSUPPORTED: home directory')
+    assert.equal(getTurn(db, 'session:1').status, 'skipped')
+    assert.equal(getTurn(db, 'session:2').status, 'skipped')
+    const notices = claimRewindNotices(db, 'session', 'c:\\users\\someone')
+    assert.equal(notices.length, 1)
+    assert.equal(notices[0].kind, 'unsupported')
+    assert.equal(notices[0].reason, 'TURNREWIND_WORKSPACE_UNSUPPORTED: home directory')
+    assert.equal(claimRewindNotices(db, 'session', 'c:\\users\\someone').length, 0)
+    recordSkippedTurn(db, { ...turn, turnId: 'session:3' }, 'TURNREWIND_WORKSPACE_TOO_LARGE: budget')
+    assert.equal(db.prepare(`SELECT COUNT(*) AS count FROM rewind_notices WHERE kind = 'unsupported'`).get().count, 1)
   }
   finally {
     db.close()
@@ -269,6 +296,45 @@ it('redoes an applied undo and queues a redo notice atomically', async () => {
     assert.equal(redoNotices.length, 1)
     assert.equal(redoNotices[0].kind, 'redo')
     assert.deepEqual(redoNotices[0].paths, ['a.ts'])
+  }
+  finally {
+    db.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+it('lists reversible turns newest-first and marks dead snapshots skipped', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'turnrewind-deadref-test-'))
+  const db = openLedger(root)
+  try {
+    for (const [turnId, time] of [
+      ['session:1', '2026-01-01T00:00:00.000Z'],
+      ['session:2', '2026-01-01T00:01:00.000Z'],
+      ['session:3', '2026-01-01T00:02:00.000Z'],
+    ]) {
+      insertTurn(db, {
+        turnId,
+        sessionId: 'session',
+        workspaceKey: 'workspace',
+        startedAt: time,
+        beforeRef: `refs/turnrewind/turn-${turnId}-before`,
+      })
+      settleTurn(db, turnId, `refs/turnrewind/turn-${turnId}-after`)
+    }
+    completeUndoWithNotice(db, 'session:3', {
+      noticeId: 'notice-3',
+      sessionId: 'session',
+      workspaceKey: 'workspace',
+      targetTurnId: 'session:3',
+      paths: ['a.txt'],
+      createdAt: '2026-01-01T00:03:00.000Z',
+    })
+    const candidates = listReversibleTurns(db, 'session', 'workspace')
+    assert.deepEqual(candidates.map(turn => turn.turn_id), ['session:2', 'session:1'])
+    markTurnSnapshotMissing(db, 'session:2')
+    assert.equal(getTurn(db, 'session:2').reversible, 0)
+    assert.match(getTurn(db, 'session:2').error, /snapshot repository was wiped/)
+    assert.deepEqual(listReversibleTurns(db, 'session', 'workspace').map(turn => turn.turn_id), ['session:1'])
   }
   finally {
     db.close()

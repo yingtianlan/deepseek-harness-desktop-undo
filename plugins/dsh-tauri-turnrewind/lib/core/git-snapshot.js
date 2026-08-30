@@ -1,4 +1,5 @@
-import { spawnSync } from 'node:child_process'
+import { Buffer } from 'node:buffer'
+import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
@@ -6,6 +7,12 @@ import process from 'node:process'
 import { TextDecoder, TextEncoder } from 'node:util'
 
 const MAX_FILE_BYTES = 64 * 1024 * 1024
+const MAX_OUTPUT_BYTES = 64 * 1024 * 1024
+
+// Only high-confidence sensitive names are excluded: substring rules like
+// *token* silently dropped legitimate source files (token.ts and friends) from
+// snapshots, so undo could never restore them — not even the dry-run showed
+// them, because excluded paths never enter the before/after diff.
 const EXCLUDE_PATHS = [
   ':(exclude,glob).git/**',
   ':(exclude,glob)**/.git/**',
@@ -27,47 +34,110 @@ const EXCLUDE_PATHS = [
   ':(exclude,glob)**/*.key',
   ':(exclude,glob)id_rsa*',
   ':(exclude,glob)**/id_rsa*',
-  ':(exclude,glob)credentials*',
-  ':(exclude,glob)**/credentials*',
-  ':(exclude,glob)*secret*',
-  ':(exclude,glob)**/*secret*',
-  ':(exclude,glob)*token*',
-  ':(exclude,glob)**/*token*',
+  ':(exclude,glob)credentials.*',
+  ':(exclude,glob)secrets.*',
 ]
 
-function runGit(repoDir, workspaceDir, args, extraEnv = {}) {
-  const result = spawnSync('git', ['-c', 'core.quotepath=false', '--git-dir', repoDir, '--work-tree', workspaceDir, ...args], {
-    cwd: workspaceDir,
-    encoding: 'utf8',
-    env: { ...process.env, ...extraEnv },
-    maxBuffer: 16 * 1024 * 1024,
+/**
+ * Run one git command without blocking the host event loop. All snapshot I/O
+ * used to be synchronous, which froze the whole host — every session, the web
+ * UI and the health check — for the duration of `git add` on big workspaces.
+ */
+function runGit(repoDir, workspaceDir, args, extraEnv = {}, maxBytes = MAX_OUTPUT_BYTES) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn('git', ['-c', 'core.quotepath=false', '--git-dir', repoDir, '--work-tree', workspaceDir, ...args], {
+      cwd: workspaceDir,
+      env: { ...process.env, ...extraEnv },
+    })
+    const chunks = []
+    const errors = []
+    let total = 0
+    let settled = false
+
+    const fail = (error) => {
+      if (settled)
+        return
+      settled = true
+      child.kill()
+      rejectPromise(error)
+    }
+    child.stdout.on('data', (chunk) => {
+      if (settled)
+        return
+      total += chunk.length
+      if (total > maxBytes) {
+        fail(new Error(`TURNREWIND_OUTPUT_TOO_LARGE: git output exceeded ${maxBytes} bytes`))
+        return
+      }
+      chunks.push(chunk)
+    })
+    child.stderr.on('data', (chunk) => {
+      if (!settled)
+        errors.push(chunk)
+    })
+    child.on('error', error => fail(new Error(`TURNREWIND_GIT_EXEC: ${error.message}`)))
+    child.on('close', (code) => {
+      if (settled)
+        return
+      settled = true
+      const stdout = Buffer.concat(chunks)
+      if (code !== 0) {
+        const detail = Buffer.concat(errors).toString('utf8').trim() || stdout.toString('utf8').trim() || `exit ${code}`
+        rejectPromise(new Error(`TURNREWIND_GIT_FAILED: ${detail}`))
+        return
+      }
+      resolvePromise(stdout)
+    })
   })
-  if (result.error)
-    throw new Error(`TURNREWIND_GIT_EXEC: ${result.error.message}`)
-  if (result.status !== 0) {
-    throw new Error(`TURNREWIND_GIT_FAILED: ${result.stderr.trim() || result.stdout.trim() || `exit ${result.status}`}`)
-  }
-  return result.stdout
 }
 
-function ensureRepository(repoDir, workspaceDir) {
+async function runGitText(repoDir, workspaceDir, args, extraEnv = {}) {
+  const output = await runGit(repoDir, workspaceDir, args, extraEnv)
+  return output.toString('utf8')
+}
+
+let gitProbeResult
+
+/** Resolve once per host process: whether a git executable is usable at all. */
+export function gitAvailable() {
+  gitProbeResult ??= new Promise((resolvePromise) => {
+    const child = spawn('git', ['--version'])
+    let settled = false
+    const settle = value => (settled ? undefined : (settled = true, resolvePromise(value)))
+    child.on('error', () => settle(false))
+    child.on('close', code => settle(code === 0))
+  })
+  return gitProbeResult
+}
+
+async function ensureRepository(repoDir, workspaceDir) {
   if (!existsSync(join(repoDir, 'HEAD'))) {
     mkdirSync(dirname(repoDir), { recursive: true })
-    const result = spawnSync('git', ['init', '--bare', repoDir], { encoding: 'utf8' })
-    if (result.error || result.status !== 0) {
-      throw new Error(`TURNREWIND_GIT_INIT: ${result.stderr?.trim() || result.error?.message || 'git init failed'}`)
-    }
+    await new Promise((resolvePromise, rejectPromise) => {
+      const child = spawn('git', ['init', '--bare', repoDir])
+      const errors = []
+      child.stderr.on('data', chunk => errors.push(chunk))
+      child.on('error', error => rejectPromise(new Error(`TURNREWIND_GIT_INIT: ${error.message}`)))
+      child.on('close', (code) => {
+        if (code !== 0)
+          rejectPromise(new Error(`TURNREWIND_GIT_INIT: ${Buffer.concat(errors).toString('utf8').trim() || 'git init failed'}`))
+        else
+          resolvePromise()
+      })
+    })
   }
-  runGit(repoDir, workspaceDir, ['config', 'core.bare', 'false'])
-  runGit(repoDir, workspaceDir, ['config', 'core.worktree', workspaceDir])
+  await runGitText(repoDir, workspaceDir, ['config', 'core.bare', 'false'])
+  await runGitText(repoDir, workspaceDir, ['config', 'core.worktree', workspaceDir])
 }
 
-function gitRef(repoDir, workspaceDir, ref) {
-  const result = spawnSync('git', ['-c', 'core.quotepath=false', '--git-dir', repoDir, 'rev-parse', '--verify', ref], {
-    cwd: workspaceDir,
-    encoding: 'utf8',
-  })
-  return result.status === 0 ? result.stdout.trim() : undefined
+async function gitRef(repoDir, workspaceDir, ref) {
+  try {
+    const output = await runGitText(repoDir, workspaceDir, ['rev-parse', '--verify', ref])
+    return output.trim()
+  }
+  catch {
+    return undefined
+  }
 }
 
 function assertSafePath(workspaceDir, path) {
@@ -98,10 +168,10 @@ export function workspaceHash(workspaceDir) {
   return createHash('sha256').update(identity).digest('hex').slice(0, 24)
 }
 
+/** Pure path computation; the repository itself is ensured lazily on capture. */
 export function createSnapshotStore(rootDir, workspaceDir) {
   const normalizedWorkspace = resolve(workspaceDir)
   const repoDir = join(rootDir, 'snapshots', `${workspaceHash(normalizedWorkspace)}.git`)
-  ensureRepository(repoDir, normalizedWorkspace)
   return { repoDir, workspaceDir: normalizedWorkspace }
 }
 
@@ -112,12 +182,13 @@ function isExcludedPath(relPath, isDir) {
   const base = basename(relPath)
   if (isDir)
     return EXCLUDE_DIRS.has(base)
-  // Files excluded by EXCLUDE_PATHS: .env, .env.*, *.pem, *.key, id_rsa*, credentials*, *secret*, *token*
+  // Files excluded by EXCLUDE_PATHS: .env, .env.*, *.pem, *.key, id_rsa*,
+  // credentials.*, secrets.*
   if (/^\.env($|\.)/.test(base))
     return true
   if (/\.(pem|key)$/i.test(base))
     return true
-  if (/^id_rsa/.test(base) || /^credentials/.test(base) || /secret/i.test(base) || /token/i.test(base))
+  if (/^id_rsa/.test(base) || /^credentials\./.test(base) || /^secrets\./.test(base))
     return true
   return false
 }
@@ -198,17 +269,27 @@ export function probeWorkspace(workspaceDir, limits = {}) {
   return { ok: true, fileCount, totalBytes, maxFileBytes: largestFile, maxDepth: deepest, dirCount }
 }
 
-/** Capture a complete allowed-path tree, incrementally reusing the parent tree. */
-export function captureSnapshot(store, refName, message, parentRef) {
+/**
+ * Capture a complete allowed-path tree, incrementally reusing the parent tree.
+ * A missing parent (wiped snapshot directory, moved DSH_HOME) degrades to a
+ * fresh baseline instead of failing every future turn.
+ */
+export async function captureSnapshot(store, refName, message, parentRef) {
   const { repoDir, workspaceDir } = store
-  ensureRepository(repoDir, workspaceDir)
+  await ensureRepository(repoDir, workspaceDir)
+  let parent
+  if (parentRef) {
+    parent = await gitRef(repoDir, workspaceDir, parentRef)
+    if (!parent)
+      console.warn(`turnrewind: snapshot parent ${parentRef} is gone; building a fresh baseline for ${workspaceDir}`)
+  }
   const indexPath = join(repoDir, `turnrewind-index-${randomUUID()}`)
   try {
     const env = { GIT_INDEX_FILE: indexPath }
-    if (parentRef)
-      runGit(repoDir, workspaceDir, ['read-tree', parentRef], env)
-    runGit(repoDir, workspaceDir, ['add', '--all', '--', '.', ...snapshotPathspecs()], env)
-    const tree = runGit(repoDir, workspaceDir, ['write-tree'], env).trim()
+    if (parent)
+      await runGit(repoDir, workspaceDir, ['read-tree', parent], env)
+    await runGit(repoDir, workspaceDir, ['add', '--all', '--', '.', ...snapshotPathspecs()], env)
+    const tree = (await runGit(repoDir, workspaceDir, ['write-tree'], env)).toString('utf8').trim()
     const identity = {
       GIT_AUTHOR_NAME: 'DSH Turn Rewind',
       GIT_AUTHOR_EMAIL: 'turnrewind@localhost',
@@ -216,10 +297,10 @@ export function captureSnapshot(store, refName, message, parentRef) {
       GIT_COMMITTER_EMAIL: 'turnrewind@localhost',
     }
     const args = ['commit-tree', tree, '-m', message]
-    if (parentRef)
-      args.push('-p', parentRef)
-    const commit = runGit(repoDir, workspaceDir, args, { ...env, ...identity }).trim()
-    runGit(repoDir, workspaceDir, ['update-ref', refName, commit])
+    if (parent)
+      args.push('-p', parent)
+    const commit = (await runGit(repoDir, workspaceDir, args, { ...env, ...identity })).toString('utf8').trim()
+    await runGit(repoDir, workspaceDir, ['update-ref', refName, commit])
     return { commit, refName }
   }
   finally {
@@ -227,9 +308,9 @@ export function captureSnapshot(store, refName, message, parentRef) {
   }
 }
 
-export function snapshotDiff(store, beforeCommit, afterCommit) {
-  const output = runGit(store.repoDir, store.workspaceDir, ['diff', '--name-only', '--no-renames', beforeCommit, afterCommit])
-  return [...new Set(output.split(/\r?\n/).map(value => value.trim()).filter(Boolean))]
+export async function snapshotDiff(store, beforeCommit, afterCommit) {
+  const output = await runGit(store.repoDir, store.workspaceDir, ['diff', '--name-only', '--no-renames', beforeCommit, afterCommit])
+  return [...new Set(output.toString('utf8').split(/\r?\n/).map(value => value.trim()).filter(Boolean))]
 }
 
 const DEFAULT_MAX_DIFF_LINES = 120
@@ -241,10 +322,35 @@ function truncateDiff(text, maxLines = DEFAULT_MAX_DIFF_LINES) {
   return `${lines.slice(0, maxLines).join('\n')}\n… (${lines.length - maxLines} more line(s) truncated)`
 }
 
+/** Run one git command with data piped to stdin (e.g. hash-object -w --stdin). */
+function runGitStdin(repoDir, workspaceDir, args, input) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn('git', ['-c', 'core.quotepath=false', '--git-dir', repoDir, '--work-tree', workspaceDir, ...args], {
+      cwd: workspaceDir,
+      env: { ...process.env },
+    })
+    const chunks = []
+    const errors = []
+    child.stdout.on('data', chunk => chunks.push(chunk))
+    child.stderr.on('data', chunk => errors.push(chunk))
+    child.on('error', error => rejectPromise(new Error(`TURNREWIND_GIT_EXEC: ${error.message}`)))
+    child.on('close', (code) => {
+      if (code !== 0) {
+        rejectPromise(new Error(`TURNREWIND_GIT_FAILED: ${Buffer.concat(errors).toString('utf8').trim() || `exit ${code}`}`))
+        return
+      }
+      resolvePromise(Buffer.concat(chunks))
+    })
+    // Ignore EPIPE if git exits before consuming all input.
+    child.stdin.on('error', () => {})
+    child.stdin.end(input)
+  })
+}
+
 /** Classify how one path changed between two snapshots: created, deleted, or modified. */
-export function classifyPathChange(store, beforeCommit, afterCommit, path) {
-  const before = stateAt(store, beforeCommit, path)
-  const after = stateAt(store, afterCommit, path)
+export async function classifyPathChange(store, beforeCommit, afterCommit, path) {
+  const before = await stateAt(store, beforeCommit, path)
+  const after = await stateAt(store, afterCommit, path)
   if (before.kind === 'absent' && after.kind === 'file')
     return 'created'
   if (before.kind === 'file' && after.kind === 'absent')
@@ -253,51 +359,37 @@ export function classifyPathChange(store, beforeCommit, afterCommit, path) {
 }
 
 /** Unified diff of one path between two snapshot commits, truncated to maxLines. */
-export function snapshotFileDiff(store, fromCommit, toCommit, path, maxLines) {
-  const output = runGit(store.repoDir, store.workspaceDir, ['diff', '--no-renames', fromCommit, toCommit, '--', path])
-  return truncateDiff(output, maxLines)
+export async function snapshotFileDiff(store, fromCommit, toCommit, path, maxLines) {
+  const output = await runGit(store.repoDir, store.workspaceDir, ['diff', '--no-renames', fromCommit, toCommit, '--', path])
+  return truncateDiff(output.toString('utf8'), maxLines)
 }
 
 // The well-known empty blob is not pre-populated in a fresh private repo, so
 // write it on first use (its hash is always e69de29bb2d1d6434b8b29ae775ad8c2e48c5391).
-function ensureEmptyBlob(store) {
+async function ensureEmptyBlob(store) {
   if (!store.emptyBlob) {
-    const result = spawnSync('git', ['--git-dir', store.repoDir, 'hash-object', '-w', '--stdin'], {
-      cwd: store.workspaceDir,
-      input: '',
-      encoding: 'utf8',
-    })
-    if (result.error || result.status !== 0)
-      throw new Error(`TURNREWIND_GIT_HASH: empty blob: ${result.stderr?.trim() || result.error?.message}`)
-    store.emptyBlob = result.stdout.trim()
+    const output = await runGitStdin(store.repoDir, store.workspaceDir, ['hash-object', '-w', '--stdin'], '')
+    store.emptyBlob = output.toString('utf8').trim()
   }
   return store.emptyBlob
 }
 
-function blobFor(store, commit, path) {
-  if (!commitEntry(store, commit, path))
+async function blobFor(store, commit, path) {
+  if (!await commitEntry(store, commit, path))
     return ensureEmptyBlob(store)
-  return runGit(store.repoDir, store.workspaceDir, ['rev-parse', `${commit}:${path}`]).trim()
+  const output = await runGit(store.repoDir, store.workspaceDir, ['rev-parse', `${commit}:${path}`])
+  return output.toString('utf8').trim()
 }
 
-function hashDiskFile(store, workspaceDir, path) {
+async function hashDiskFile(store, workspaceDir, path) {
   const target = assertSafePath(workspaceDir, path)
   if (!existsSync(target))
     return ensureEmptyBlob(store)
   const info = lstatSync(target)
   if (!info.isFile() || info.size > MAX_FILE_BYTES)
     return undefined
-  const result = spawnSync('git', ['--git-dir', store.repoDir, 'hash-object', '-w', '--stdin'], {
-    cwd: workspaceDir,
-    input: readFileSync(target),
-    encoding: 'utf8',
-    maxBuffer: MAX_FILE_BYTES,
-  })
-  if (result.error)
-    throw new Error(`TURNREWIND_GIT_HASH: ${path}: ${result.error.message}`)
-  if (result.status !== 0)
-    throw new Error(`TURNREWIND_GIT_HASH: ${path}: ${result.stderr.trim()}`)
-  return result.stdout.trim()
+  const output = await runGitStdin(store.repoDir, store.workspaceDir, ['hash-object', '-w', '--stdin'], readFileSync(target))
+  return output.toString('utf8').trim()
 }
 
 /**
@@ -306,37 +398,29 @@ function hashDiskFile(store, workspaceDir, path) {
  * content an undo would overwrite. The disk content is hashed into the private
  * snapshot repo; the user's own repository is never touched.
  */
-export function diffAgainstDisk(store, commit, path, maxLines) {
-  const from = blobFor(store, commit, path)
-  const to = hashDiskFile(store, store.workspaceDir, path)
+export async function diffAgainstDisk(store, commit, path, maxLines) {
+  const from = await blobFor(store, commit, path)
+  const to = await hashDiskFile(store, store.workspaceDir, path)
   if (to === undefined)
     return '(current file is not a regular file or exceeds the size limit)'
   if (from === to)
     return ''
-  const output = runGit(store.repoDir, store.workspaceDir, [
+  const output = await runGit(store.repoDir, store.workspaceDir, [
     'diff', '--no-renames', '--src-prefix=snapshot/', '--dst-prefix=disk/', from, to,
   ])
-  return truncateDiff(output, maxLines)
+  return truncateDiff(output.toString('utf8'), maxLines)
 }
 
-function commitEntry(store, commit, path) {
-  const output = runGit(store.repoDir, store.workspaceDir, ['ls-tree', '-r', '--name-only', commit, '--', path])
-  return output.split(/\r?\n/).includes(path)
+async function commitEntry(store, commit, path) {
+  const output = await runGit(store.repoDir, store.workspaceDir, ['ls-tree', '-r', '--name-only', commit, '--', path])
+  return output.toString('utf8').split(/\r?\n/).includes(path)
 }
 
-function commitBytes(store, commit, path) {
-  const result = spawnSync('git', ['--git-dir', store.repoDir, 'show', `${commit}:${path}`], {
-    cwd: store.workspaceDir,
-    encoding: null,
-    maxBuffer: MAX_FILE_BYTES,
-  })
-  if (result.error)
-    throw new Error(`TURNREWIND_GIT_READ: ${path}: ${result.error.message}`)
-  if (result.status !== 0)
-    throw new Error(`TURNREWIND_GIT_READ: ${path}`)
-  if (result.stdout.length > MAX_FILE_BYTES)
+async function commitBytes(store, commit, path) {
+  const output = await runGit(store.repoDir, store.workspaceDir, ['show', `${commit}:${path}`], {}, MAX_FILE_BYTES + 1)
+  if (output.length > MAX_FILE_BYTES)
     throw new Error(`TURNREWIND_FILE_TOO_LARGE: ${path}`)
-  return result.stdout
+  return output
 }
 
 function digest(bytes) {
@@ -351,13 +435,12 @@ function digest(bytes) {
   return createHash('sha256').update(comparable).digest('hex')
 }
 
-export function stateAt(store, commit, path) {
-  // Never inspect state through a path that escapes the workspace or passes
-  // through a symlink; treat it as unsupported input instead.
-  assertSafePath(store.workspaceDir, path)
-  if (!commitEntry(store, commit, path))
+export async function stateAt(store, commit, path) {
+  // stateAt only inspects the private snapshot repo (commit:path revisions),
+  // never the filesystem, so a symlinked or odd path simply reads as absent.
+  if (!await commitEntry(store, commit, path))
     return { kind: 'absent', digest: null }
-  const bytes = commitBytes(store, commit, path)
+  const bytes = await commitBytes(store, commit, path)
   return { kind: 'file', digest: digest(bytes) }
 }
 
@@ -371,9 +454,9 @@ export function currentState(workspaceDir, path) {
   return { kind: 'file', digest: digest(readFileSync(target)) }
 }
 
-export function restorePath(store, commit, path) {
+export async function restorePath(store, commit, path) {
   const target = assertSafePath(store.workspaceDir, path)
-  if (!commitEntry(store, commit, path)) {
+  if (!await commitEntry(store, commit, path)) {
     if (existsSync(target)) {
       const info = lstatSync(target)
       if (info.isSymbolicLink() || (!info.isFile() && !info.isDirectory()))
@@ -383,7 +466,7 @@ export function restorePath(store, commit, path) {
     return { path, result: 'removed' }
   }
 
-  const bytes = commitBytes(store, commit, path)
+  const bytes = await commitBytes(store, commit, path)
   mkdirSync(dirname(target), { recursive: true })
   const temp = `${target}.turnrewind-${randomUUID()}.tmp`
   writeFileSync(temp, bytes, { flag: 'wx' })

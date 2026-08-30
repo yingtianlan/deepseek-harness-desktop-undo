@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -43,6 +44,8 @@ const SCHEMA = `
     target_turn_id TEXT NOT NULL,
     turns_json TEXT NOT NULL DEFAULT '[]',
     paths_json TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'rewind',
+    reason TEXT,
     status TEXT NOT NULL,
     created_at TEXT NOT NULL,
     claimed_at TEXT
@@ -69,7 +72,13 @@ export function openLedger(rootDir) {
     // Column already exists.
   }
   try {
-    db.exec('ALTER TABLE rewind_notices ADD COLUMN kind TEXT NOT NULL DEFAULT \'undo\'')
+    db.exec('ALTER TABLE rewind_notices ADD COLUMN kind TEXT NOT NULL DEFAULT \'rewind\'')
+  }
+  catch {
+    // Column already exists.
+  }
+  try {
+    db.exec('ALTER TABLE rewind_notices ADD COLUMN reason TEXT')
   }
   catch {
     // Column already exists.
@@ -106,6 +115,52 @@ export function settleInterruptedTurn(db, turnId, afterRef, reason) {
 export function settleNoopTurn(db, turnId, afterRef) {
   db.prepare(`UPDATE turns SET status = 'settled', settled_at = ?, after_ref = ?, reversible = 0, error = ? WHERE turn_id = ?`)
     .run(new Date().toISOString(), afterRef, 'no file changes', turnId)
+}
+
+export function skipTurn(db, turn, reason) {
+  db.prepare(`
+    INSERT OR REPLACE INTO turns(turn_id, session_id, parent_turn_id, workspace_key, status, started_at, reversible, error)
+    VALUES (?, ?, NULL, ?, 'skipped', ?, 0, ?)
+  `).run(turn.turnId, turn.sessionId, turn.workspaceKey, turn.startedAt, reason)
+}
+
+export function listReversibleTurns(db, sessionId, workspaceKey) {
+  return db.prepare(`
+    SELECT * FROM turns
+    WHERE session_id = ? AND workspace_key = ?
+      AND reversible = 1
+      AND status IN ('settled', 'interrupted')
+    ORDER BY started_at DESC
+  `).all(sessionId, workspaceKey)
+}
+
+export function markTurnSnapshotMissing(db, turnId) {
+  db.prepare(`
+    UPDATE turns SET reversible = 0, error = 'snapshot ref missing (snapshot repository was wiped)'
+    WHERE turn_id = ?
+  `).run(turnId)
+}
+
+export function recordSkippedTurn(db, turn, reason) {
+  db.exec('BEGIN')
+  try {
+    skipTurn(db, turn, reason)
+    // Queue one heads-up per session and workspace; repeated skips stay silent.
+    const existing = db.prepare(`
+      SELECT 1 FROM rewind_notices WHERE session_id = ? AND workspace_key = ? AND kind = 'unsupported' LIMIT 1
+    `).get(turn.sessionId, turn.workspaceKey)
+    if (!existing) {
+      db.prepare(`
+        INSERT INTO rewind_notices(notice_id, session_id, workspace_key, target_turn_id, turns_json, paths_json, kind, reason, status, created_at)
+        VALUES (?, ?, ?, 'workspace-unsupported', '[]', '[]', 'unsupported', ?, 'pending', ?)
+      `).run(randomUUID(), turn.sessionId, turn.workspaceKey, reason, new Date().toISOString())
+    }
+    db.exec('COMMIT')
+  }
+  catch (error) {
+    db.exec('ROLLBACK')
+    throw error
+  }
 }
 
 export function failTurn(db, turnId, error) {
