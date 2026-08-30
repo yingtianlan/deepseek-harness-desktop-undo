@@ -622,6 +622,8 @@ function apply(ctx, config = {}) {
         return [404, { error: 'plan expired or already applied — run /undo again' }]
       if (row.session_id !== sessionId)
         return [403, { error: 'the plan belongs to another session' }]
+      if (row.status !== 'pending')
+        return [409, { error: 'this plan was already applied or cancelled — run /undo again' }]
       const planRuntime = workspaceStores.get(row.workspace_key)
       if (planRuntime === undefined)
         return [409, { error: 'the host restarted since this preview; run /undo again' }]

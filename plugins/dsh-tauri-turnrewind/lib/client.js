@@ -208,14 +208,19 @@ globalThis.__ModuleLoader__.load({
       const [submitted, setSubmitted] = React.useState(null)
       const [submitError, setSubmitError] = React.useState(null)
       const [resultText, setResultText] = React.useState(null)
+      // The plan's persisted status is the source of truth: it survives page
+      // reloads, so the card state (buttons vs applied vs cancelled) rebuilds
+      // from it instead of from in-memory React state.
+      const [planStatus, setPlanStatus] = React.useState(null)
 
-      // The confirm route executes server-side and records the outcome on the
-      // plan row; poll until the result lands so the card shows it in place.
+      // Poll the plan status: immediately on mount (a reload must rebuild the
+      // card from the persisted state) and until the plan settles.
       React.useEffect(() => {
-        if (submitted !== 'confirm' || !parsed.planId)
+        if (state !== 'ok' || !parsed.planId)
           return
         let stop = false
-        const timer = setInterval(async () => {
+        let timer = null
+        async function check() {
           if (stop)
             return
           try {
@@ -223,27 +228,32 @@ globalThis.__ModuleLoader__.load({
             const payload = await res.json().catch(() => ({}))
             if (stop || res.ok === false)
               return
+            setPlanStatus(payload.status)
             if (payload.status === 'applied') {
               setResultText(payload.resultText ?? '已执行')
               clearInterval(timer)
             }
             else if (payload.status === 'cancelled') {
-              setSubmitted('cancel')
               clearInterval(timer)
             }
           }
           catch {}
-        }, 1500)
+        }
+        void check()
+        timer = setInterval(check, 1500)
         return () => {
           stop = true
-          clearInterval(timer)
+          if (timer !== null)
+            clearInterval(timer)
         }
-      }, [submitted, parsed.planId])
+      }, [state, parsed.planId])
 
       const titleColor = state === 'error' ? 'var(--dsw-alias-state-error-primary, #f85149)' : 'var(--dsw-alias-label-primary, #cccccc)'
-      const showBody = expanded && (hasDiff || parsed.files.length > 0)
-      // Buttons only on a pending preview (plan id present, command finished).
-      const actionable = parsed.planId !== undefined && state === 'ok'
+      // Cancelled/expired plans collapse to a minimal red card: no file list,
+      // no diffs, no buttons — nothing that a refresh could resurrect.
+      const collapsed = planStatus === 'cancelled' || planStatus === 'gone'
+      const showBody = expanded && !collapsed && (hasDiff || parsed.files.length > 0)
+      const actionable = parsed.planId !== undefined && state === 'ok' && !collapsed && (planStatus === null || planStatus === 'pending')
 
       async function submit(kind) {
         if (submitted || !parsed.planId)
@@ -256,20 +266,22 @@ globalThis.__ModuleLoader__.load({
           setSubmitError(failure)
         else
           setSubmitted(kind)
+        if (kind === 'cancel')
+          setPlanStatus('cancelled')
       }
 
       const confirmLabel = submitted === 'confirm' ? '已提交执行确认' : '✓ 执行撤销'
       const cancelLabel = submitted === 'cancel' ? '已取消' : '✕ 取消'
       const hint = submitError
         ? `执行确认失败：${submitError}`
-        : resultText || (submitted === 'confirm'
+        : resultText || (planStatus === 'applied' || submitted === 'confirm'
           ? '已提交，等待执行结果…'
-          : submitted === 'cancel' ? '已取消' : '执行将恢复下方文件到本轮改动前')
+          : planStatus === 'cancelled' || submitted === 'cancel' ? 'undo 已取消' : planStatus === 'gone' ? '该计划已过期，重新执行 /undo 可生成新预览' : '执行将恢复下方文件到本轮改动前')
       const hintColor = submitError
         ? 'var(--dsw-alias-state-error-primary, #f85149)'
-        : resultText
+        : resultText || planStatus === 'applied'
           ? 'var(--dsw-alias-state-success-primary, #3fb950)'
-          : 'var(--dsw-alias-label-tertiary, #8b8b8b)'
+          : 'var(--dsw-alias-state-error-primary, #f85149)'
 
       return jsxs('div', {
         style: { border: `1px solid ${DIFF_COLORS.border}`, background: 'var(--dsw-alias-bg-layer-1, transparent)', borderRadius: 12, margin: '4px 0 4px 4px', overflow: 'hidden', maxWidth: '100%' },
@@ -316,7 +328,12 @@ globalThis.__ModuleLoader__.load({
                   jsx('span', { style: { color: hintColor, fontSize: 11.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, children: hint }),
                 ],
               })
-            : null,
+            : collapsed
+              ? jsx('div', {
+                  style: { borderTop: `1px solid ${DIFF_COLORS.border}`, padding: '6px 12px', color: hintColor, fontSize: 11.5 },
+                  children: hint,
+                })
+              : null,
         ],
       })
     }
