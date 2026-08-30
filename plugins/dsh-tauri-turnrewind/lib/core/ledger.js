@@ -57,6 +57,8 @@ const SCHEMA = `
     workspace_key TEXT NOT NULL,
     turn_id TEXT NOT NULL,
     paths_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    result_text TEXT,
     created_at TEXT NOT NULL,
     expires_at TEXT NOT NULL
   );
@@ -92,6 +94,18 @@ export function openLedger(rootDir) {
   catch {
     // Column already exists.
   }
+  try {
+    db.exec('ALTER TABLE pending_plans ADD COLUMN status TEXT NOT NULL DEFAULT \'pending\'')
+  }
+  catch {
+    // Column already exists.
+  }
+  try {
+    db.exec('ALTER TABLE pending_plans ADD COLUMN result_text TEXT')
+  }
+  catch {
+    // Column already exists.
+  }
   db.exec(`UPDATE turns SET status = 'abandoned', reversible = 0, error = 'plugin restarted during active turn' WHERE status = 'active'`)
   purgeExpiredPendingPlans(db)
   return db
@@ -103,9 +117,14 @@ export function openLedger(rootDir) {
 // ignored preview can never apply hours later against a changed workspace.
 // ------------------------------------------------------------------
 const PENDING_PLAN_TTL_MS = 5 * 60 * 1000
+const PENDING_PLAN_RESULT_TTL_MS = 30 * 60 * 1000
 
 export function purgeExpiredPendingPlans(db) {
-  db.prepare('DELETE FROM pending_plans WHERE expires_at < ?').run(new Date().toISOString())
+  const now = new Date().toISOString()
+  // Unacted plans die at their 5-minute mark; settled plans linger for the
+  // client card to poll their outcome, then get cleaned up too.
+  db.prepare('DELETE FROM pending_plans WHERE status = \'pending\' AND expires_at < ?').run(now)
+  db.prepare('DELETE FROM pending_plans WHERE status <> \'pending\' AND created_at < ?').run(new Date(Date.now() - PENDING_PLAN_RESULT_TTL_MS).toISOString())
 }
 
 export function createPendingPlan(db, plan) {
@@ -132,7 +151,7 @@ export function createPendingPlan(db, plan) {
 export function getPendingPlan(db, planId, sessionId, workspaceKey) {
   const row = db.prepare(`
     SELECT * FROM pending_plans
-    WHERE plan_id = ? AND session_id = ? AND workspace_key = ?
+    WHERE plan_id = ? AND session_id = ? AND workspace_key = ? AND status = 'pending'
   `).get(planId, sessionId, workspaceKey)
   if (row === undefined)
     return undefined
@@ -167,10 +186,32 @@ export function deletePendingPlan(db, planId, sessionId, workspaceKey) {
 }
 
 /** Dismissal from the ✕ button: workspace key is unknown client-side. */
-export function cancelPendingPlan(db, planId, sessionId) {
-  const result = db.prepare('DELETE FROM pending_plans WHERE plan_id = ? AND session_id = ?')
-    .run(planId, sessionId)
+export function markPendingPlanCancelled(db, planId, sessionId) {
+  const result = db.prepare(`
+    UPDATE pending_plans SET status = 'cancelled'
+    WHERE plan_id = ? AND session_id = ? AND status = 'pending'
+  `).run(planId, sessionId)
   return result.changes > 0
+}
+
+/** Outcome written by the confirm route so the client card can poll it. */
+export function markPendingPlanApplied(db, planId, sessionId, message) {
+  db.prepare(`
+    UPDATE pending_plans SET status = 'applied', result_text = ?
+    WHERE plan_id = ? AND session_id = ? AND status = 'pending'
+  `).run(message, planId, sessionId)
+}
+
+/** Poll face for the client card: undefined once purged, else the outcome. */
+export function getPendingPlanStatus(db, planId) {
+  const row = db.prepare('SELECT status, result_text, expires_at FROM pending_plans WHERE plan_id = ?').get(planId)
+  if (row === undefined)
+    return undefined
+  if (row.status === 'pending' && row.expires_at < new Date().toISOString()) {
+    db.prepare('DELETE FROM pending_plans WHERE plan_id = ? AND status = \'pending\'').run(planId)
+    return undefined
+  }
+  return { status: row.status, resultText: row.result_text }
 }
 
 export function registerWorkspace(db, workspaceKey, workspacePath, snapshotRepo) {

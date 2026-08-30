@@ -207,6 +207,38 @@ globalThis.__ModuleLoader__.load({
       const [expanded, setExpanded] = React.useState(hasDiff)
       const [submitted, setSubmitted] = React.useState(null)
       const [submitError, setSubmitError] = React.useState(null)
+      const [resultText, setResultText] = React.useState(null)
+
+      // The confirm route executes server-side and records the outcome on the
+      // plan row; poll until the result lands so the card shows it in place.
+      React.useEffect(() => {
+        if (submitted !== 'confirm' || !parsed.planId)
+          return
+        let stop = false
+        const timer = setInterval(async () => {
+          if (stop)
+            return
+          try {
+            const res = await fetch(`/api/turnrewind/status?planId=${encodeURIComponent(parsed.planId)}`)
+            const payload = await res.json().catch(() => ({}))
+            if (stop || res.ok === false)
+              return
+            if (payload.status === 'applied') {
+              setResultText(payload.resultText ?? '已执行')
+              clearInterval(timer)
+            }
+            else if (payload.status === 'cancelled') {
+              setSubmitted('cancel')
+              clearInterval(timer)
+            }
+          }
+          catch {}
+        }, 1500)
+        return () => {
+          stop = true
+          clearInterval(timer)
+        }
+      }, [submitted, parsed.planId])
 
       const titleColor = state === 'error' ? 'var(--dsw-alias-state-error-primary, #f85149)' : 'var(--dsw-alias-label-primary, #cccccc)'
       const showBody = expanded && (hasDiff || parsed.files.length > 0)
@@ -230,9 +262,14 @@ globalThis.__ModuleLoader__.load({
       const cancelLabel = submitted === 'cancel' ? '已取消' : '✕ 取消'
       const hint = submitError
         ? `执行确认失败：${submitError}`
-        : submitted === 'confirm'
-          ? '已提交，执行结果见下方新的 undo 卡片'
-          : submitted === 'cancel' ? '已取消' : '执行将恢复下方文件到本轮改动前'
+        : resultText || (submitted === 'confirm'
+          ? '已提交，等待执行结果…'
+          : submitted === 'cancel' ? '已取消' : '执行将恢复下方文件到本轮改动前')
+      const hintColor = submitError
+        ? 'var(--dsw-alias-state-error-primary, #f85149)'
+        : resultText
+          ? 'var(--dsw-alias-state-success-primary, #3fb950)'
+          : 'var(--dsw-alias-label-tertiary, #8b8b8b)'
 
       return jsxs('div', {
         style: { border: `1px solid ${DIFF_COLORS.border}`, background: 'var(--dsw-alias-bg-layer-1, transparent)', borderRadius: 12, margin: '4px 0 4px 4px', overflow: 'hidden', maxWidth: '100%' },
@@ -276,7 +313,7 @@ globalThis.__ModuleLoader__.load({
                     children: cancelLabel,
                   }),
                   jsx('span', { style: { flex: 1 } }),
-                  jsx('span', { style: { color: submitError ? 'var(--dsw-alias-state-error-primary, #f85149)' : 'var(--dsw-alias-label-tertiary, #8b8b8b)', fontSize: 11.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, children: hint }),
+                  jsx('span', { style: { color: hintColor, fontSize: 11.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, children: hint }),
                 ],
               })
             : null,

@@ -5,7 +5,7 @@ import process from 'node:process'
 import { createDialogProjection } from './core/dialog-projection.js'
 import { captureSnapshot, classifyPathChange, createSnapshotStore, currentState, diffAgainstDisk, gitAvailable, gitRef, probeWorkspace, restorePath, snapshotDiff, snapshotFileDiff, stateAt } from './core/git-snapshot.js'
 import { assessWorkspace, defaultBudget } from './core/guard.js'
-import { cancelPendingPlan, claimRewindNotices, completeRedoWithNotice, completeUndoWithNotice, createOperation, createPendingPlan, deletePendingPlan, failTurn, getLatestAppliedUndo, getLatestSnapshotRef, getLatestTurnSummary, getPendingPlan, getPendingPlanRow, getTurn, insertTurn, listReversibleTurns, markTurnSnapshotMissing, openLedger, recordSkippedTurn, registerWorkspace, settleInterruptedTurn, settleNoopTurn, settleOperation, settleTurn, skipTurn } from './core/ledger.js'
+import { claimRewindNotices, completeRedoWithNotice, completeUndoWithNotice, createOperation, createPendingPlan, failTurn, getLatestAppliedUndo, getLatestSnapshotRef, getLatestTurnSummary, getPendingPlan, getPendingPlanRow, getPendingPlanStatus, getTurn, insertTurn, listReversibleTurns, markPendingPlanApplied, markPendingPlanCancelled, markTurnSnapshotMissing, openLedger, recordSkippedTurn, registerWorkspace, settleInterruptedTurn, settleNoopTurn, settleOperation, settleTurn, skipTurn } from './core/ledger.js'
 import { classifyUndo } from './core/planner.js'
 
 const name = 'dsh-tauri-turnrewind'
@@ -462,10 +462,10 @@ async function applyUndo(runtime, active, invocation) {
   if (parsed.redo)
     return applyRedo(runtime, invocation, workspaceDir, workspaceKey)
 
-  // Pending-plan lifecycle: --cancel drops a parked plan; --confirm validates
-  // it and falls through to execution below.
+  // Pending-plan lifecycle: --cancel marks a parked plan cancelled; --confirm
+  // validates it and falls through to execution below.
   if (parsed.cancel) {
-    const removed = deletePendingPlan(runtime.db, parsed.turnId, invocation.agent.session.id, workspaceKey)
+    const removed = markPendingPlanCancelled(runtime.db, parsed.turnId, invocation.agent.session.id)
     return { kind: 'success', text: removed ? 'Pending undo cancelled.' : 'No pending undo plan matched (it may have expired or already run).' }
   }
 
@@ -554,9 +554,6 @@ async function applyUndo(runtime, active, invocation) {
     if (parsed.confirm && conflicts.length > 0)
       return { kind: 'error', text: `The workspace changed since the preview (${conflicts.length} conflicted file(s)). Run /undo again to refresh the plan; use --force/--skip-conflicts deliberately if needed.` }
 
-    // Take the plan before writing: a double-click confirm finds the row gone.
-    if (parsed.confirm)
-      deletePendingPlan(runtime.db, parsed.turnId, invocation.agent.session.id, workspaceKey)
     try {
       const text = await executeUndoRestore(runtime, {
         sessionId: invocation.agent.session.id,
@@ -566,6 +563,8 @@ async function applyUndo(runtime, active, invocation) {
         entries,
         skipConflicts: parsed.skipConflicts,
       })
+      if (parsed.confirm)
+        markPendingPlanApplied(runtime.db, parsed.turnId, invocation.agent.session.id, text)
       return { kind: 'success', text }
     }
     catch (error) {
@@ -636,14 +635,13 @@ function apply(ctx, config = {}) {
             return [409, { error: 'the planned turn\u0027s snapshot data no longer exists — run /undo again' }]
           const paths = await snapshotDiff(planRuntime.store, target.before_ref, target.after_ref)
           if (paths.length === 0) {
-            deletePendingPlan(ledger, planId, sessionId, row.workspace_key)
+            markPendingPlanApplied(ledger, planId, sessionId, 'No file changes were recorded for this turn.')
             return [200, { ok: true, message: 'No file changes were recorded for this turn.' }]
           }
           const entries = await buildPlanEntries(planRuntime, planRuntime.workspaceDir, target, paths)
           const conflicts = entries.filter(entry => entry.conflict)
           if (conflicts.length > 0)
             return [409, { error: `the workspace changed since the preview (${conflicts.length} conflicted file(s)) — run /undo again to refresh the plan` }]
-          deletePendingPlan(ledger, planId, sessionId, row.workspace_key)
           const message = await executeUndoRestore(planRuntime, {
             sessionId,
             workspaceKey: row.workspace_key,
@@ -652,6 +650,7 @@ function apply(ctx, config = {}) {
             entries,
             skipConflicts: false,
           })
+          markPendingPlanApplied(ledger, planId, sessionId, message)
           return [200, { ok: true, message }]
         }
         finally {
@@ -665,13 +664,25 @@ function apply(ctx, config = {}) {
       const sessionId = String(body.sessionId ?? '')
       if (planId === '' || sessionId === '')
         return [400, { error: 'planId and sessionId are required' }]
-      const removed = cancelPendingPlan(ledger, planId, sessionId)
+      const removed = markPendingPlanCancelled(ledger, planId, sessionId)
       return [200, { ok: true, message: removed ? 'Pending undo cancelled.' : 'No pending plan matched (it may have expired).' }]
+    }
+
+    function statusRoute(body, req) {
+      const url = new URL(req.url ?? '/', 'http://localhost')
+      const planId = String(url.searchParams.get('planId') ?? '')
+      if (planId === '')
+        return [400, { error: 'planId is required' }]
+      const status = getPendingPlanStatus(ledger, planId)
+      if (status === undefined)
+        return [404, { error: 'plan expired or already applied — run /undo again' }]
+      return [200, status]
     }
 
     const routes = [
       jsonRoute('/api/turnrewind/confirm', confirmRoute, { mutate: true }),
       jsonRoute('/api/turnrewind/cancel', cancelRoute, { mutate: true }),
+      jsonRoute('/api/turnrewind/status', statusRoute),
     ]
     const disposers = routes.map(route => ctx.webServer.register(route))
     return () => disposers.map(dispose => dispose())
