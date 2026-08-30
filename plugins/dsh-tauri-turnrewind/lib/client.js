@@ -1,10 +1,7 @@
 // dsh-tauri-turnrewind — client bundle (browser).
 //
-// One module, two jobs:
-// 1. Renders the `/undo` command card in the `conversation.chat.commandview`
-//    slot with a diff-aware view (deletions red, additions green).
-// 2. Raises the in-app "undo unavailable" dialog when the current session
-//    carries the unsupported-workspace heads-up injected by the host.
+// Raises the in-app "undo unavailable" dialog when the current session
+// carries the unsupported-workspace heads-up injected by the host.
 //
 // Hand-written against the DSH client module contract:
 //   window.__ModuleLoader__.load({ id, factory }) where factory receives a
@@ -14,156 +11,15 @@
 // The module id MUST normalize to the bare package name: the client module
 // system strips a trailing `/client` and the boot manifest imports the plugin
 // under its package name, so this factory is what the manifest materializes.
-// Registering a second module under another suffix would never be imported
-// by anything and its apply() would silently never run.
+// Command output renders with the harness's native command card on purpose —
+// no custom renderer, so errors show in the native red style.
 globalThis.__ModuleLoader__.load({
   id: 'dsh-tauri-turnrewind/client',
-  factory: (require) => {
+  factory: () => {
     const module = { exports: {} }
     const exports = module.exports
-    const React = require('react')
-    const jsxRuntime = require('react/jsx-runtime')
-    const jsx = jsxRuntime.jsx
-    const jsxs = jsxRuntime.jsxs
 
-    const inject = ['slots', 'sessions', 'locale']
-
-    // ------------------------------------------------------------------
-    // /undo command card: unified-diff line classification.
-    // ------------------------------------------------------------------
-    function classifyLine(raw) {
-      const line = raw
-      if (/^\s*diff --git /.test(line))
-        return { kind: 'meta', text: line.trim() }
-      if (/^\s*index /.test(line))
-        return { kind: 'meta', text: line.trim() }
-      if (/^\s*---\s+a\//.test(line))
-        return { kind: 'meta', text: line.trim() }
-      if (/^\s*\+\+\+\s+b\//.test(line))
-        return { kind: 'meta', text: line.trim() }
-      if (/^\s*@@/.test(line))
-        return { kind: 'hunk', text: line.trim() }
-      if (/^\s*-/.test(line))
-        return { kind: 'del', text: line.replace(/^\s*-/, '') }
-      if (/^\s*\+/.test(line))
-        return { kind: 'add', text: line.replace(/^\s*\+/, '') }
-      return { kind: 'ctx', text: line.replace(/^\s+/, '') }
-    }
-
-    function isDiffLine(raw) {
-      return /^\s*(?:diff --git |index |--- |\+\+\+ |@@|-[^-]|\+[^+]|-$|\+$)/.test(raw)
-    }
-
-    // A "section separator" we emit in the preview, e.g. "--- undo-demo.txt".
-    function isFileSeparator(raw) {
-      return /^---\s+(?!a\/)\S/.test(raw)
-    }
-
-    // ------------------------------------------------------------------
-    // /undo command card: rendering.
-    // ------------------------------------------------------------------
-    const COLORS = {
-      delBg: 'rgba(248,81,73,0.16)',
-      delSign: '#f85149',
-      addBg: 'rgba(46,160,67,0.16)',
-      addSign: '#3fb950',
-      hunk: '#79b8ff',
-      meta: '#8b949e',
-      ctx: '#c9d1d9',
-      border: '#30363d',
-      bg: 'var(--dsw-alias-markdown-code-block, #161b22)',
-      label: 'var(--dsw-alias-label-tertiary, #8b949e)',
-      title: 'var(--dsw-alias-label-secondary, #c9d1d9)',
-    }
-
-    function diffLineStyle(kind) {
-      switch (kind) {
-        case 'del': return { background: COLORS.delBg, color: COLORS.ctx }
-        case 'add': return { background: COLORS.addBg, color: COLORS.ctx }
-        case 'hunk': return { color: COLORS.hunk }
-        case 'meta': return { color: COLORS.meta }
-        default: return { color: COLORS.ctx }
-      }
-    }
-
-    function signFor(kind) {
-      if (kind === 'del')
-        return '-'
-      if (kind === 'add')
-        return '+'
-      return ' '
-    }
-
-    function DiffLine(props) {
-      const entry = props.entry
-      const style = diffLineStyle(entry.kind)
-      return jsxs('div', {
-        style: Object.assign(
-          { display: 'flex', fontFamily: 'var(--ds-font-family-code, monospace)', fontSize: '12.5px', lineHeight: '20px', paddingLeft: 8, paddingRight: 8, whiteSpace: 'pre-wrap', wordBreak: 'break-all' },
-          style,
-        ),
-        children: [
-          jsx('span', {
-            style: { width: 16, flex: 'none', color: entry.kind === 'del' ? COLORS.delSign : entry.kind === 'add' ? COLORS.addSign : COLORS.meta, userSelect: 'none' },
-            children: signFor(entry.kind),
-          }),
-          jsx('span', { style: { flex: 1 }, children: entry.text }),
-        ],
-      })
-    }
-
-    function UndoCommandView(props) {
-      const node = props.node || {}
-      const outcome = node.outcome
-      const text = outcome && typeof outcome.text === 'string' ? outcome.text : ''
-      const state = outcome == null ? 'running' : outcome.kind === 'error' ? 'error' : 'ok'
-      const summary = text ? text.split('\n')[0] : (state === 'error' ? '失败' : state === 'running' ? '运行中' : '已完成')
-      const body = text.includes('\n') ? text : null
-      const [expanded, setExpanded] = React.useState(body !== null)
-
-      const lines = body ? body.split('\n') : []
-      const rows = []
-      for (let i = 0; i < lines.length; i++) {
-        const raw = lines[i]
-        if (isFileSeparator(raw)) {
-          rows.push(jsx('div', {
-            style: { fontFamily: 'var(--ds-font-family-code, monospace)', fontSize: '12.5px', lineHeight: '20px', paddingLeft: 8, paddingRight: 8, color: COLORS.title, fontWeight: 600 },
-            children: raw.replace(/^---\s+/, ''),
-          }, `fs${i}`))
-        }
-        else if (isDiffLine(raw)) {
-          rows.push(jsx(DiffLine, { entry: classifyLine(raw) }, `l${i}`))
-        }
-        else {
-          rows.push(jsx('div', {
-            style: { fontFamily: 'var(--ds-font-family-code, monospace)', fontSize: '12.5px', lineHeight: '20px', paddingLeft: 8, paddingRight: 8, color: COLORS.label, whiteSpace: 'pre-wrap', wordBreak: 'break-word' },
-            children: raw,
-          }, `p${i}`))
-        }
-      }
-
-      return jsxs('div', {
-        style: { border: `1px solid ${COLORS.border}`, background: COLORS.bg, borderRadius: 12, margin: '4px 0 4px 4px', overflow: 'hidden', maxWidth: '100%' },
-        children: [
-          jsxs('button', {
-            type: 'button',
-            onClick() { setExpanded(v => !v) },
-            style: { display: 'flex', alignItems: 'center', gap: 8, width: '100%', textAlign: 'left', background: 'transparent', border: 'none', cursor: 'pointer', padding: '8px 12px', color: COLORS.title, fontSize: 13 },
-            children: [
-              jsx('span', { style: { transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform .12s', display: 'inline-block', color: COLORS.label }, children: '▸' }),
-              jsx('span', { style: { fontWeight: 500 }, children: node.name || 'undo' }),
-              jsx('span', { style: { color: COLORS.label, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, minWidth: 0 }, children: summary }),
-            ],
-          }),
-          expanded && body !== null
-            ? jsx('div', {
-                style: { borderTop: `1px solid ${COLORS.border}`, paddingTop: 8, paddingBottom: 8, maxHeight: 340, overflow: 'auto' },
-                children: rows,
-              })
-            : null,
-        ],
-      })
-    }
+    const inject = ['sessions', 'locale']
 
     // ------------------------------------------------------------------
     // Unsupported-workspace dialog: storage, DOM, and runner.
@@ -211,17 +67,12 @@ globalThis.__ModuleLoader__.load({
 
     let dialog
 
-    function dialogPalette() {
-      const dark = globalThis.matchMedia?.('(prefers-color-scheme: dark)')?.matches ?? false
-      return dark
-        ? { card: '#1f2937', text: '#f9fafb', muted: '#9ca3af', box: '#111827', boxBorder: '#374151', backdrop: 'rgba(2, 6, 23, 0.6)', button: '#6366f1', buttonText: '#ffffff' }
-        : { card: '#ffffff', text: '#111827', muted: '#6b7280', box: '#f3f4f6', boxBorder: '#e5e7eb', backdrop: 'rgba(15, 23, 42, 0.45)', button: '#4f46e5', buttonText: '#ffffff' }
-    }
-
     function ensureDialog() {
       if (dialog)
         return dialog
-      const colors = dialogPalette()
+      // Colors are app theme tokens (with hardcoded fallbacks), so the dialog
+      // follows the in-app light/dark theme live — inline `var()` re-resolves
+      // when the theme switches, no rebuild needed.
       const backdrop = document.createElement('div')
       backdrop.setAttribute('role', 'presentation')
       Object.assign(backdrop.style, {
@@ -231,7 +82,7 @@ globalThis.__ModuleLoader__.load({
         zIndex: '2147483000',
         alignItems: 'center',
         justifyContent: 'center',
-        background: colors.backdrop,
+        background: 'var(--dsw-alias-bg-mask-1, rgba(0, 0, 0, 0.45))',
       })
 
       const card = document.createElement('div')
@@ -241,31 +92,38 @@ globalThis.__ModuleLoader__.load({
         maxWidth: '440px',
         width: 'calc(100vw - 48px)',
         boxSizing: 'border-box',
-        background: colors.card,
-        color: colors.text,
+        background: 'var(--dsw-alias-bg-layer-1, #ffffff)',
+        color: 'var(--dsw-alias-label-primary, #111111)',
+        border: '1px solid var(--dsw-alias-border-l2, #e5e5e5)',
         borderRadius: '12px',
         padding: '20px 22px',
         fontFamily: 'inherit',
         fontSize: '13px',
         lineHeight: '1.6',
-        boxShadow: '0 20px 50px rgba(0, 0, 0, 0.3)',
+        boxShadow: '0 20px 50px rgba(0, 0, 0, 0.25)',
       })
 
       const title = document.createElement('div')
-      Object.assign(title.style, { fontSize: '15px', fontWeight: '600', marginBottom: '10px' })
+      Object.assign(title.style, {
+        fontSize: '15px',
+        fontWeight: '600',
+        marginBottom: '10px',
+        color: 'var(--dsw-alias-state-error-primary, #d03050)',
+      })
 
       const intro = document.createElement('div')
+      Object.assign(intro.style, { color: 'var(--dsw-alias-label-secondary, #333333)' })
 
       const reasonLabel = document.createElement('div')
-      Object.assign(reasonLabel.style, { marginTop: '12px', color: colors.muted, fontSize: '12px' })
+      Object.assign(reasonLabel.style, { marginTop: '12px', color: 'var(--dsw-alias-label-tertiary, #8b8b8b)', fontSize: '12px' })
 
       const reasonBox = document.createElement('div')
       Object.assign(reasonBox.style, {
         marginTop: '6px',
         padding: '8px 10px',
         borderRadius: '8px',
-        background: colors.box,
-        border: `1px solid ${colors.boxBorder}`,
+        background: 'var(--dsw-alias-bg-layer-2, #f5f5f5)',
+        border: '1px solid var(--dsw-alias-border-l2, #e5e5e5)',
         wordBreak: 'break-all',
         whiteSpace: 'pre-wrap',
         maxHeight: '160px',
@@ -277,13 +135,19 @@ globalThis.__ModuleLoader__.load({
       const button = document.createElement('button')
       button.type = 'button'
       Object.assign(button.style, {
-        background: colors.button,
-        color: colors.buttonText,
+        background: 'var(--dsw-alias-button-primary-fill, #4f46e5)',
+        color: 'var(--dsw-alias-label-primary-foreground, #ffffff)',
         border: 'none',
         borderRadius: '8px',
         padding: '6px 18px',
         fontSize: '13px',
         cursor: 'pointer',
+      })
+      button.addEventListener('mouseover', () => {
+        button.style.background = 'var(--dsw-alias-button-primary-hover, #4338ca)'
+      })
+      button.addEventListener('mouseout', () => {
+        button.style.background = 'var(--dsw-alias-button-primary-fill, #4f46e5)'
       })
       actions.appendChild(button)
 
@@ -315,22 +179,10 @@ globalThis.__ModuleLoader__.load({
     }
 
     // ------------------------------------------------------------------
-    // Plugin apply: both features share the one cordis plugin this bundle
-    // materializes into (the boot manifest imports the package name).
+    // Plugin apply.
     // ------------------------------------------------------------------
     function apply(ctx) {
-      console.warn('[turnrewind] client apply: command view + dialog runner starting')
-
-      ctx.effect(() => {
-        ctx.slots.inject('conversation.chat.commandview', () => {
-          return ctx.slots.register({
-            name: 'conversation.chat.commandview',
-            key: 'undo',
-          }, UndoCommandView)
-        })
-      }, 'turnrewind command view')
-
-      // Unsupported-workspace heads-up runner.
+      console.warn('[turnrewind] client apply: dialog runner starting')
       ctx.effect(() => ctx.locale.register(NS, dictionaries), 'turnrewind locale')
       const t = ctx.locale.bind(NS)
       // Read through the service store, not the ctx.sessions property proxy:
