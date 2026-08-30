@@ -254,20 +254,34 @@ globalThis.__ModuleLoader__.load({
       const collapsed = planStatus === 'cancelled' || planStatus === 'gone'
       const showBody = expanded && !collapsed && (hasDiff || parsed.files.length > 0)
       const actionable = parsed.planId !== undefined && state === 'ok' && !collapsed && (planStatus === null || planStatus === 'pending')
+      // A synchronous ref guard closes the re-render gap: React state updates
+      // land a tick later, so fast double-clicks would both pass a state-only
+      // check and fire two confirm requests.
+      const submittingRef = React.useRef(false)
 
       async function submit(kind) {
-        if (submitted || !parsed.planId)
+        if (submittingRef.current || submitted || !parsed.planId)
           return
-        const line = kind === 'confirm'
-          ? `/undo --confirm ${parsed.planId}`
-          : `/undo --cancel ${parsed.planId}`
-        const failure = submitLine ? await submitLine(line) : 'submit channel unavailable'
-        if (failure)
-          setSubmitError(failure)
-        else
-          setSubmitted(kind)
-        if (kind === 'cancel')
-          setPlanStatus('cancelled')
+        submittingRef.current = true
+        try {
+          const line = kind === 'confirm'
+            ? `/undo --confirm ${parsed.planId}`
+            : `/undo --cancel ${parsed.planId}`
+          const failure = submitLine ? await submitLine(line) : 'submit channel unavailable'
+          if (failure) {
+            setSubmitError(failure)
+            submittingRef.current = false
+          }
+          else {
+            setSubmitted(kind)
+          }
+          if (kind === 'cancel')
+            setPlanStatus('cancelled')
+        }
+        catch (error) {
+          submittingRef.current = false
+          setSubmitError(String(error?.message ?? error))
+        }
       }
 
       const confirmLabel = submitted === 'confirm' ? '已提交执行确认' : '✓ 执行撤销'
