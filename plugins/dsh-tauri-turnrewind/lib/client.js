@@ -78,11 +78,11 @@ globalThis.__ModuleLoader__.load({
     // ------------------------------------------------------------------
     const DIFF_COLORS = {
       delBg: 'rgba(248, 81, 73, 0.26)',
-      addBg: 'rgba(63, 185, 80, 0.24)',
+      addBg: 'rgba(63, 185, 80, 0.38)',
       del: 'var(--dsw-alias-state-error-primary, #f85149)',
       add: 'var(--dsw-alias-state-success-primary, #3fb950)',
       delText: 'var(--dsw-alias-state-error-primary, #ffb3ab)',
-      addText: 'var(--dsw-alias-state-success-primary, #7ee287)',
+      addText: 'var(--dsw-alias-state-success-primary, #8ff0a4)',
       hunk: 'var(--dsw-alias-label-tertiary, #8b8b8b)',
       meta: 'var(--dsw-alias-label-dimmed, #8b8b8b)',
       text: 'var(--dsw-alias-label-secondary, #cccccc)',
