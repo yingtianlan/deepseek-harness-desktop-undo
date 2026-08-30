@@ -284,7 +284,7 @@ globalThis.__ModuleLoader__.load({
         }
       }
 
-      const confirmLabel = submitted === 'confirm' ? '已提交执行确认' : '✓ 执行撤销'
+      const confirmLabel = submitted === 'confirm' ? '已提交执行确认' : '✓ 执行'
       const cancelLabel = submitted === 'cancel' ? '已取消' : '✕ 取消'
       const hint = submitError
         ? `执行确认失败：${submitError}`
