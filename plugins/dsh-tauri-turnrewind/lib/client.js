@@ -295,7 +295,7 @@ globalThis.__ModuleLoader__.load({
         ? 'var(--dsw-alias-state-error-primary, #f85149)'
         : resultText || planStatus === 'applied'
           ? 'var(--dsw-alias-state-success-primary, #3fb950)'
-          : 'var(--dsw-alias-state-error-primary, #f85149)'
+          : 'var(--dsw-alias-label-secondary, #333333)'
       // Buttons live only in the actionable footer; the outcome/error hint line
       // must survive after the plan settles, or the success note disappears.
       const showFooter = actionable || resultText !== null || submitError !== null || submitted !== null || planStatus === 'applied'
