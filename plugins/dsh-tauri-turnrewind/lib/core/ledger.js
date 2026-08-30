@@ -143,6 +143,22 @@ export function getPendingPlan(db, planId, sessionId, workspaceKey) {
   return { turnId: row.turn_id, paths: JSON.parse(row.paths_json), createdAt: row.created_at }
 }
 
+/**
+ * Plan lookup for the confirm HTTP route: keyed by plan id only — the client
+ * does not know the workspace key, the row itself carries it (and the owner
+ * session, which the route re-checks against the caller).
+ */
+export function getPendingPlanRow(db, planId) {
+  const row = db.prepare('SELECT * FROM pending_plans WHERE plan_id = ?').get(planId)
+  if (row === undefined)
+    return undefined
+  if (row.expires_at < new Date().toISOString()) {
+    db.prepare('DELETE FROM pending_plans WHERE plan_id = ?').run(planId)
+    return undefined
+  }
+  return { ...row, paths: JSON.parse(row.paths_json) }
+}
+
 export function deletePendingPlan(db, planId, sessionId, workspaceKey) {
   const result = db.prepare(`
     DELETE FROM pending_plans WHERE plan_id = ? AND session_id = ? AND workspace_key = ?
