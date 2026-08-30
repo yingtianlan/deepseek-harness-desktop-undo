@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
+import { Buffer } from 'node:buffer'
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { it } from 'vitest'
-import { captureSnapshot, createSnapshotStore, currentState, gitAvailable, restorePath, snapshotDiff, stateAt } from '../lib/core/git-snapshot.js'
+import { captureSnapshot, classifyPathChange, createSnapshotStore, currentState, diffAgainstDisk, gitAvailable, probeWorkspace, restorePath, snapshotDiff, snapshotFileDiff, stateAt } from '../lib/core/git-snapshot.js'
 import { completeUndoWithNotice, getLatestTurn, insertTurn, openLedger, settleInterruptedTurn, settleTurn } from '../lib/core/ledger.js'
 
 it('captures and restores modified, added, and deleted files', async () => {
@@ -129,12 +130,118 @@ it('does not treat CRLF conversion as a file conflict', async () => {
   }
 })
 
+it('classifies path changes and produces codex-style diffs', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'turnrewind-diff-test-'))
+  const workspace = join(root, 'workspace')
+  try {
+    await mkdir(workspace, { recursive: true })
+    await writeFile(join(workspace, 'modified.txt'), 'one\ntwo\n')
+    await writeFile(join(workspace, 'deleted.txt'), 'gone\n')
+
+    const store = createSnapshotStore(join(root, 'data'), workspace)
+    const before = await captureSnapshot(store, 'refs/turnrewind/diff-before', 'before')
+    await writeFile(join(workspace, 'modified.txt'), 'one\nTWO\n')
+    await rm(join(workspace, 'deleted.txt'))
+    await writeFile(join(workspace, 'created.txt'), 'fresh\n')
+    const after = await captureSnapshot(store, 'refs/turnrewind/diff-after', 'after', before.commit)
+
+    assert.equal(await classifyPathChange(store, before.commit, after.commit, 'modified.txt'), 'modified')
+    assert.equal(await classifyPathChange(store, before.commit, after.commit, 'created.txt'), 'created')
+    assert.equal(await classifyPathChange(store, before.commit, after.commit, 'deleted.txt'), 'deleted')
+
+    // The undo diff is the reverse of the turn's change.
+    const undoDiff = await snapshotFileDiff(store, after.commit, before.commit, 'modified.txt')
+    assert.match(undoDiff, /-TWO/u)
+    assert.match(undoDiff, /\+two/u)
+
+    // Disk still matches the snapshot: no human changes to report.
+    assert.equal(await diffAgainstDisk(store, after.commit, 'modified.txt'), '')
+    // A human edit after the turn shows up as what an undo would overwrite.
+    await writeFile(join(workspace, 'modified.txt'), 'one\nHUMAN\n')
+    const conflictDiff = await diffAgainstDisk(store, after.commit, 'modified.txt')
+    assert.match(conflictDiff, /-TWO/u)
+    assert.match(conflictDiff, /\+HUMAN/u)
+    // A file deleted after the turn diffs against the empty blob.
+    await rm(join(workspace, 'modified.txt'))
+    assert.match(await diffAgainstDisk(store, after.commit, 'modified.txt'), /-one/u)
+  }
+  finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+it('truncates long unified diffs', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'turnrewind-truncate-test-'))
+  const workspace = join(root, 'workspace')
+  try {
+    await mkdir(workspace, { recursive: true })
+    await writeFile(join(workspace, 'big.txt'), 'old\n')
+    const store = createSnapshotStore(join(root, 'data'), workspace)
+    const before = await captureSnapshot(store, 'refs/turnrewind/truncate-before', 'before')
+    const lines = Array.from({ length: 500 }, (_, index) => `line-${index}`).join('\n')
+    await writeFile(join(workspace, 'big.txt'), `${lines}\n`)
+    const after = await captureSnapshot(store, 'refs/turnrewind/truncate-after', 'after', before.commit)
+    const diff = await snapshotFileDiff(store, before.commit, after.commit, 'big.txt', 50)
+    assert.ok(diff.split('\n').length <= 52)
+    assert.match(diff, /truncated/u)
+  }
+  finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 it('rejects paths outside the workspace', async () => {
   const root = await mkdtemp(join(tmpdir(), 'turnrewind-path-test-'))
   const workspace = join(root, 'workspace')
   try {
     await mkdir(workspace, { recursive: true })
     assert.throws(() => currentState(workspace, '../outside.txt'), /TURNREWIND_PATH_ESCAPE/)
+  }
+  finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+it('probes a small workspace as trackable and refuses oversized / deep ones', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'turnrewind-probe-'))
+  const workspace = join(root, 'ws')
+  try {
+    await mkdir(workspace, { recursive: true })
+    await writeFile(join(workspace, 'a.txt'), 'hello')
+    await writeFile(join(workspace, 'b.txt'), 'world')
+    // ok: 2 small files
+    const small = probeWorkspace(workspace)
+    assert.equal(small.ok, true)
+    assert.equal(small.fileCount, 2)
+
+    // too many files
+    for (let i = 0; i < 6; i++) await writeFile(join(workspace, `f${i}.txt`), 'x')
+    const many = probeWorkspace(workspace, { maxFileCount: 4 })
+    assert.equal(many.ok, false)
+    assert.match(many.reason, /file count/)
+
+    // single oversized file
+    const big = join(workspace, 'big.bin')
+    await writeFile(big, Buffer.alloc(300))
+    const large = probeWorkspace(workspace, { maxFileBytes: 100 })
+    assert.equal(large.ok, false)
+    assert.match(large.reason, /larger than limit/)
+
+    // deep nesting
+    let dir = workspace
+    for (let i = 0; i < 6; i++) {
+      dir = join(dir, 'd')
+      await mkdir(dir)
+    }
+    const deep = probeWorkspace(workspace, { maxDepth: 3 })
+    assert.equal(deep.ok, false)
+    assert.match(deep.reason, /nesting depth/)
+
+    // excluded dirs (node_modules, .git) are not counted
+    await mkdir(join(workspace, 'node_modules'), { recursive: true })
+    await writeFile(join(workspace, 'node_modules', 'huge.bin'), Buffer.alloc(1000))
+    const withExcluded = probeWorkspace(workspace, { maxFileBytes: 500 })
+    assert.equal(withExcluded.ok, true, 'excluded dirs must not be counted')
   }
   finally {
     await rm(root, { recursive: true, force: true })

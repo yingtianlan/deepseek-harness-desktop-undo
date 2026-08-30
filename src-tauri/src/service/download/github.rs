@@ -421,7 +421,14 @@ pub async fn fetch_dsh_pkg_asset(tag: &str) -> Result<LatestDshPkg, String> {
 /// tag 约定为 `dsh-<version>-<commit 后缀>`；格式不符时返回 `None`，
 /// 调用方据此回退到仅 commit 比对的旧行为，避免误判。
 pub fn parse_version_from_tag(tag: &str) -> Option<String> {
-    let version = tag.strip_prefix("dsh-")?.rsplit_once('-')?.0;
+    let rest = tag.strip_prefix("dsh-")?;
+    // 2026-08 起预发布 tag 改为 `dsh-src-<version>-<build-id>`（如
+    // `dsh-src-0.1.2-alpha.1-33260039971`）。不剥这层前缀会解析出
+    // `src-<version>`，semver 失败 → is_preview_tag 误判预发布为稳定版，
+    // 限流兜底路径会把 alpha 的摘要套在 latest（rc）的包上触发
+    // INTEGRITY_CHECK_FAILED。
+    let rest = rest.strip_prefix("src-").unwrap_or(rest);
+    let version = rest.rsplit_once('-')?.0;
     (!version.is_empty()).then(|| version.to_string())
 }
 
@@ -715,6 +722,11 @@ mod tests {
             parse_version_from_tag("dsh-0.1.0-rc.6-31773193667").as_deref(),
             Some("0.1.0-rc.6")
         );
+        // dsh-src- 前缀（2026-08 起的预发布命名）
+        assert_eq!(
+            parse_version_from_tag("dsh-src-0.1.2-alpha.1-33260039971").as_deref(),
+            Some("0.1.2-alpha.1")
+        );
         assert_eq!(parse_version_from_tag("dsh-0.2.0"), None);
         assert_eq!(parse_version_from_tag("0.1.0-rc.7-abc"), None);
         assert_eq!(parse_version_from_tag(""), None);
@@ -728,6 +740,10 @@ mod tests {
         assert!(is_preview_tag("dsh-0.2.0-alpha.2-32490000003"));
         assert!(is_preview_tag("dsh-0.2.0-canary.1-32490000004"));
         assert!(is_preview_tag("dsh-0.2.0-next.3-32490000005"));
+        // dsh-src- 前缀的新预发布命名同样必须识别为预览版（否则限流兜底会把
+        // alpha 摘要套在 latest rc 包上，触发 INTEGRITY_CHECK_FAILED）
+        assert!(is_preview_tag("dsh-src-0.1.2-alpha.1-33260039971"));
+        assert!(is_preview_tag("dsh-src-0.1.2-beta.1-33258015186"));
         // rc 不算预览版：pkg 仓库的 rc 发布会正常推送用户更新
         assert!(!is_preview_tag("dsh-0.1.1-rc.2-32485170079"));
         assert!(!is_preview_tag("dsh-0.1.0-rc.8-32342588166"));

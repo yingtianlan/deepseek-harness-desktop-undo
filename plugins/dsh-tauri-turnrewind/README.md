@@ -12,16 +12,19 @@
 - 将快照映射记录到 `$DSH_HOME/ledger.sqlite`；
 - **git 全程异步执行**：快照、diff、恢复都不阻塞 Host 事件循环；同一会话的捕获/结算按 FIFO 串行，不同会话并行；
 - **git 可用性探测**：系统没有 git 时，turn 显式记为 `skipped`（原因 `TURNREWIND_GIT_UNAVAILABLE`），而不是静默失败；
-- **快照链自愈**：私有快照仓库被删/损坏后，下一次捕获自动降级重建基线（日志有一条 warning），后续 turn 照常可撤销；
+- **快照链自愈**：私有快照仓库被删/损坏后，下一次捕获自动降级重建基线（日志有一条 warning），后续 turn 照常可撤销；被清空前留下来的旧 turn 会在 `/undo` 选目标时自动识别为死快照并标记跳过（`snapshot ref missing`），不会甩出 git 原始报错；
 - **工作区资格守卫**：家目录、家目录的祖先、盘根目录，以及超过快照预算（文件数 / 总大小 / 单文件大小）的目录不做快照，turn 记为 `skipped` 并向 `/undo` 说明原因（见「工作区资格与快照预算」）；
 - **不可用弹窗**：客户端半（`lib/client.js`）通过 `turnrewind` 会话投影检测到不可用提示时，在 Web UI 内弹出模态对话框（中英双语、每个浏览器只弹一次）；
 - 注册人类命令 `/undo`；
 - `/undo` 只处理当前会话最新的单个可恢复 turn；
-- `/undo --dry-run` 只输出预检计划，不修改文件；
-- 恢复前比较当前文件与 turn 完成时的快照，发现变化则拒绝覆盖；
+- `/undo --dry-run` 只输出预检计划（逐文件分类：修改/新建/删除），不修改文件；
+- `/undo --preview` 额外输出每个文件撤销时将应用的 unified diff；
+- 恢复前比较当前文件与 turn 完成时的快照，发现变化则拒绝覆盖，并给出「turn 产物 → 当前磁盘」的冲突 diff；
+- 冲突可用 `--skip-conflicts`（只恢复无冲突文件）或 `--force`（强制覆盖）处理；
+- `/undo --redo` 重做最近一次已应用的 undo（磁盘在 undo 后被改动则拒绝）；
 - 同一 workspace 的活动 turn 或 undo 操作互斥；
 - 插件重启时将未完成 turn 标记为 abandoned；
-- 每次 Undo 的回退提示独立持久化；下一次模型 step 一次性注入全部 pending notice；
+- 每次 Undo/Redo 的回退提示独立持久化；下一次模型 step 一次性注入全部 pending notice；
 - 不修改用户项目的 HEAD、分支、index、stash 或提交历史。
 
 ## 使用方法
@@ -51,7 +54,11 @@
 ```text
 /undo
 /undo --dry-run
+/undo --preview
 /undo <turn-id>
+/undo --skip-conflicts
+/undo --force
+/undo --redo
 ```
 
 当前不支持：
@@ -60,7 +67,7 @@
 /undo --subtree
 ```
 
-父对话递归撤销、redo、消息旁 Undo 按钮和设置页模式切换尚未实现。
+父对话递归撤销、消息旁 Undo 按钮和设置页模式切换尚未实现。
 
 ## 工作区资格与快照预算
 
@@ -71,7 +78,10 @@
    - 文件数上限：默认 50,000（环境变量 `TURNREWIND_MAX_FILES`）；
    - 总大小上限：默认 1 GiB（环境变量 `TURNREWIND_MAX_BYTES`）；
    - 单文件上限：64 MB（与恢复读取上限一致，超限文件永远无法恢复，因此整个工作区拒绝快照）；
+   - 目录嵌套深度 20 层、目录总数 10,000（ensureRuntime 探测层专属，`config.guard` 可覆盖）；
    - `.git`、`node_modules`、`dist`、`build`、`coverage`、`.turnrewind` 目录不计入预算。
+
+预算数值在 turn 领取守卫与 ensureRuntime 探测两层之间共用同一来源（环境变量对两层同时生效）；两条路径产生的被拒 turn 都会写入 skipped 记录并向 `/undo` 与弹窗说明原因，不存在静默拒绝。
 
 被拒绝的 turn 仍正常执行，只是不提供 undo。同时该会话会收到一条一次性提示（`[Turn rewind unavailable]`），说明工作区被拒绝的原因；每个会话只提示一次，后续 turn 不再重复打扰。提示会以两种形态呈现：
 
@@ -223,7 +233,7 @@ Undo preflight: turn <turn-id>; 5 file(s); 5 conflict(s): 4.txt, 5.txt, 6.txt, 7
 
 Windows 的 `CRLF` 与 Unix 的 `LF` 换行差异会被文本状态比较规范化，不应单独造成冲突。二进制文件仍按原始字节比较。
 
-当前没有“跳过冲突文件”和“强制覆盖冲突文件”的用户命令；遇到冲突应先检查文件，再决定是否手动处理。
+冲突可用 `--skip-conflicts`（只恢复无冲突文件）或 `--force`（强制覆盖）处理；默认遇到冲突则拒绝并给出「人改了什么」的 diff。
 
 ## 多次 Undo 与模型提示
 
@@ -251,6 +261,27 @@ C、B、A
 notice 只消费一次。下一次模型 step 后不会重复注入。
 
 ## Git 与快照存储
+
+### 快照护栏（建 git 追踪前先预估）
+
+在创建任何私有 Git 快照仓库之前，插件会先**预估该工作区会被追踪多少内容**：统计文件数、总大小、单个最大文件、目录嵌套深度（复用与真实快照相同的排除规则，如 node_modules/.git/dist 等不统计）。只要任意一项超过配置阈值，就**不建立 git 追踪**，该工作区的 turn 不会做快照、`/undo` 也不可用（因为没有可恢复内容）。这能避免把巨大或极深的目录（node_modules 密集仓库、构建树、以及任何类似家目录的东西）整盘塞进私有仓库。
+
+阈值是插件设置，可在 profile 的 `cordis.patch.yml` 的插件 config 里调整：
+
+```yaml
+- insert:
+    - id: turnrewind
+      name: dsh-tauri-turnrewind
+      config:
+        guard:
+          maxFileCount: 10000 # 最多追踪文件数
+          maxTotalBytes: 536870912 # 总大小上限(512MB)
+          maxFileBytes: 52428800 # 单个文件上限(50MB)
+          maxDepth: 20 # 目录嵌套深度上限
+          maxDirs: 10000 # 目录数上限
+```
+
+被护栏拒绝的工作区会在日志里输出 `turnrewind: skip snapshot tracking for <dir>: <reason>`，且结果被缓存（不会每回合重扫大目录）。与 `$HOME` 防护互为兜底：会话 cwd 为家目录时直接拒绝，其他大目录由本护栏拦截。
 
 快照存放在插件私有目录：
 

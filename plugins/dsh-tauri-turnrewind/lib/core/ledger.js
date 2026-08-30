@@ -124,6 +124,23 @@ export function skipTurn(db, turn, reason) {
   `).run(turn.turnId, turn.sessionId, turn.workspaceKey, turn.startedAt, reason)
 }
 
+export function listReversibleTurns(db, sessionId, workspaceKey) {
+  return db.prepare(`
+    SELECT * FROM turns
+    WHERE session_id = ? AND workspace_key = ?
+      AND reversible = 1
+      AND status IN ('settled', 'interrupted')
+    ORDER BY started_at DESC
+  `).all(sessionId, workspaceKey)
+}
+
+export function markTurnSnapshotMissing(db, turnId) {
+  db.prepare(`
+    UPDATE turns SET reversible = 0, error = 'snapshot ref missing (snapshot repository was wiped)'
+    WHERE turn_id = ?
+  `).run(turnId)
+}
+
 export function recordSkippedTurn(db, turn, reason) {
   db.exec('BEGIN')
   try {
@@ -205,8 +222,8 @@ export function settleOperation(db, operationId, outcome, error) {
 
 export function queueRewindNotice(db, notice) {
   db.prepare(`
-    INSERT INTO rewind_notices(notice_id, session_id, workspace_key, target_turn_id, turns_json, paths_json, status, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+    INSERT INTO rewind_notices(notice_id, session_id, workspace_key, target_turn_id, turns_json, paths_json, status, created_at, kind)
+    VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
   `).run(
     notice.noticeId,
     notice.sessionId,
@@ -215,6 +232,7 @@ export function queueRewindNotice(db, notice) {
     JSON.stringify([notice.targetTurnId]),
     JSON.stringify(notice.paths),
     notice.createdAt,
+    notice.kind ?? 'undo',
   )
 }
 
@@ -247,13 +265,52 @@ export function claimRewindNotices(db, sessionId, workspaceKey) {
   }))
 }
 
+export function getLatestAppliedUndo(db, sessionId, workspaceKey) {
+  return db.prepare(`
+    SELECT o.* FROM operations o
+    JOIN turns t ON t.turn_id = o.target_turn_id
+    WHERE t.session_id = ? AND t.workspace_key = ?
+      AND o.kind = 'undo' AND o.outcome = 'applied'
+    ORDER BY o.settled_at DESC LIMIT 1
+  `).get(sessionId, workspaceKey)
+}
+
 export function completeUndoWithNotice(db, turnId, notice) {
   db.exec('BEGIN')
   try {
     db.prepare(`UPDATE turns SET status = 'undone' WHERE turn_id = ?`).run(turnId)
     db.prepare(`
-      INSERT INTO rewind_notices(notice_id, session_id, workspace_key, target_turn_id, turns_json, paths_json, status, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+      INSERT INTO rewind_notices(notice_id, session_id, workspace_key, target_turn_id, turns_json, paths_json, status, created_at, kind)
+      VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+    `).run(
+      notice.noticeId,
+      notice.sessionId,
+      notice.workspaceKey,
+      notice.targetTurnId,
+      JSON.stringify([notice.targetTurnId]),
+      JSON.stringify(notice.paths),
+      notice.createdAt,
+      notice.kind ?? 'undo',
+    )
+    db.exec('COMMIT')
+  }
+  catch (error) {
+    db.exec('ROLLBACK')
+    throw error
+  }
+}
+
+/** Atomically mark an undo as redone, restore its turn to settled, and queue a redo notice. */
+export function completeRedoWithNotice(db, operationId, turnId, notice) {
+  db.exec('BEGIN')
+  try {
+    db.prepare(`UPDATE operations SET outcome = 'redone', settled_at = ? WHERE operation_id = ?`)
+      .run(new Date().toISOString(), operationId)
+    db.prepare(`UPDATE turns SET status = 'settled', reversible = 1 WHERE turn_id = ? AND status = 'undone'`)
+      .run(turnId)
+    db.prepare(`
+      INSERT INTO rewind_notices(notice_id, session_id, workspace_key, target_turn_id, turns_json, paths_json, status, created_at, kind)
+      VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, 'redo')
     `).run(
       notice.noticeId,
       notice.sessionId,
