@@ -717,7 +717,7 @@ function apply(ctx, config = {}) {
   ctx.effect(() => commands.register({
     name: 'undo',
     description: 'Plan or undo file changes made by the latest Agent turn',
-    input: { hint: '[turn-id] [--dry-run]' },
+    input: { hint: '[turn-id] [--dry-run|--preview] [--skip-conflicts|--force] | --redo' },
     handler: (invocation) => {
       const workspaceDir = workspaceForAgent(invocation.agent)
       if (!workspaceDir) {

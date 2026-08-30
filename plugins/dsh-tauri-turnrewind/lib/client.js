@@ -1,25 +1,221 @@
 // dsh-tauri-turnrewind — client bundle (browser).
 //
-// Raises the in-app "undo unavailable" dialog when the current session
-// carries the unsupported-workspace heads-up injected by the host.
+// One module, three jobs (the boot manifest imports the plugin under its
+// package name, so everything lives in this single factory):
+// 1. Renders the `/undo` command card in the `conversation.chat.commandview`
+//    slot: +x -y badge, changed-file list, click-to-expand red/green diffs.
+// 2. Raises the in-app "undo unavailable" dialog when the current session
+//    carries the unsupported-workspace heads-up injected by the host.
 //
 // Hand-written against the DSH client module contract:
 //   window.__ModuleLoader__.load({ id, factory }) where factory receives a
 //   CommonJS-style `require` and must export `apply` (cordis plugin) + `inject`
-//   (services the apply() context needs).
-//
-// The module id MUST normalize to the bare package name: the client module
-// system strips a trailing `/client` and the boot manifest imports the plugin
-// under its package name, so this factory is what the manifest materializes.
-// Command output renders with the harness's native command card on purpose —
-// no custom renderer, so errors show in the native red style.
+//   (services the apply() context needs). The module system strips a trailing
+//   `/client` from ids, so this id normalizes to the package name.
 globalThis.__ModuleLoader__.load({
   id: 'dsh-tauri-turnrewind/client',
-  factory: () => {
+  factory: (require) => {
     const module = { exports: {} }
     const exports = module.exports
+    const React = require('react')
+    const jsxRuntime = require('react/jsx-runtime')
+    const jsx = jsxRuntime.jsx
+    const jsxs = jsxRuntime.jsxs
 
-    const inject = ['sessions', 'locale']
+    const inject = ['slots', 'sessions', 'locale']
+
+    // ------------------------------------------------------------------
+    // /undo output parsing: the command prints a structured plain-text plan
+    // (summary line, indented file list, per-file unified diff sections).
+    // Parse it once so the card can render badge, list and colored diffs.
+    // ------------------------------------------------------------------
+    function isFileSeparator(raw) {
+      return /^--- (?!a\/)(?!b\/)\S/.test(raw)
+    }
+
+    function parseUndoOutput(raw) {
+      const lines = (raw ?? '').split('\n')
+      const result = { summary: lines[0] ?? '', files: [], dividers: [] }
+      let current = null
+      let inDiffs = false
+      for (let i = 1; i < lines.length; i++) {
+        const line = lines[i]
+        if (/^(?:Undo will apply|Conflicts \()/.test(line)) {
+          inDiffs = true
+          result.dividers.push(line)
+          continue
+        }
+        const listed = /^ {2,}(modified|created|deleted) (\S+)$/.exec(line)
+        if (listed && !inDiffs) {
+          result.files.push({ path: listed[2], change: listed[1], additions: 0, deletions: 0, diff: [] })
+          continue
+        }
+        const separator = /^--- (?!a\/)(?!b\/)(.+)$/.exec(line)
+        if (separator && inDiffs) {
+          const path = separator[1].trim()
+          current = result.files.find(file => file.path === path)
+          if (!current) {
+            current = { path, change: 'conflict', additions: 0, deletions: 0, diff: [] }
+            result.files.push(current)
+          }
+          current.diff = []
+          continue
+        }
+        if (current && line.trim() !== '' && inDiffs) {
+          const trimmed = line.trim()
+          if (/^\+/.test(trimmed) && !/^\+\+\+/.test(trimmed))
+            current.additions += 1
+          else if (trimmed.startsWith('-') && !trimmed.startsWith('---'))
+            current.deletions += 1
+          current.diff.push(line)
+        }
+      }
+      return result
+    }
+
+    // ------------------------------------------------------------------
+    // /undo command card: rendering.
+    // ------------------------------------------------------------------
+    const DIFF_COLORS = {
+      delBg: 'rgba(248, 81, 73, 0.14)',
+      addBg: 'rgba(46, 160, 67, 0.14)',
+      del: 'var(--dsw-alias-state-error-primary, #f85149)',
+      add: 'var(--dsw-alias-state-success-primary, #3fb950)',
+      hunk: 'var(--dsw-alias-label-tertiary, #8b8b8b)',
+      meta: 'var(--dsw-alias-label-dimmed, #8b8b8b)',
+      text: 'var(--dsw-alias-label-secondary, #cccccc)',
+      bg: 'var(--dsw-alias-bg-layer-2, #161b22)',
+      border: 'var(--dsw-alias-border-l2, #30363d)',
+    }
+
+    function diffLineStyle(kind) {
+      switch (kind) {
+        case 'del': return { background: DIFF_COLORS.delBg, color: DIFF_COLORS.text }
+        case 'add': return { background: DIFF_COLORS.addBg, color: DIFF_COLORS.text }
+        case 'hunk': return { color: DIFF_COLORS.hunk }
+        case 'meta': return { color: DIFF_COLORS.meta }
+        default: return { color: DIFF_COLORS.text }
+      }
+    }
+
+    function diffSign(kind) {
+      if (kind === 'del')
+        return '-'
+      if (kind === 'add')
+        return '+'
+      return ' '
+    }
+
+    function DiffLine(props) {
+      const entry = props.entry
+      return jsxs('div', {
+        style: Object.assign(
+          { display: 'flex', fontFamily: 'var(--ds-font-family-code, monospace)', fontSize: '12px', lineHeight: '19px', paddingLeft: 8, paddingRight: 8, whiteSpace: 'pre-wrap', wordBreak: 'break-all' },
+          diffLineStyle(entry.kind),
+        ),
+        children: [
+          jsx('span', {
+            style: { width: 14, flex: 'none', color: entry.kind === 'del' ? DIFF_COLORS.del : entry.kind === 'add' ? DIFF_COLORS.add : 'transparent', userSelect: 'none' },
+            children: diffSign(entry.kind),
+          }),
+          jsx('span', { style: { flex: 1 }, children: entry.text }),
+        ],
+      })
+    }
+
+    function NumBadge(props) {
+      const { additions, deletions } = props
+      if (additions === 0 && deletions === 0)
+        return null
+      return jsxs('span', {
+        style: { display: 'inline-flex', gap: 6, flex: 'none', fontFamily: 'var(--ds-font-family-code, monospace)', fontSize: 11 },
+        children: [
+          jsx('span', { style: { color: 'var(--dsw-alias-state-success-primary, #3fb950)' }, children: `+${additions}` }),
+          jsx('span', { style: { color: 'var(--dsw-alias-state-error-primary, #f85149)' }, children: `-${deletions}` }),
+        ],
+      })
+    }
+
+    function classifyLine(raw) {
+      const line = raw
+      if (/^\s*(?:diff --git |index )/.test(line))
+        return { kind: 'meta', text: line.trim() }
+      if (/^\s*--- a\//.test(line) || /^\s*\+\+\+ b\//.test(line))
+        return { kind: 'meta', text: line.trim() }
+      if (/^\s*@@/.test(line))
+        return { kind: 'hunk', text: line.trim() }
+      if (/^\s*-/.test(line))
+        return { kind: 'del', text: line.replace(/^\s*-/, '') }
+      if (/^\s*\+/.test(line))
+        return { kind: 'add', text: line.replace(/^\s*\+/, '') }
+      return { kind: 'ctx', text: line.replace(/^\s+/, '') }
+    }
+
+    function DiffBlock(props) {
+      const file = props.file
+      const rows = []
+      for (const line of file.diff) {
+        if (isFileSeparator(line))
+          continue
+        rows.push(jsx(DiffLine, { entry: classifyLine(line) }, `${file.path}:${rows.length}`))
+      }
+      return jsxs('div', {
+        style: { marginTop: 8, border: `1px solid ${DIFF_COLORS.border}`, borderRadius: 8, overflow: 'hidden' },
+        children: [
+          jsxs('div', {
+            style: { display: 'flex', alignItems: 'center', gap: 8, padding: '5px 10px', fontFamily: 'var(--ds-font-family-code, monospace)', fontSize: 11.5, color: 'var(--dsw-alias-label-secondary, #cccccc)', borderBottom: `1px solid ${DIFF_COLORS.border}`, background: 'var(--dsw-alias-bg-layer-1, transparent)' },
+            children: [
+              jsx('span', { style: { color: 'var(--dsw-alias-label-tertiary, #8b8b8b)' }, children: file.change }),
+              jsx('span', { style: { flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, children: file.path }),
+              jsx(NumBadge, { additions: file.additions, deletions: file.deletions }),
+            ],
+          }),
+          jsx('div', { style: { maxHeight: 260, overflowY: 'auto', padding: '3px 0' }, children: rows }),
+        ],
+      })
+    }
+
+    function UndoCommandView(props) {
+      const node = props.node || {}
+      const outcome = node.outcome
+      const text = outcome && typeof outcome.text === 'string' ? outcome.text : ''
+      const state = outcome == null ? 'running' : outcome.kind === 'error' ? 'error' : 'ok'
+      const parsed = parseUndoOutput(text)
+      const withDiff = parsed.files.filter(file => (file.diff?.length ?? 0) > 0)
+      const totals = parsed.files.reduce((sum, file) => ({ additions: sum.additions + file.additions, deletions: sum.deletions + file.deletions }), { additions: 0, deletions: 0 })
+      const hasDiff = withDiff.length > 0
+      const summary = parsed.summary || (state === 'error' ? '失败' : state === 'running' ? '运行中' : '完成')
+      const [expanded, setExpanded] = React.useState(hasDiff)
+
+      const titleColor = state === 'error' ? 'var(--dsw-alias-state-error-primary, #f85149)' : 'var(--dsw-alias-label-primary, #cccccc)'
+      const showBody = expanded && (hasDiff || parsed.files.length > 0)
+
+      return jsxs('div', {
+        style: { border: `1px solid ${DIFF_COLORS.border}`, background: 'var(--dsw-alias-bg-layer-1, transparent)', borderRadius: 12, margin: '4px 0 4px 4px', overflow: 'hidden', maxWidth: '100%' },
+        children: [
+          jsxs('button', {
+            type: 'button',
+            onClick() { setExpanded(v => !v) },
+            style: { display: 'flex', alignItems: 'center', gap: 8, width: '100%', textAlign: 'left', background: 'transparent', border: 'none', cursor: 'pointer', padding: '8px 12px', color: titleColor, fontSize: 13 },
+            children: [
+              jsx('span', { style: { transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform .12s', display: 'inline-block', color: 'var(--dsw-alias-label-tertiary, #8b8b8b)' }, children: '▸' }),
+              jsx('span', { style: { fontWeight: 500 }, children: node.name || 'undo' }),
+              jsx(NumBadge, { additions: totals.additions, deletions: totals.deletions }),
+              jsx('span', { style: { color: 'var(--dsw-alias-label-secondary, #cccccc)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, minWidth: 0 }, children: summary }),
+            ],
+          }),
+          showBody
+            ? jsx('div', { style: { borderTop: `1px solid ${DIFF_COLORS.border}`, padding: hasDiff ? '6px 10px 10px' : '6px 12px 10px' }, children:
+              hasDiff
+                ? withDiff.map(file => jsx(DiffBlock, { file }, file.path))
+                : parsed.files.map(file => jsxs('div', { style: { display: 'flex', gap: 8, padding: '2px 0', fontFamily: 'var(--ds-font-family-code, monospace)', fontSize: 12 }, children: [
+                    jsx('span', { style: { color: 'var(--dsw-alias-label-tertiary, #8b8b8b)', width: 64, flex: 'none' }, children: file.change }),
+                    jsx('span', { children: file.path }),
+                  ] }, file.path)) })
+            : null,
+        ],
+      })
+    }
 
     // ------------------------------------------------------------------
     // Unsupported-workspace dialog: storage, DOM, and runner.
@@ -179,10 +375,22 @@ globalThis.__ModuleLoader__.load({
     }
 
     // ------------------------------------------------------------------
-    // Plugin apply.
+    // Plugin apply: both features share the one cordis plugin this bundle
+    // materializes into (the boot manifest imports the package name).
     // ------------------------------------------------------------------
     function apply(ctx) {
-      console.warn('[turnrewind] client apply: dialog runner starting')
+      console.warn('[turnrewind] client apply: command card + dialog runner starting')
+
+      ctx.effect(() => {
+        ctx.slots.inject('conversation.chat.commandview', () => {
+          return ctx.slots.register({
+            name: 'conversation.chat.commandview',
+            key: 'undo',
+          }, UndoCommandView)
+        })
+      }, 'turnrewind command view')
+
+      // Unsupported-workspace heads-up runner.
       ctx.effect(() => ctx.locale.register(NS, dictionaries), 'turnrewind locale')
       const t = ctx.locale.bind(NS)
       // Read through the service store, not the ctx.sessions property proxy:
@@ -217,7 +425,7 @@ globalThis.__ModuleLoader__.load({
       }, 'turnrewind dialog runner')
     }
 
-    Object.assign(exports, { apply, inject })
+    Object.assign(exports, { apply, inject, parseUndoOutput })
     return module.exports
   },
 })
