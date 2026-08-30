@@ -150,6 +150,13 @@ export function deletePendingPlan(db, planId, sessionId, workspaceKey) {
   return result.changes > 0
 }
 
+/** Dismissal from the ✕ button: workspace key is unknown client-side. */
+export function cancelPendingPlan(db, planId, sessionId) {
+  const result = db.prepare('DELETE FROM pending_plans WHERE plan_id = ? AND session_id = ?')
+    .run(planId, sessionId)
+  return result.changes > 0
+}
+
 export function registerWorkspace(db, workspaceKey, workspacePath, snapshotRepo) {
   db.prepare(`
     INSERT INTO workspaces(workspace_key, workspace_path, snapshot_repo, created_at)

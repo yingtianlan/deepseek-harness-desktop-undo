@@ -5,11 +5,11 @@ import process from 'node:process'
 import { createDialogProjection } from './core/dialog-projection.js'
 import { captureSnapshot, classifyPathChange, createSnapshotStore, currentState, diffAgainstDisk, gitAvailable, gitRef, probeWorkspace, restorePath, snapshotDiff, snapshotFileDiff, stateAt } from './core/git-snapshot.js'
 import { assessWorkspace, defaultBudget } from './core/guard.js'
-import { claimRewindNotices, completeRedoWithNotice, completeUndoWithNotice, createOperation, createPendingPlan, deletePendingPlan, failTurn, getLatestAppliedUndo, getLatestSnapshotRef, getLatestTurnSummary, getPendingPlan, getTurn, insertTurn, listReversibleTurns, markTurnSnapshotMissing, openLedger, recordSkippedTurn, registerWorkspace, settleInterruptedTurn, settleNoopTurn, settleOperation, settleTurn, skipTurn } from './core/ledger.js'
+import { cancelPendingPlan, claimRewindNotices, completeRedoWithNotice, completeUndoWithNotice, createOperation, createPendingPlan, deletePendingPlan, failTurn, getLatestAppliedUndo, getLatestSnapshotRef, getLatestTurnSummary, getPendingPlan, getPendingPlanRow, getTurn, insertTurn, listReversibleTurns, markTurnSnapshotMissing, openLedger, recordSkippedTurn, registerWorkspace, settleInterruptedTurn, settleNoopTurn, settleOperation, settleTurn, skipTurn } from './core/ledger.js'
 import { classifyUndo } from './core/planner.js'
 
 const name = 'dsh-tauri-turnrewind'
-const inject = ['commands', 'sessionProjections']
+const inject = ['commands', 'sessionProjections', 'webServer']
 const ROOT_DIR = process.env.DSH_HOME ? resolve(process.env.DSH_HOME) : join(homedir(), '.dsh')
 const TURN_ID_RE = /[^\w.-]/gu
 
@@ -331,6 +331,104 @@ async function applyRedo(runtime, invocation, workspaceDir, workspaceKey) {
   }
 }
 
+/**
+ * Same-origin HTTP route helper mirroring the dsh-tauri-worktree pattern:
+ * POST-only JSON in / JSON out, mutation routes restricted to loopback peers
+ * (the harness web UI itself is served on this host, so its page qualifies).
+ */
+function jsonRoute(path, handler, { mutate = false } = {}) {
+  return {
+    kind: 'exact',
+    path,
+    handler(req, res) {
+      const send = (code, payload) => {
+        const body = JSON.stringify(payload)
+        res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' })
+        res.end(body)
+      }
+      const parts = []
+      req.on('data', chunk => parts.push(typeof chunk === 'string' ? chunk : chunk.toString('utf8')))
+      req.on('error', () => send(400, { error: 'request stream failed' }))
+      req.on('end', () => {
+        void (async () => {
+          if (mutate) {
+            const peer = req.socket?.remoteAddress ?? ''
+            const loopback = peer === '127.0.0.1' || peer === '::1' || peer === '::ffff:127.0.0.1'
+            if (!loopback)
+              return send(403, { error: 'mutation routes only accept loopback calls' })
+          }
+          try {
+            const parsed = JSON.parse(parts.join('') || '{}')
+            const [code, payload] = await handler(parsed, req)
+            send(code, payload)
+          }
+          catch (error) {
+            send(500, { error: String(error?.message ?? error) })
+          }
+        })()
+      })
+    },
+  }
+}
+
+/**
+ * Shared undo executor for both the command path and the confirm HTTP route.
+ * Throws with a user-facing message on failure — after rolling back whatever
+ * was already restored from the pre-operation snapshot.
+ */
+async function executeUndoRestore(runtime, params) {
+  const { sessionId, workspaceKey, target, paths, entries, skipConflicts } = params
+  const operationId = randomUUID()
+  const beforeRef = `refs/turnrewind/operation-${operationId}`
+  await captureSnapshot(runtime.store, beforeRef, `turnrewind undo ${target.turn_id}`, runtime.parentRef)
+  createOperation(runtime.db, {
+    operationId,
+    kind: 'undo',
+    targetTurnId: target.turn_id,
+    requestedAt: new Date().toISOString(),
+    beforeRef,
+  })
+
+  try {
+    const targets = skipConflicts ? entries.filter(entry => !entry.conflict) : entries
+    for (const entry of targets)
+      await restorePath(runtime.store, target.before_ref, entry.path)
+    const restoredPaths = targets.map(entry => entry.path)
+    const skippedPaths = skipConflicts
+      ? entries.filter(entry => entry.conflict).map(entry => entry.path)
+      : []
+    completeUndoWithNotice(runtime.db, target.turn_id, {
+      noticeId: randomUUID(),
+      sessionId,
+      workspaceKey,
+      targetTurnId: target.turn_id,
+      paths: restoredPaths,
+      createdAt: new Date().toISOString(),
+    })
+    settleOperation(runtime.db, operationId, 'applied')
+    runtime.parentRef = beforeRef
+    let text = `Undid turn ${target.turn_id} and restored ${restoredPaths.length} file(s). The next model request will receive a rewind notice.`
+    if (skippedPaths.length > 0)
+      text += ` Skipped ${skippedPaths.length} conflicted file(s): ${skippedPaths.join(', ')}.`
+    return text
+  }
+  catch (error) {
+    let rollbackError = null
+    try {
+      // `beforeRef` is the state immediately before this operation. Restore every
+      // touched path from it so a mid-operation error does not leave a partial undo.
+      for (const path of paths) await restorePath(runtime.store, beforeRef, path)
+      settleOperation(runtime.db, operationId, 'rolled_back', error)
+    }
+    catch (rollbackFailure) {
+      rollbackError = rollbackFailure
+    }
+    if (rollbackError)
+      throw new Error(`Undo and automatic recovery both failed: ${String(error)}; rollback failed: ${String(rollbackError)}`)
+    throw new Error(`Undo failed and the pre-undo file state was restored: ${String(error)}`)
+  }
+}
+
 async function turnRefsExist(store, turn) {
   if (!turn.before_ref || !turn.after_ref)
     return false
@@ -456,50 +554,22 @@ async function applyUndo(runtime, active, invocation) {
     if (parsed.confirm && conflicts.length > 0)
       return { kind: 'error', text: `The workspace changed since the preview (${conflicts.length} conflicted file(s)). Run /undo again to refresh the plan; use --force/--skip-conflicts deliberately if needed.` }
 
-    const operationId = randomUUID()
-    const beforeRef = `refs/turnrewind/operation-${operationId}`
-    await captureSnapshot(runtime.store, beforeRef, `turnrewind undo ${target.turn_id}`, runtime.parentRef)
-    createOperation(runtime.db, {
-      operationId,
-      kind: 'undo',
-      targetTurnId: target.turn_id,
-      requestedAt: new Date().toISOString(),
-      beforeRef,
-    })
-
+    // Take the plan before writing: a double-click confirm finds the row gone.
+    if (parsed.confirm)
+      deletePendingPlan(runtime.db, parsed.turnId, invocation.agent.session.id, workspaceKey)
     try {
-      const targets = parsed.skipConflicts ? entries.filter(entry => !entry.conflict) : entries
-      for (const entry of targets)
-        await restorePath(runtime.store, target.before_ref, entry.path)
-      const restoredPaths = targets.map(entry => entry.path)
-      const skippedPaths = conflicts.map(entry => entry.path)
-      completeUndoWithNotice(runtime.db, target.turn_id, {
-        noticeId: randomUUID(),
+      const text = await executeUndoRestore(runtime, {
         sessionId: invocation.agent.session.id,
         workspaceKey,
-        targetTurnId: target.turn_id,
-        paths: restoredPaths,
-        createdAt: new Date().toISOString(),
+        target,
+        paths,
+        entries,
+        skipConflicts: parsed.skipConflicts,
       })
-      settleOperation(runtime.db, operationId, 'applied')
-      runtime.parentRef = beforeRef
-      let text = `Undid turn ${target.turn_id} and restored ${restoredPaths.length} file(s). The next model request will receive a rewind notice.`
-      if (skippedPaths.length > 0)
-        text += ` Skipped ${skippedPaths.length} conflicted file(s): ${skippedPaths.join(', ')}.`
       return { kind: 'success', text }
     }
     catch (error) {
-      try {
-        // `beforeRef` is the state immediately before this operation. Restore every
-        // touched path from it so a mid-operation error does not leave a partial undo.
-        for (const path of paths) await restorePath(runtime.store, beforeRef, path)
-        settleOperation(runtime.db, operationId, 'rolled_back', error)
-        return { kind: 'error', text: `Undo failed and the pre-undo file state was restored: ${String(error)}` }
-      }
-      catch (rollbackError) {
-        settleOperation(runtime.db, operationId, 'partial_failure', `${String(error)}; rollback failed: ${String(rollbackError)}`)
-        return { kind: 'error', text: `Undo and automatic recovery both failed: ${String(rollbackError)}` }
-      }
+      return { kind: 'error', text: String(error?.message ?? error) }
     }
   }
   finally {
@@ -539,6 +609,74 @@ function apply(ctx, config = {}) {
   // from the session list it already receives, no conversation API needed.
   ctx.effect(() => ctx.sessionProjections.register(createDialogProjection()), 'turnrewind projection')
 
+  // Same-origin HTTP routes powering the ✓/✗ buttons on the undo card: the
+  // harness page itself is served from this host, so these need no extra
+  // auth wiring (and mutations are loopback-only on top).
+  ctx.effect(() => {
+    function confirmRoute(body) {
+      const planId = String(body.planId ?? '')
+      const sessionId = String(body.sessionId ?? '')
+      if (planId === '' || sessionId === '')
+        return [400, { error: 'planId and sessionId are required' }]
+      const row = getPendingPlanRow(ledger, planId)
+      if (row === undefined)
+        return [404, { error: 'plan expired or already applied — run /undo again' }]
+      if (row.session_id !== sessionId)
+        return [403, { error: 'the plan belongs to another session' }]
+      const planRuntime = workspaceStores.get(row.workspace_key)
+      if (planRuntime === undefined)
+        return [409, { error: 'the host restarted since this preview; run /undo again' }]
+      if (planRuntime.undoing || workspaceHasActiveTurn(active, row.workspace_key))
+        return [409, { error: 'the workspace is busy — wait for the current turn to finish' }]
+      planRuntime.undoing = true
+      return (async () => {
+        try {
+          const target = getTurn(ledger, row.turn_id)
+          if (target === undefined || target.reversible !== 1 || !target.before_ref || !target.after_ref || !await turnRefsExist(planRuntime.store, target))
+            return [409, { error: 'the planned turn\u0027s snapshot data no longer exists — run /undo again' }]
+          const paths = await snapshotDiff(planRuntime.store, target.before_ref, target.after_ref)
+          if (paths.length === 0) {
+            deletePendingPlan(ledger, planId, sessionId, row.workspace_key)
+            return [200, { ok: true, message: 'No file changes were recorded for this turn.' }]
+          }
+          const entries = await buildPlanEntries(planRuntime, planRuntime.workspaceDir, target, paths)
+          const conflicts = entries.filter(entry => entry.conflict)
+          if (conflicts.length > 0)
+            return [409, { error: `the workspace changed since the preview (${conflicts.length} conflicted file(s)) — run /undo again to refresh the plan` }]
+          deletePendingPlan(ledger, planId, sessionId, row.workspace_key)
+          const message = await executeUndoRestore(planRuntime, {
+            sessionId,
+            workspaceKey: row.workspace_key,
+            target,
+            paths,
+            entries,
+            skipConflicts: false,
+          })
+          return [200, { ok: true, message }]
+        }
+        finally {
+          planRuntime.undoing = false
+        }
+      })()
+    }
+
+    function cancelRoute(body) {
+      const planId = String(body.planId ?? '')
+      const sessionId = String(body.sessionId ?? '')
+      if (planId === '' || sessionId === '')
+        return [400, { error: 'planId and sessionId are required' }]
+      const removed = cancelPendingPlan(ledger, planId, sessionId)
+      return [200, { ok: true, message: removed ? 'Pending undo cancelled.' : 'No pending plan matched (it may have expired).' }]
+    }
+
+    const routes = [
+      jsonRoute('/api/turnrewind/confirm', confirmRoute, { mutate: true }),
+      jsonRoute('/api/turnrewind/cancel', cancelRoute, { mutate: true }),
+    ]
+    const disposers = routes.map(route => ctx.webServer.register(route))
+    return () => disposers.map(dispose => dispose())
+  }, 'turnrewind routes')
+
   // Per-session FIFO chain: baseline capture, settle and undo bookkeeping for
   // one session never interleave. Git now runs asynchronously, so ordering is
   // enforced here instead of by the event loop blocking.
@@ -573,6 +711,7 @@ function apply(ctx, config = {}) {
         db: ledger,
         store,
         workspaceKey,
+        workspaceDir,
         parentRef: latest,
         undoing: false,
       }

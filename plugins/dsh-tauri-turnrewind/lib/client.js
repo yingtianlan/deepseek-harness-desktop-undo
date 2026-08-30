@@ -22,9 +22,10 @@ globalThis.__ModuleLoader__.load({
     const jsx = jsxRuntime.jsx
     const jsxs = jsxRuntime.jsxs
 
-    const inject = ['slots', 'sessions', 'locale', 'connection']
-    // The ✓ button submits the confirm/cancel command line back through the
-    // host's prompt RPC; assigned from apply() once the ctx is available.
+    const inject = ['slots', 'sessions', 'locale']
+    // The ✓/✗ buttons post to the plugin's same-origin HTTP routes (the harness
+    // page itself is served by the same host, so no auth wiring is needed);
+    // assigned from apply() once the ctx is available.
     let submitLine = null
 
     // ------------------------------------------------------------------
@@ -462,9 +463,8 @@ globalThis.__ModuleLoader__.load({
       // Read through the service store, not the ctx.sessions property proxy:
       // the host session service merges a different member under the same name.
       const sessions = ctx.get('sessions')
-      // The ✓ button sends the confirm/cancel command line as a user prompt on
-      // the current session — the same path the input box uses. The host
-      // parses it server-side and executes the parked pending plan. Returns
+      // The ✓/✗ buttons post to the plugin's same-origin routes — the most
+      // direct client→host channel (no gateway RPC, no auth wiring). Returns
       // an error string so the card can surface real failures instead of
       // silently swallowing an async rejection.
       submitLine = async (line) => {
@@ -472,11 +472,16 @@ globalThis.__ModuleLoader__.load({
           const sessionId = sessions.list.getSnapshot().current
           if (sessionId === undefined)
             return 'no active session in the client session list'
-          const connection = ctx.get('connection')
-          const api = connection?.api ?? connection?.remote?.api
-          if (typeof api?.sessions?.prompt !== 'function')
-            return 'connection api has no sessions.prompt (service shape mismatch)'
-          await api.sessions.prompt({ sessionId, mode: 'queue', content: line })
+          const kind = line.includes('--confirm') ? 'confirm' : 'cancel'
+          const planId = line.split(' ').at(-1)
+          const res = await fetch(`/api/turnrewind/${kind}`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ planId, sessionId }),
+          })
+          const payload = await res.json().catch(() => ({}))
+          if (!res.ok)
+            return payload.error ?? `HTTP ${res.status}`
           return null
         }
         catch (error) {
