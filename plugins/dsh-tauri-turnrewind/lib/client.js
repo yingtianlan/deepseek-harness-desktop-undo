@@ -328,25 +328,37 @@ if (globalThis.__ModuleLoader__) {
     }
 
     function apply(ctx) {
+      console.warn('[turnrewind] client apply: unsupported-workspace dialog runner starting')
       ctx.effect(() => ctx.locale.register(NS, dictionaries), 'turnrewind locale')
       const t = ctx.locale.bind(NS)
       // Read through the service store, not the ctx.sessions property proxy:
       // the host session service merges a different member under the same name.
       const sessions = ctx.get('sessions')
+
+      function checkOnce() {
+        const state = sessions.list.getSnapshot()
+        const summary = state.current !== undefined ? state.byId[state.current] : undefined
+        const value = summary?.projectionValues?.turnrewind
+        const notices = Array.isArray(value?.notices) ? value.notices : []
+        const fresh = notices.filter(notice => notice && typeof notice.id === 'string' && !readSeen().includes(notice.id))
+        if (fresh.length === 0)
+          return
+        console.warn(`[turnrewind] unsupported heads-up visible: ${fresh.map(notice => notice.id).join(', ')}`)
+        for (const notice of fresh) markSeen(notice.id)
+        showDialog(t, fresh)
+      }
+
       ctx.effect(() => {
-        const unsubscribe = sessions.list.subscribe(() => {
-          const state = sessions.list.getSnapshot()
-          const summary = state.current !== undefined ? state.byId[state.current] : undefined
-          const value = summary?.projectionValues?.turnrewind
-          const notices = Array.isArray(value?.notices) ? value.notices : []
-          const fresh = notices.filter(notice => notice && typeof notice.id === 'string' && !readSeen().includes(notice.id))
-          if (fresh.length === 0)
-            return
-          for (const notice of fresh) markSeen(notice.id)
-          showDialog(t, fresh)
-        })
+        const unsubscribe = sessions.list.subscribe(checkOnce)
+        // Projection frames can land while the page is loading, before the list
+        // store has any subscribers; poll briefly so that ordering can never
+        // silently swallow the heads-up.
+        const poll = setInterval(checkOnce, 2000)
+        const stopPolling = setTimeout(clearInterval, 120000, poll)
         return () => {
           unsubscribe()
+          clearInterval(poll)
+          clearTimeout(stopPolling)
         }
       }, 'turnrewind dialog runner')
     }
