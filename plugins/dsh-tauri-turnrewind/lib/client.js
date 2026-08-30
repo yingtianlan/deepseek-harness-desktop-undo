@@ -282,6 +282,23 @@ globalThis.__ModuleLoader__.load({
         : resultText || planStatus === 'applied'
           ? 'var(--dsw-alias-state-success-primary, #3fb950)'
           : 'var(--dsw-alias-state-error-primary, #f85149)'
+      // Buttons live only in the actionable footer; the outcome/error hint line
+      // must survive after the plan settles, or the success note disappears.
+      const showFooter = actionable || resultText !== null || submitError !== null || submitted !== null || planStatus === 'applied'
+
+      // Cancelled/expired plans collapse to a frameless slim line, matching
+      // the native tool-row look: no card frame, no body, no buttons.
+      if (collapsed) {
+        return jsxs('div', {
+          style: { display: 'flex', alignItems: 'center', gap: 6, padding: '2px 12px 2px 4px', margin: '2px 0 2px 4px', fontSize: 13 },
+          children: [
+            jsx('span', { style: { color: 'var(--dsw-alias-label-dimmed, #8b8b8b)' }, children: '▸' }),
+            jsx('span', { style: { color: 'var(--dsw-alias-label-secondary, #cccccc)' }, children: node.name || 'undo' }),
+            jsx('span', { style: { color: 'var(--dsw-alias-label-dimmed, #8b8b8b)' }, children: '·' }),
+            jsx('span', { style: { color: 'var(--dsw-alias-state-error-primary, #f85149)' }, children: hint }),
+          ],
+        })
+      }
 
       return jsxs('div', {
         style: { border: `1px solid ${DIFF_COLORS.border}`, background: 'var(--dsw-alias-bg-layer-1, transparent)', borderRadius: 12, margin: '4px 0 4px 4px', overflow: 'hidden', maxWidth: '100%' },
@@ -306,34 +323,33 @@ globalThis.__ModuleLoader__.load({
                     jsx('span', { children: file.path }),
                   ] }, file.path)) })
             : null,
-          actionable
+          showFooter
             ? jsxs('div', {
                 style: { display: 'flex', alignItems: 'center', gap: 10, borderTop: `1px solid ${DIFF_COLORS.border}`, padding: '8px 12px' },
                 children: [
-                  jsx('button', {
-                    type: 'button',
-                    onClick() { submit('confirm') },
-                    disabled: submitted !== null,
-                    style: { background: 'var(--dsw-alias-button-primary-fill, #4f46e5)', color: 'var(--dsw-alias-label-primary-foreground, #ffffff)', border: 'none', borderRadius: 8, padding: '5px 16px', fontSize: 12.5 },
-                    children: confirmLabel,
-                  }),
-                  jsx('button', {
-                    type: 'button',
-                    onClick() { submit('cancel') },
-                    disabled: submitted !== null,
-                    style: { background: 'transparent', color: submitted === 'cancel' ? 'var(--dsw-alias-label-tertiary, #8b8b8b)' : 'var(--dsw-alias-state-error-primary, #f85149)', border: '1px solid var(--dsw-alias-border-l2, #30363d)', borderRadius: 8, padding: '5px 16px', fontSize: 12.5 },
-                    children: cancelLabel,
-                  }),
+                  actionable
+                    ? jsxs('button', {
+                        type: 'button',
+                        onClick() { submit('confirm') },
+                        disabled: submitted !== null,
+                        style: { background: 'var(--dsw-alias-button-primary-fill, #4f46e5)', color: 'var(--dsw-alias-label-primary-foreground, #ffffff)', border: 'none', borderRadius: 8, padding: '5px 16px', fontSize: 12.5 },
+                        children: confirmLabel,
+                      })
+                    : null,
+                  actionable
+                    ? jsx('button', {
+                        type: 'button',
+                        onClick() { submit('cancel') },
+                        disabled: submitted !== null,
+                        style: { background: 'transparent', color: submitted === 'cancel' ? 'var(--dsw-alias-label-tertiary, #8b8b8b)' : 'var(--dsw-alias-state-error-primary, #f85149)', border: '1px solid var(--dsw-alias-border-l2, #30363d)', borderRadius: 8, padding: '5px 16px', fontSize: 12.5 },
+                        children: cancelLabel,
+                      })
+                    : null,
                   jsx('span', { style: { flex: 1 } }),
                   jsx('span', { style: { color: hintColor, fontSize: 11.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, children: hint }),
                 ],
               })
-            : collapsed
-              ? jsx('div', {
-                  style: { borderTop: `1px solid ${DIFF_COLORS.border}`, padding: '6px 12px', color: hintColor, fontSize: 11.5 },
-                  children: hint,
-                })
-              : null,
+            : null,
         ],
       })
     }
