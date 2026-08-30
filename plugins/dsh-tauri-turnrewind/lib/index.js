@@ -3,9 +3,9 @@ import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import process from 'node:process'
 import { createDialogProjection } from './core/dialog-projection.js'
-import { captureSnapshot, createSnapshotStore, currentState, gitAvailable, gitRef, restorePath, snapshotDiff, stateAt } from './core/git-snapshot.js'
+import { captureSnapshot, classifyPathChange, createSnapshotStore, currentState, diffAgainstDisk, gitAvailable, gitRef, probeWorkspace, restorePath, snapshotDiff, snapshotFileDiff, stateAt } from './core/git-snapshot.js'
 import { assessWorkspace } from './core/guard.js'
-import { claimRewindNotices, completeUndoWithNotice, createOperation, failTurn, getLatestSnapshotRef, getLatestTurnSummary, getTurn, insertTurn, listReversibleTurns, markTurnSnapshotMissing, openLedger, recordSkippedTurn, registerWorkspace, settleInterruptedTurn, settleNoopTurn, settleOperation, settleTurn, skipTurn } from './core/ledger.js'
+import { claimRewindNotices, completeRedoWithNotice, completeUndoWithNotice, createOperation, failTurn, getLatestAppliedUndo, getLatestSnapshotRef, getLatestTurnSummary, getTurn, insertTurn, listReversibleTurns, markTurnSnapshotMissing, openLedger, recordSkippedTurn, registerWorkspace, settleInterruptedTurn, settleNoopTurn, settleOperation, settleTurn, skipTurn } from './core/ledger.js'
 import { classifyUndo } from './core/planner.js'
 
 const name = 'dsh-tauri-turnrewind'
@@ -23,7 +23,16 @@ function workspaceForAgent(agent) {
 
 function workspaceForSession(session) {
   const cwd = session?.header?.cwd
-  return typeof cwd === 'string' && cwd.length > 0 ? resolve(cwd) : undefined
+  if (typeof cwd !== 'string' || cwd.length === 0)
+    return undefined
+  const resolved = resolve(cwd)
+  // Never snapshot the home directory: the blocking spawnSync git add walks
+  // hundreds of GB, freezes the whole event loop for minutes, and fails on
+  // root-owned dirs (docker volumes, container storage). Sessions running
+  // from $HOME (e.g. the QQ bridge) simply get no turn snapshots.
+  if (resolved === homedir())
+    return undefined
+  return resolved
 }
 
 function workspaceKeyFor(path) {
@@ -43,9 +52,25 @@ function parseUndoInput(rawInput) {
   const parts = rawInput.trim().split(/\s+/u).filter(Boolean)
   let turnId
   let dryRun = false
+  let preview = false
+  let skipConflicts = false
+  let force = false
+  let redo = false
   for (const part of parts) {
     if (part === '--dry-run') {
       dryRun = true
+    }
+    else if (part === '--preview') {
+      preview = true
+    }
+    else if (part === '--skip-conflicts') {
+      skipConflicts = true
+    }
+    else if (part === '--force') {
+      force = true
+    }
+    else if (part === '--redo') {
+      redo = true
     }
     else if (part === '--subtree') {
       return { error: 'Recursive subtree undo is not available in the MVP.' }
@@ -54,10 +79,14 @@ function parseUndoInput(rawInput) {
       turnId = part
     }
     else {
-      return { error: 'Usage: /undo [turn-id] [--dry-run]' }
+      return { error: 'Usage: /undo [turn-id] [--dry-run|--preview] [--skip-conflicts|--force] or /undo --redo' }
     }
   }
-  return { turnId, dryRun }
+  if (skipConflicts && force)
+    return { error: '--skip-conflicts and --force are mutually exclusive.' }
+  if (redo && (turnId !== undefined || dryRun || preview || skipConflicts || force))
+    return { error: '--redo cannot be combined with a turn id or other options.' }
+  return { turnId, dryRun, preview, skipConflicts, force, redo }
 }
 
 function assertSessionOwner(target, agent) {
@@ -67,16 +96,86 @@ function assertSessionOwner(target, agent) {
   return undefined
 }
 
-function formatPlan(target, paths, conflicts, dryRun) {
-  const mode = dryRun ? 'Undo plan' : 'Undo preflight'
-  const conflictText = conflicts.length === 0 ? '0 conflicts' : `${conflicts.length} conflict(s): ${conflicts.join(', ')}`
-  return `${mode}: turn ${target.turn_id}; ${paths.length} file(s); ${conflictText}.`
+function indent(text, prefix) {
+  return text.split('\n').map(line => `${prefix}${line}`).join('\n')
+}
+
+/** Diff a committed path against disk; never let an unsafe path crash the plan. */
+async function safeDiffAgainstDisk(store, ref, path) {
+  try {
+    return await diffAgainstDisk(store, ref, path)
+  }
+  catch {
+    return '(unable to inspect the on-disk file safely)'
+  }
+}
+
+/** Conflict check that treats uninspectable paths (symlink, escape) as conflicts. */
+async function diskMatchesSnapshot(runtime, workspaceDir, ref, path) {
+  try {
+    return classifyUndo(currentState(workspaceDir, path), await stateAt(runtime.store, ref, path)) !== 'conflict'
+  }
+  catch {
+    return false
+  }
+}
+
+/**
+ * Build the read-only undo plan: for every touched path, how the turn changed it
+ * (modified/created/deleted) and whether the current on-disk state still matches
+ * the turn's after snapshot.
+ */
+async function buildPlanEntries(runtime, workspaceDir, target, paths) {
+  return Promise.all(paths.map(async path => ({
+    path,
+    change: await classifyPathChange(runtime.store, target.before_ref, target.after_ref, path),
+    conflict: !await diskMatchesSnapshot(runtime, workspaceDir, target.after_ref, path),
+  })))
+}
+
+function summarizeChanges(entries) {
+  const counts = { modified: 0, created: 0, deleted: 0 }
+  for (const entry of entries) counts[entry.change] += 1
+  return `modified ${counts.modified}, created ${counts.created}, deleted ${counts.deleted}`
+}
+
+async function formatPlan(runtime, target, entries, options) {
+  const conflicts = entries.filter(entry => entry.conflict)
+  const lines = []
+  lines.push(`${options.preview ? 'Undo preview' : options.dryRun ? 'Undo plan' : 'Undo preflight'}: turn ${target.turn_id}; ${entries.length} file(s) (${summarizeChanges(entries)}); ${conflicts.length} conflict(s).`)
+  for (const entry of entries) {
+    const flag = entry.conflict ? ' [conflict]' : ''
+    lines.push(`  ${entry.change.padEnd(8)} ${entry.path}${flag}`)
+  }
+  if (options.preview) {
+    lines.push('')
+    lines.push('Undo will apply (turn output → restored state):')
+    for (const entry of entries) {
+      const diff = await snapshotFileDiff(runtime.store, target.after_ref, target.before_ref, entry.path)
+      lines.push(`--- ${entry.path}`)
+      lines.push(diff ? indent(diff, '  ') : '  (no textual diff)')
+    }
+  }
+  if (conflicts.length > 0) {
+    lines.push('')
+    lines.push('Conflicts (turn output → current disk; undo would overwrite these changes):')
+    for (const entry of conflicts) {
+      const diff = await safeDiffAgainstDisk(runtime.store, target.after_ref, entry.path)
+      lines.push(`--- ${entry.path}`)
+      lines.push(diff ? indent(diff, '  ') : '  (no textual diff)')
+    }
+    if (!options.dryRun && !options.preview)
+      lines.push('Re-run with --skip-conflicts to restore only the non-conflicted files, or --force to overwrite the conflicts.')
+  }
+  return lines.join('\n')
 }
 
 function createRewindNoticeMessage(notice) {
   const paths = notice.paths.map(path => `- ${path}`).join('\n')
   const turns = notice.turns.length > 0 ? notice.turns.join(', ') : notice.target_turn_id
-  const text = `[Turn rewind notice]\nThe workspace was reverted by these undo operations: ${turns}.\n\nReverted files in this operation:\n${paths}\n\nTreat the current files on disk as authoritative. Do not assume any reverted changes still exist; re-read the listed files before making further edits.`
+  const text = notice.kind === 'redo'
+    ? `[Turn rewind notice]\nA previous undo was redone; the file changes of these turns were re-applied: ${turns}.\n\nRe-applied files:\n${paths}\n\nTreat the current files on disk as authoritative. Re-read the listed files before making further edits.`
+    : `[Turn rewind notice]\nThe workspace was reverted by these undo operations: ${turns}.\n\nReverted files in this operation:\n${paths}\n\nTreat the current files on disk as authoritative. Do not assume any reverted changes still exist; re-read the listed files before making further edits.`
   return {
     id: `turnrewind-notice-${notice.notice_id}`,
     role: 'user',
@@ -154,6 +253,68 @@ async function settleSessionTurns(ledger, active, sessionId, exceptKey, reason) 
   }
 }
 
+/** Redo the most recently applied undo. Restores each touched path to the turn's
+ * after-snapshot (its post-image), but only if disk still matches the undone
+ * state — otherwise the undo result would silently clobber later human edits. */
+async function applyRedo(runtime, invocation, workspaceDir, workspaceKey) {
+  const op = getLatestAppliedUndo(runtime.db, invocation.agent.session.id, workspaceKey)
+  if (!op) {
+    return { kind: 'error', text: 'No previously applied undo is available to redo.' }
+  }
+  const turn = getTurn(runtime.db, op.target_turn_id)
+  if (!turn || !turn.before_ref || !turn.after_ref) {
+    return { kind: 'error', text: 'The undone turn no longer has a recoverable snapshot.' }
+  }
+  if (!await turnRefsExist(runtime.store, turn)) {
+    return { kind: 'error', text: 'The snapshot data for the undone turn no longer exists (the snapshot repository was previously wiped).' }
+  }
+  const paths = await snapshotDiff(runtime.store, turn.before_ref, turn.after_ref)
+  if (paths.length === 0)
+    return { kind: 'success', text: 'No file changes were recorded for this turn.' }
+
+  const conflicts = []
+  for (const path of paths) {
+    const expected = await stateAt(runtime.store, turn.before_ref, path)
+    const actual = currentState(workspaceDir, path)
+    if (classifyUndo(actual, expected) === 'conflict')
+      conflicts.push(path)
+  }
+  if (conflicts.length > 0) {
+    const lines = []
+    lines.push(`Redo is blocked: ${conflicts.length} conflicted file(s) were edited after the undo.`)
+    lines.push('')
+    lines.push('Conflicts (undone state → current disk; redo would overwrite these changes):')
+    for (const path of conflicts) {
+      const diff = await safeDiffAgainstDisk(runtime.store, turn.before_ref, path)
+      lines.push(`--- ${path}`)
+      lines.push(diff ? indent(diff, '  ') : '  (no textual diff)')
+    }
+    return { kind: 'error', text: lines.join('\n') }
+  }
+
+  runtime.undoing = true
+  try {
+    const operationId = randomUUID()
+    const beforeRef = `refs/turnrewind/redo-${operationId}`
+    await captureSnapshot(runtime.store, beforeRef, `turnrewind redo ${turn.turn_id}`, runtime.parentRef)
+    for (const path of paths)
+      await restorePath(runtime.store, turn.after_ref, path)
+    completeRedoWithNotice(runtime.db, op.operation_id, turn.turn_id, {
+      noticeId: randomUUID(),
+      sessionId: invocation.agent.session.id,
+      workspaceKey,
+      targetTurnId: turn.turn_id,
+      paths,
+      createdAt: new Date().toISOString(),
+    })
+    runtime.parentRef = beforeRef
+    return { kind: 'success', text: `re-applied ${paths.length} file(s). The next model request will receive a rewind notice.` }
+  }
+  finally {
+    runtime.undoing = false
+  }
+}
+
 async function turnRefsExist(store, turn) {
   if (!turn.before_ref || !turn.after_ref)
     return false
@@ -177,6 +338,9 @@ async function applyUndo(runtime, active, invocation) {
   }
   if (runtime.undoing)
     return { kind: 'error', text: 'Another undo operation is already running in this workspace.' }
+
+  if (parsed.redo)
+    return applyRedo(runtime, invocation, workspaceDir, workspaceKey)
 
   let target
   if (parsed.turnId) {
@@ -221,19 +385,16 @@ async function applyUndo(runtime, active, invocation) {
     if (paths.length === 0)
       return { kind: 'success', text: 'No file changes were recorded for this turn.' }
 
-    const conflicts = []
-    for (const path of paths) {
-      const expected = await stateAt(runtime.store, target.after_ref, path)
-      const actual = currentState(workspaceDir, path)
-      if (classifyUndo(actual, expected) === 'conflict')
-        conflicts.push(path)
-    }
-    if (parsed.dryRun || conflicts.length > 0) {
-      return {
-        kind: conflicts.length > 0 && !parsed.dryRun ? 'error' : 'success',
-        text: formatPlan(target, paths, conflicts, parsed.dryRun),
-      }
-    }
+    const entries = await buildPlanEntries(runtime, workspaceDir, target, paths)
+    const conflicts = entries.filter(entry => entry.conflict)
+
+    // Read-only plan/preview: never touch disk.
+    if (parsed.dryRun || parsed.preview)
+      return { kind: 'success', text: await formatPlan(runtime, target, entries, parsed) }
+
+    // Default policy refuses to overwrite anything it cannot attribute.
+    if (conflicts.length > 0 && !parsed.skipConflicts && !parsed.force)
+      return { kind: 'error', text: await formatPlan(runtime, target, entries, parsed) }
 
     const operationId = randomUUID()
     const beforeRef = `refs/turnrewind/operation-${operationId}`
@@ -247,18 +408,25 @@ async function applyUndo(runtime, active, invocation) {
     })
 
     try {
-      for (const path of paths) await restorePath(runtime.store, target.before_ref, path)
+      const targets = parsed.skipConflicts ? entries.filter(entry => !entry.conflict) : entries
+      for (const entry of targets)
+        await restorePath(runtime.store, target.before_ref, entry.path)
+      const restoredPaths = targets.map(entry => entry.path)
+      const skippedPaths = conflicts.map(entry => entry.path)
       completeUndoWithNotice(runtime.db, target.turn_id, {
         noticeId: randomUUID(),
         sessionId: invocation.agent.session.id,
         workspaceKey,
         targetTurnId: target.turn_id,
-        paths,
+        paths: restoredPaths,
         createdAt: new Date().toISOString(),
       })
       settleOperation(runtime.db, operationId, 'applied')
       runtime.parentRef = beforeRef
-      return { kind: 'success', text: `Undid turn ${target.turn_id} and restored ${paths.length} file(s). The next model request will receive a rewind notice.` }
+      let text = `Undid turn ${target.turn_id} and restored ${restoredPaths.length} file(s). The next model request will receive a rewind notice.`
+      if (skippedPaths.length > 0)
+        text += ` Skipped ${skippedPaths.length} conflicted file(s): ${skippedPaths.join(', ')}.`
+      return { kind: 'success', text }
     }
     catch (error) {
       try {
@@ -279,10 +447,28 @@ async function applyUndo(runtime, active, invocation) {
   }
 }
 
-function apply(ctx) {
+function apply(ctx, config = {}) {
+  // Workspace snapshot guard: before we ever create a private git tracking repo,
+  // estimate what it would hold (file count / total bytes / largest file /
+  // nesting depth) and refuse to track workspaces that are too big or too deep.
+  // Thresholds are configurable via the plugin's `config` (patch insert), i.e. the
+  // plugin settings. Defaults keep a normal small/mid workspace trackable while
+  // blocking the huge-directory disaster (node_modules-heavy repos, build trees,
+  // and anything resembling $HOME).
+  const guard = Object.assign({
+    maxFileCount: 10000,
+    maxTotalBytes: 512 * 1024 * 1024,
+    maxFileBytes: 50 * 1024 * 1024,
+    maxDepth: 20,
+    maxDirs: 10000,
+  }, config.guard)
   const ledger = openLedger(ROOT_DIR)
   const active = new Map()
   const workspaceStores = new Map()
+  // Workspaces rejected by the guard: key -> reason. Cached so we do not re-walk
+  // a huge directory on every turn; an undo for such a workspace is impossible
+  // anyway because no snapshot was ever captured.
+  const rejectedWorkspaces = new Map()
   const commands = ctx.commands
   // Client-visible projection: lets the web UI raise the unavailable-dialog
   // from the session list it already receives, no conversation API needed.
@@ -305,8 +491,16 @@ function apply(ctx) {
     if (!workspaceDir)
       return undefined
     const workspaceKey = workspaceKeyFor(workspaceDir)
+    if (rejectedWorkspaces.has(workspaceKey))
+      return undefined
     let runtime = workspaceStores.get(workspaceKey)
     if (!runtime) {
+      const probe = probeWorkspace(workspaceDir, guard)
+      if (!probe.ok) {
+        rejectedWorkspaces.set(workspaceKey, probe.reason)
+        ctx.logger?.warn?.(`[turnrewind] skip snapshot tracking for ${workspaceDir}: ${probe.reason}`)
+        return undefined
+      }
       const store = createSnapshotStore(ROOT_DIR, workspaceDir)
       const latest = getLatestSnapshotRef(ledger, workspaceKey)
       registerWorkspace(ledger, workspaceKey, workspaceDir, store.repoDir)
@@ -481,4 +675,4 @@ function apply(ctx) {
   }), 'turnrewind command')
 }
 
-export { apply, inject, name }
+export { apply, applyUndo, inject, name }
