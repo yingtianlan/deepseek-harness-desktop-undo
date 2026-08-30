@@ -533,7 +533,12 @@ function apply(ctx, config = {}) {
     const decision = await next()
     if (decision.kind === 'reject' || signal.aborted)
       return decision
+    // Claiming must work even when workspaceForAgent refuses the cwd (home
+    // dir): that is exactly the session kind the unsupported heads-up is
+    // queued for. Fall back to the raw cwd as the workspace key.
+    const cwd = agent?.session?.header?.cwd
     const workspaceDir = workspaceForAgent(agent)
+      ?? (typeof cwd === 'string' && cwd.length > 0 ? resolve(cwd) : undefined)
     if (!workspaceDir)
       return decision
     const notices = claimRewindNotices(ledger, agent.session.id, workspaceKeyFor(workspaceDir))
