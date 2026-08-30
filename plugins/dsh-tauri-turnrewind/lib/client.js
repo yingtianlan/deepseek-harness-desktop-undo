@@ -77,10 +77,12 @@ globalThis.__ModuleLoader__.load({
     // /undo command card: rendering.
     // ------------------------------------------------------------------
     const DIFF_COLORS = {
-      delBg: 'rgba(248, 81, 73, 0.14)',
-      addBg: 'rgba(46, 160, 67, 0.14)',
+      delBg: 'rgba(248, 81, 73, 0.26)',
+      addBg: 'rgba(63, 185, 80, 0.24)',
       del: 'var(--dsw-alias-state-error-primary, #f85149)',
       add: 'var(--dsw-alias-state-success-primary, #3fb950)',
+      delText: 'var(--dsw-alias-state-error-primary, #ffb3ab)',
+      addText: 'var(--dsw-alias-state-success-primary, #7ee287)',
       hunk: 'var(--dsw-alias-label-tertiary, #8b8b8b)',
       meta: 'var(--dsw-alias-label-dimmed, #8b8b8b)',
       text: 'var(--dsw-alias-label-secondary, #cccccc)',
@@ -90,8 +92,8 @@ globalThis.__ModuleLoader__.load({
 
     function diffLineStyle(kind) {
       switch (kind) {
-        case 'del': return { background: DIFF_COLORS.delBg, color: DIFF_COLORS.text }
-        case 'add': return { background: DIFF_COLORS.addBg, color: DIFF_COLORS.text }
+        case 'del': return { background: DIFF_COLORS.delBg, color: DIFF_COLORS.delText }
+        case 'add': return { background: DIFF_COLORS.addBg, color: DIFF_COLORS.addText }
         case 'hunk': return { color: DIFF_COLORS.hunk }
         case 'meta': return { color: DIFF_COLORS.meta }
         default: return { color: DIFF_COLORS.text }
@@ -156,6 +158,12 @@ globalThis.__ModuleLoader__.load({
       const rows = []
       for (const line of file.diff) {
         if (isFileSeparator(line))
+          continue
+        // VSCode-style clean diff: drop git plumbing noise (diff --git / index /
+        // --- a/ / +++ b/ headers and the "\ No newline" markers) and keep only
+        // hunk headers plus +/- content lines.
+        const trimmed = line.trim()
+        if (trimmed.startsWith('diff --git ') || trimmed.startsWith('index ') || trimmed.startsWith('--- a/') || trimmed.startsWith('+++ b/') || trimmed.startsWith('\\'))
           continue
         rows.push(jsx(DiffLine, { entry: classifyLine(line) }, `${file.path}:${rows.length}`))
       }
