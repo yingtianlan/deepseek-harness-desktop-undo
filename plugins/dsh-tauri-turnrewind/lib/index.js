@@ -161,7 +161,7 @@ async function formatPlan(runtime, target, entries, options) {
     const flag = entry.conflict ? ' [conflict]' : ''
     lines.push(`  ${entry.change.padEnd(8)} ${entry.path}${flag}`)
   }
-  if (options.preview) {
+  if (options.preview || options.withDiffs) {
     lines.push('')
     lines.push('Undo will apply (turn output → restored state):')
     for (const entry of entries) {
@@ -433,9 +433,10 @@ async function applyUndo(runtime, active, invocation) {
 
     // Bare /undo and --preview park a pending plan; execution waits for the
     // ✓ button (which sends /undo --confirm <plan-id>) so the user cannot
-    // accidentally skip the preview.
+    // accidentally skip the preview. The card always carries the per-file
+    // diffs — seeing what will be reverted is the point of the preview.
     if (!directExecute && !parsed.confirm) {
-      const planText = await formatPlan(runtime, target, entries, parsed)
+      const planText = await formatPlan(runtime, target, entries, { ...parsed, withDiffs: true })
       if (conflicts.length > 0)
         return { kind: parsed.preview ? 'success' : 'error', text: planText }
       const planId = createPendingPlan(runtime.db, {
