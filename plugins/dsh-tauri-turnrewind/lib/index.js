@@ -5,7 +5,7 @@ import process from 'node:process'
 import { createDialogProjection } from './core/dialog-projection.js'
 import { captureSnapshot, classifyPathChange, createSnapshotStore, currentState, diffAgainstDisk, gitAvailable, gitRef, probeWorkspace, restorePath, snapshotDiff, snapshotFileDiff, stateAt } from './core/git-snapshot.js'
 import { assessWorkspace, defaultBudget } from './core/guard.js'
-import { claimRewindNotices, completeRedoWithNotice, completeUndoWithNotice, createOperation, failTurn, getLatestAppliedUndo, getLatestSnapshotRef, getLatestTurnSummary, getTurn, insertTurn, listReversibleTurns, markTurnSnapshotMissing, openLedger, recordSkippedTurn, registerWorkspace, settleInterruptedTurn, settleNoopTurn, settleOperation, settleTurn, skipTurn } from './core/ledger.js'
+import { claimRewindNotices, completeRedoWithNotice, completeUndoWithNotice, createOperation, createPendingPlan, deletePendingPlan, failTurn, getLatestAppliedUndo, getLatestSnapshotRef, getLatestTurnSummary, getPendingPlan, getTurn, insertTurn, listReversibleTurns, markTurnSnapshotMissing, openLedger, recordSkippedTurn, registerWorkspace, settleInterruptedTurn, settleNoopTurn, settleOperation, settleTurn, skipTurn } from './core/ledger.js'
 import { classifyUndo } from './core/planner.js'
 
 const name = 'dsh-tauri-turnrewind'
@@ -56,6 +56,8 @@ function parseUndoInput(rawInput) {
   let skipConflicts = false
   let force = false
   let redo = false
+  let confirm = false
+  let cancel = false
   for (const part of parts) {
     if (part === '--dry-run') {
       dryRun = true
@@ -72,6 +74,12 @@ function parseUndoInput(rawInput) {
     else if (part === '--redo') {
       redo = true
     }
+    else if (part === '--confirm') {
+      confirm = true
+    }
+    else if (part === '--cancel') {
+      cancel = true
+    }
     else if (part === '--subtree') {
       return { error: 'Recursive subtree undo is not available in the MVP.' }
     }
@@ -79,14 +87,20 @@ function parseUndoInput(rawInput) {
       turnId = part
     }
     else {
-      return { error: 'Usage: /undo [turn-id] [--dry-run|--preview] [--skip-conflicts|--force] or /undo --redo' }
+      return { error: 'Usage: /undo [--preview] | /undo --confirm <plan-id> | /undo --cancel <plan-id> | /undo <turn-id> --force' }
     }
   }
   if (skipConflicts && force)
     return { error: '--skip-conflicts and --force are mutually exclusive.' }
-  if (redo && (turnId !== undefined || dryRun || preview || skipConflicts || force))
+  if (redo && (turnId !== undefined || dryRun || preview || skipConflicts || force || confirm || cancel))
     return { error: '--redo cannot be combined with a turn id or other options.' }
-  return { turnId, dryRun, preview, skipConflicts, force, redo }
+  if ((confirm || cancel) && (dryRun || preview || skipConflicts || force))
+    return { error: '--confirm/--cancel cannot be combined with preview or conflict-override flags.' }
+  if (confirm && cancel)
+    return { error: '--confirm and --cancel are mutually exclusive.' }
+  if ((confirm || cancel) && turnId === undefined)
+    return { error: confirm ? 'Usage: /undo --confirm <plan-id>' : 'Usage: /undo --cancel <plan-id>' }
+  return { turnId, dryRun, preview, skipConflicts, force, redo, confirm, cancel }
 }
 
 function assertSessionOwner(target, agent) {
@@ -350,8 +364,24 @@ async function applyUndo(runtime, active, invocation) {
   if (parsed.redo)
     return applyRedo(runtime, invocation, workspaceDir, workspaceKey)
 
+  // Pending-plan lifecycle: --cancel drops a parked plan; --confirm validates
+  // it and falls through to execution below.
+  if (parsed.cancel) {
+    const removed = deletePendingPlan(runtime.db, parsed.turnId, invocation.agent.session.id, workspaceKey)
+    return { kind: 'success', text: removed ? 'Pending undo cancelled.' : 'No pending undo plan matched (it may have expired or already run).' }
+  }
+
   let target
-  if (parsed.turnId) {
+  let pendingPlan
+  if (parsed.confirm) {
+    pendingPlan = getPendingPlan(runtime.db, parsed.turnId, invocation.agent.session.id, workspaceKey)
+    if (!pendingPlan)
+      return { kind: 'error', text: `No pending undo plan ${parsed.turnId} for this session (it expired after 5 minutes, was replaced by a newer preview, or already ran). Run /undo again to preview a fresh plan.` }
+    target = getTurn(runtime.db, pendingPlan.turnId)
+    if (!target || !await turnRefsExist(runtime.store, target))
+      return { kind: 'error', text: 'The pending plan\u0027s snapshot data no longer exists. Run /undo again to preview a fresh plan.' }
+  }
+  else if (parsed.turnId) {
     target = getTurn(runtime.db, parsed.turnId)
     if (target && !await turnRefsExist(runtime.store, target)) {
       return {
@@ -395,14 +425,35 @@ async function applyUndo(runtime, active, invocation) {
 
     const entries = await buildPlanEntries(runtime, workspaceDir, target, paths)
     const conflicts = entries.filter(entry => entry.conflict)
+    const directExecute = parsed.force || parsed.skipConflicts
 
     // Read-only plan/preview: never touch disk.
-    if (parsed.dryRun || parsed.preview)
+    if (parsed.dryRun)
       return { kind: 'success', text: await formatPlan(runtime, target, entries, parsed) }
 
-    // Default policy refuses to overwrite anything it cannot attribute.
-    if (conflicts.length > 0 && !parsed.skipConflicts && !parsed.force)
-      return { kind: 'error', text: await formatPlan(runtime, target, entries, parsed) }
+    // Bare /undo and --preview park a pending plan; execution waits for the
+    // ✓ button (which sends /undo --confirm <plan-id>) so the user cannot
+    // accidentally skip the preview.
+    if (!directExecute && !parsed.confirm) {
+      const planText = await formatPlan(runtime, target, entries, parsed)
+      if (conflicts.length > 0)
+        return { kind: parsed.preview ? 'success' : 'error', text: planText }
+      const planId = createPendingPlan(runtime.db, {
+        sessionId: invocation.agent.session.id,
+        workspaceKey,
+        turnId: target.turn_id,
+        paths,
+      })
+      return {
+        kind: 'success',
+        text: `${planText}\nplan ${planId}\nSend /undo --confirm ${planId} to apply, or /undo --cancel ${planId} to dismiss.`,
+      }
+    }
+
+    // Confirmed execution: re-verify nothing changed on disk since the
+    // preview before overwriting anything.
+    if (parsed.confirm && conflicts.length > 0)
+      return { kind: 'error', text: `The workspace changed since the preview (${conflicts.length} conflicted file(s)). Run /undo again to refresh the plan; use --force/--skip-conflicts deliberately if needed.` }
 
     const operationId = randomUUID()
     const beforeRef = `refs/turnrewind/operation-${operationId}`

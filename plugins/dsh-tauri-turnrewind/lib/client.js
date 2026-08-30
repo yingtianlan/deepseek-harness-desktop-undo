@@ -22,12 +22,15 @@ globalThis.__ModuleLoader__.load({
     const jsx = jsxRuntime.jsx
     const jsxs = jsxRuntime.jsxs
 
-    const inject = ['slots', 'sessions', 'locale']
+    const inject = ['slots', 'sessions', 'locale', 'connection']
+    // The ✓ button submits the confirm/cancel command line back through the
+    // host's prompt RPC; assigned from apply() once the ctx is available.
+    let submitLine = null
 
     // ------------------------------------------------------------------
     // /undo output parsing: the command prints a structured plain-text plan
-    // (summary line, indented file list, per-file unified diff sections).
-    // Parse it once so the card can render badge, list and colored diffs.
+    // (summary line, indented file list, per-file unified diff sections)
+    // plus a trailing machine-readable `plan <id>` confirmation row.
     // ------------------------------------------------------------------
     function isFileSeparator(raw) {
       return /^--- (?!a\/)(?!b\/)\S/.test(raw)
@@ -35,11 +38,18 @@ globalThis.__ModuleLoader__.load({
 
     function parseUndoOutput(raw) {
       const lines = (raw ?? '').split('\n')
-      const result = { summary: lines[0] ?? '', files: [], dividers: [] }
+      const result = { summary: lines[0] ?? '', files: [], dividers: [], planId: undefined }
       let current = null
       let inDiffs = false
       for (let i = 1; i < lines.length; i++) {
         const line = lines[i]
+        const planRow = /^plan ([0-9a-f-]+)$/.exec(line)
+        if (planRow) {
+          result.planId = planRow[1]
+          continue
+        }
+        if (/^Send \/undo --(?:confirm|cancel)/.test(line))
+          continue
         if (/^(?:Undo will apply|Conflicts \()/.test(line)) {
           inDiffs = true
           result.dividers.push(line)
@@ -194,9 +204,25 @@ globalThis.__ModuleLoader__.load({
       const hasDiff = withDiff.length > 0
       const summary = parsed.summary || (state === 'error' ? '失败' : state === 'running' ? '运行中' : '完成')
       const [expanded, setExpanded] = React.useState(hasDiff)
+      const [submitted, setSubmitted] = React.useState(null)
 
       const titleColor = state === 'error' ? 'var(--dsw-alias-state-error-primary, #f85149)' : 'var(--dsw-alias-label-primary, #cccccc)'
       const showBody = expanded && (hasDiff || parsed.files.length > 0)
+      // Buttons only on a pending preview (plan id present, command finished).
+      const actionable = parsed.planId !== undefined && state === 'ok'
+
+      function submit(kind) {
+        if (submitted || !parsed.planId)
+          return
+        const line = kind === 'confirm'
+          ? `/undo --confirm ${parsed.planId}`
+          : `/undo --cancel ${parsed.planId}`
+        const sent = submitLine ? submitLine(line) : false
+        setSubmitted(sent ? kind : 'failed')
+      }
+
+      const confirmLabel = submitted === 'confirm' ? '已确认，执行中…' : '✓ 执行撤销'
+      const cancelLabel = submitted === 'cancel' ? '已取消' : '✕ 取消'
 
       return jsxs('div', {
         style: { border: `1px solid ${DIFF_COLORS.border}`, background: 'var(--dsw-alias-bg-layer-1, transparent)', borderRadius: 12, margin: '4px 0 4px 4px', overflow: 'hidden', maxWidth: '100%' },
@@ -220,6 +246,29 @@ globalThis.__ModuleLoader__.load({
                     jsx('span', { style: { color: 'var(--dsw-alias-label-tertiary, #8b8b8b)', width: 64, flex: 'none' }, children: file.change }),
                     jsx('span', { children: file.path }),
                   ] }, file.path)) })
+            : null,
+          actionable
+            ? jsxs('div', {
+                style: { display: 'flex', alignItems: 'center', gap: 10, borderTop: `1px solid ${DIFF_COLORS.border}`, padding: '8px 12px' },
+                children: [
+                  jsx('button', {
+                    type: 'button',
+                    onClick() { submit('confirm') },
+                    disabled: submitted !== null,
+                    style: { background: 'var(--dsw-alias-button-primary-fill, #4f46e5)', color: 'var(--dsw-alias-label-primary-foreground, #ffffff)', border: 'none', borderRadius: 8, padding: '5px 16px', fontSize: 12.5 },
+                    children: confirmLabel,
+                  }),
+                  jsx('button', {
+                    type: 'button',
+                    onClick() { submit('cancel') },
+                    disabled: submitted !== null,
+                    style: { background: 'transparent', color: submitted === 'cancel' ? 'var(--dsw-alias-label-tertiary, #8b8b8b)' : 'var(--dsw-alias-state-error-primary, #f85149)', border: '1px solid var(--dsw-alias-border-l2, #30363d)', borderRadius: 8, padding: '5px 16px', fontSize: 12.5 },
+                    children: cancelLabel,
+                  }),
+                  jsx('span', { style: { flex: 1 } }),
+                  jsx('span', { style: { color: 'var(--dsw-alias-label-tertiary, #8b8b8b)', fontSize: 11.5 }, children: submitted === 'failed' ? '发送失败，请手动输入 /undo --confirm' : '执行将恢复下方文件到本轮改动前' }),
+                ],
+              })
             : null,
         ],
       })
@@ -404,6 +453,26 @@ globalThis.__ModuleLoader__.load({
       // Read through the service store, not the ctx.sessions property proxy:
       // the host session service merges a different member under the same name.
       const sessions = ctx.get('sessions')
+      // The ✓ button sends the confirm/cancel command line as a user prompt on
+      // the current session — the same path the input box uses. The host
+      // parses it server-side and executes the parked pending plan.
+      submitLine = (line) => {
+        try {
+          const sessionId = sessions.list.getSnapshot().current
+          if (sessionId === undefined)
+            return false
+          const connection = ctx.get('connection')
+          const api = connection?.api ?? connection?.remote?.api
+          if (typeof api?.sessions?.prompt !== 'function')
+            return false
+          api.sessions.prompt({ sessionId, mode: 'queue', content: line })
+          return true
+        }
+        catch (error) {
+          console.error('[turnrewind] failed to submit undo confirmation:', error)
+          return false
+        }
+      }
 
       function checkOnce() {
         const state = sessions.list.getSnapshot()

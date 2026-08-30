@@ -51,6 +51,15 @@ const SCHEMA = `
     claimed_at TEXT
   );
   CREATE INDEX IF NOT EXISTS rewind_notices_session_idx ON rewind_notices(session_id, status, created_at);
+  CREATE TABLE IF NOT EXISTS pending_plans (
+    plan_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    workspace_key TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
+    paths_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+  );
 `
 
 export function openLedger(rootDir) {
@@ -84,7 +93,61 @@ export function openLedger(rootDir) {
     // Column already exists.
   }
   db.exec(`UPDATE turns SET status = 'abandoned', reversible = 0, error = 'plugin restarted during active turn' WHERE status = 'active'`)
+  purgeExpiredPendingPlans(db)
   return db
+}
+
+// ------------------------------------------------------------------
+// Pending undo plans: /undo parks a confirmed-ready plan here; the client's
+// ✓ button runs `/undo --confirm <plan-id>` to execute it. Rows expire so an
+// ignored preview can never apply hours later against a changed workspace.
+// ------------------------------------------------------------------
+const PENDING_PLAN_TTL_MS = 5 * 60 * 1000
+
+export function purgeExpiredPendingPlans(db) {
+  db.prepare('DELETE FROM pending_plans WHERE expires_at < ?').run(new Date().toISOString())
+}
+
+export function createPendingPlan(db, plan) {
+  db.exec('BEGIN')
+  try {
+    // One live plan per session+workspace: a newer preview replaces the older.
+    db.prepare('DELETE FROM pending_plans WHERE session_id = ? AND workspace_key = ?')
+      .run(plan.sessionId, plan.workspaceKey)
+    const planId = randomUUID().slice(0, 8)
+    const createdAt = new Date().toISOString()
+    db.prepare(`
+      INSERT INTO pending_plans(plan_id, session_id, workspace_key, turn_id, paths_json, created_at, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(planId, plan.sessionId, plan.workspaceKey, plan.turnId, JSON.stringify(plan.paths), createdAt, new Date(Date.now() + PENDING_PLAN_TTL_MS).toISOString())
+    db.exec('COMMIT')
+    return planId
+  }
+  catch (error) {
+    db.exec('ROLLBACK')
+    throw error
+  }
+}
+
+export function getPendingPlan(db, planId, sessionId, workspaceKey) {
+  const row = db.prepare(`
+    SELECT * FROM pending_plans
+    WHERE plan_id = ? AND session_id = ? AND workspace_key = ?
+  `).get(planId, sessionId, workspaceKey)
+  if (row === undefined)
+    return undefined
+  if (row.expires_at < new Date().toISOString()) {
+    db.prepare('DELETE FROM pending_plans WHERE plan_id = ?').run(planId)
+    return undefined
+  }
+  return { turnId: row.turn_id, paths: JSON.parse(row.paths_json), createdAt: row.created_at }
+}
+
+export function deletePendingPlan(db, planId, sessionId, workspaceKey) {
+  const result = db.prepare(`
+    DELETE FROM pending_plans WHERE plan_id = ? AND session_id = ? AND workspace_key = ?
+  `).run(planId, sessionId, workspaceKey)
+  return result.changes > 0
 }
 
 export function registerWorkspace(db, workspaceKey, workspacePath, snapshotRepo) {

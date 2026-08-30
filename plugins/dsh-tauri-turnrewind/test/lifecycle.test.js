@@ -40,6 +40,15 @@ async function setupTurn() {
   return { root, workspace, db, runtime, active: new Map(), invocation }
 }
 
+/** Bare /undo now parks a pending plan; execute it like the ✓ button would. */
+async function undoWithConfirm(runtime, active, invocation) {
+  const preview = await applyUndo(runtime, active, invocation())
+  assert.equal(preview.kind, 'success')
+  const planId = /plan ([0-9a-f-]+)/u.exec(preview.text)?.[1]
+  assert.ok(planId, 'preview must carry a pending plan id')
+  return applyUndo(runtime, active, invocation(`--confirm ${planId}`))
+}
+
 it('plans, previews, and applies conflict policies', async () => {
   const { root, workspace, db, runtime, active, invocation } = await setupTurn()
   try {
@@ -100,7 +109,7 @@ it('forces a restore over a conflicted file', async () => {
 it('round-trips undo and redo', async () => {
   const { root, workspace, db, runtime, active, invocation } = await setupTurn()
   try {
-    const undo = await applyUndo(runtime, active, invocation())
+    const undo = await undoWithConfirm(runtime, active, invocation)
     assert.equal(undo.kind, 'success')
     assert.equal(await readFile(join(workspace, 'a.txt'), 'utf8'), 'v1\n')
     await assert.rejects(stat(join(workspace, 'c.txt')))
@@ -113,7 +122,7 @@ it('round-trips undo and redo', async () => {
     assert.equal(getTurn(db, 'session:1').status, 'settled')
 
     // The turn is reversible again after the redo.
-    const undoAgain = await applyUndo(runtime, active, invocation())
+    const undoAgain = await undoWithConfirm(runtime, active, invocation)
     assert.equal(undoAgain.kind, 'success')
     assert.equal(await readFile(join(workspace, 'a.txt'), 'utf8'), 'v1\n')
 
@@ -131,7 +140,7 @@ it('round-trips undo and redo', async () => {
 it('blocks redo when the disk changed after the undo', async () => {
   const { root, workspace, db, runtime, active, invocation } = await setupTurn()
   try {
-    const undo = await applyUndo(runtime, active, invocation())
+    const undo = await undoWithConfirm(runtime, active, invocation)
     assert.equal(undo.kind, 'success')
     await writeFile(join(workspace, 'a.txt'), 'edited-after-undo\n')
     const redo = await applyUndo(runtime, active, invocation('--redo'))
