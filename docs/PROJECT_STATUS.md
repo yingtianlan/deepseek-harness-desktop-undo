@@ -1,6 +1,6 @@
 # 项目进展与交接备忘
 
-> 更新于 2026-08-30。用途：换设备/换会话时快速接续 turn-rewind 插件开发。
+> 更新于 2026-08-31。用途：换设备/换会话时快速接续 turn-rewind 插件开发。
 > 详细设计见 `docs/TURN_REWIND.md`，用户文档见 `plugins/dsh-tauri-turnrewind/README.md`。
 
 ## 一句话状态
@@ -11,8 +11,8 @@ turn-rewind 插件 **v0.1.0 已发布**（独立仓库，CI 绿）；完整 undo
 
 | 仓库 | 位置/远程 | 用途 | 当前位置 |
 | --- | --- | --- | --- |
-| 桌面开发仓库 | 本机 `Desktop/dsh` ↔ `origin`(dsh-tauri-desk 官方) + `undo`(我的 fork) | 插件开发 + 真机验证 | `feature/turn-rewind` @ `4974221` |
-| 桌面仓库 fork | github.com/yingtianlan/deepseek-harness-desktop-undo | fork（备份/PR） | feature/turn-rewind @ `befd18c`（**本地 `4974221` README 修正未推**） |
+| 桌面开发仓库 | 本机 `Desktop/dsh` ↔ `origin`(dsh-tauri-desk 官方) + `undo`(我的 fork) | 插件开发 + 真机验证 | `feature/turn-rewind` @ `63ad6a8`；工作树有未提交的 P0-1 barrier 修复 |
+| 桌面仓库 fork | github.com/yingtianlan/deepseek-harness-desktop-undo | fork（备份/PR） | feature/turn-rewind @ `63ad6a8`；当前开发仓库已同步该远程引用 |
 | 插件发布仓库 | 本机 `Desktop/dsh-tauri-turnrewind` ↔ github.com/yingtianlan/dsh-tauri-turnrewind | 独立发布（v0.1.0 tag，CI 绿） | main @ `6bc62ae` |
 | 官方插件参考源码 | 本机 `Desktop/dsh/source/dsh-tauri-plugins` | 只读参考（webServer 路由/client 模式都抄的它） | 本地 clone |
 
@@ -26,21 +26,21 @@ turn-rewind 插件 **v0.1.0 已发布**（独立仓库，CI 绿）；完整 undo
 - 取消/过期 → 卡片塌缩为无边框细行 `▸ undo · 已取消`（按钮不复活，路由二次校验兜底）
 - 工作区守卫三层：家目录/祖先/盘根硬拒 + 预算探测（限额与守卫同源，`TURNREWIND_MAX_FILES`/
   `TURNREWIND_MAX_BYTES`）+ claim 时记录；`skipped` turn + 一次性提示（会话内消息 + 主题化弹窗）
-- git 全异步（不冻结 Host）、git 探测、快照链自愈、死引用跳过、排除规则收窄（去掉 `*token*` 误伤）
+- git 全异步（不冻结 Host）、baseline barrier、git 探测、快照链自愈、死引用跳过、排除规则收窄（去掉 `*token*` 误伤）
+- P0-1 已完成本地修复：连续 turn、重复 claimed、先到 turn/end、dispose/HMR waiter/队列清理均有保护；详见 `TURN_REWIND_PRODUCTION_AUDIT.md`
 - 独立发布仓库剥离：`scripts/sync.mjs` 同步流、CI（Node 22/24 矩阵）、lockfile 钉版本
 
 ## ⚠️ 未推送提醒
 
-桌面仓库 `feature/turn-rewind` 本地 `4974221`（README 修正）**领先 fork 远程 1 个提交**
-（当时网络断没推成）。换设备前在旧设备 `git push undo feature/turn-rewind`；
-若已在颠覆性网络环境，新设备需从旧设备取包。
+桌面仓库 `feature/turn-rewind` 当前与本地远程引用 `undo/feature/turn-rewind` 同为 `63ad6a8`；
+但 baseline barrier 及后续回归修复目前仍在工作树，尚未提交或推送。完成审查并确认稳定后，再提交并推送。
 
 ## 换设备环境搭建
 
 1. clone 桌面仓库 + 检出 `feature/turn-rewind`；
 2. `pnpm install`；
 3. 插件 link 安装（命令见插件 README「从源码开发」节）；
-4. 测试：`pnpm exec vitest run plugins/dsh-tauri-turnrewind/test --testTimeout=30000`（当前 43 个全绿）；
+4. 测试：`pnpm exec vitest run plugins/dsh-tauri-turnrewind/test --testTimeout=120000 --maxWorkers=1`（当前 9 个文件、49 个测试全绿）；
 5. dev 数据目录 `~/.dsh.dev`（自动），Host 崩溃时看 `~/.dsh.dev` 旁 `dsh-web.dev.log`。
 
 ## 下一步待办（优先级序）

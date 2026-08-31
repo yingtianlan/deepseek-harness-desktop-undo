@@ -10,7 +10,10 @@ import { classifyUndo } from './core/planner.js'
 
 const name = 'dsh-tauri-turnrewind'
 const inject = ['commands', 'sessionProjections', 'webServer']
-const ROOT_DIR = process.env.DSH_HOME ? resolve(process.env.DSH_HOME) : join(homedir(), '.dsh')
+function rootDir() {
+  return process.env.DSH_HOME ? resolve(process.env.DSH_HOME) : join(homedir(), '.dsh')
+}
+
 const TURN_ID_RE = /[^\w.-]/gu
 
 function refSuffix(turnId, phase) {
@@ -26,10 +29,9 @@ function workspaceForSession(session) {
   if (typeof cwd !== 'string' || cwd.length === 0)
     return undefined
   const resolved = resolve(cwd)
-  // Never snapshot the home directory: the blocking spawnSync git add walks
-  // hundreds of GB, freezes the whole event loop for minutes, and fails on
-  // root-owned dirs (docker volumes, container storage). Sessions running
-  // from $HOME (e.g. the QQ bridge) simply get no turn snapshots.
+  // Never snapshot the home directory: a full git baseline can walk hundreds
+  // of GB and fail on root-owned dirs (docker volumes, container storage).
+  // Sessions running from $HOME (e.g. the QQ bridge) simply get no turn snapshots.
   if (resolved === homedir())
     return undefined
   return resolved
@@ -46,6 +48,50 @@ function workspaceIssue(workspaceDir) {
 
 function activeKey(sessionId, turn) {
   return `${sessionId}:${turn}`
+}
+
+function createDeferred() {
+  let resolvePromise
+  const promise = new Promise((resolveValue) => {
+    resolvePromise = resolveValue
+  })
+  return { promise, resolve: resolvePromise, settled: false }
+}
+
+function settleDeferred(deferred, value) {
+  if (deferred.settled)
+    return
+  deferred.settled = true
+  deferred.resolve(value)
+}
+
+export async function waitForTurnBaseline(activeTurns, sessionId, turn, signal) {
+  const entry = activeTurns.get(activeKey(sessionId, turn))
+  if (!entry?.baseline)
+    return undefined
+  if (!signal)
+    return entry.baseline.promise
+  signal.throwIfAborted()
+  let removeAbortListener
+  const aborted = new Promise((resolvePromise) => {
+    const onAbort = () => resolvePromise({ kind: 'aborted' })
+    signal.addEventListener('abort', onAbort, { once: true })
+    removeAbortListener = () => signal.removeEventListener('abort', onAbort)
+  })
+  try {
+    const result = await Promise.race([
+      entry.baseline.promise.then(value => ({ kind: 'baseline', value })),
+      aborted,
+    ])
+    if (result.kind === 'aborted') {
+      signal.throwIfAborted()
+      return undefined
+    }
+    return result.value
+  }
+  finally {
+    removeAbortListener?.()
+  }
 }
 
 function parseUndoInput(rawInput) {
@@ -234,12 +280,16 @@ function workspaceHasActiveTurn(active, workspaceKey) {
 
 async function settleActiveTurn(ledger, active, key, reason) {
   const current = active.get(key)
-  if (!current)
+  if (!current || current.runtime.disposed)
     return
   try {
     const afterRef = refSuffix(current.turnId, 'after')
     await captureSnapshot(current.runtime.store, afterRef, `turnrewind after ${current.turnId}`, current.runtime.parentRef)
+    if (current.runtime.disposed)
+      return
     const changed = await snapshotDiff(current.runtime.store, current.beforeRef, afterRef)
+    if (current.runtime.disposed)
+      return
     if (changed.length === 0) {
       settleNoopTurn(ledger, current.turnId, afterRef)
     }
@@ -252,7 +302,8 @@ async function settleActiveTurn(ledger, active, key, reason) {
     current.runtime.parentRef = afterRef
   }
   catch (error) {
-    failTurn(ledger, current.turnId, error)
+    if (!current.runtime.disposed)
+      failTurn(ledger, current.turnId, error)
   }
   finally {
     active.delete(key)
@@ -260,8 +311,8 @@ async function settleActiveTurn(ledger, active, key, reason) {
 }
 
 async function settleSessionTurns(ledger, active, sessionId, exceptKey, reason) {
-  for (const [key] of [...active.entries()]) {
-    if (key === exceptKey || !key.startsWith(`${sessionId}:`))
+  for (const [key, entry] of [...active.entries()]) {
+    if (key === exceptKey || !key.startsWith(`${sessionId}:`) || !entry.baselineReady)
       continue
     await settleActiveTurn(ledger, active, key, reason)
   }
@@ -596,9 +647,12 @@ function apply(ctx, config = {}) {
     maxDepth: 20,
     maxDirs: 10000,
   }, config.guard)
-  const ledger = openLedger(ROOT_DIR)
+  const dataRoot = rootDir()
+  const ledger = openLedger(dataRoot)
   const active = new Map()
+  const untrackedTurns = new Set()
   const workspaceStores = new Map()
+  let disposed = false
   // Workspaces rejected by the guard: key -> reason. Cached so we do not re-walk
   // a huge directory on every turn; an undo for such a workspace is impossible
   // anyway because no snapshot was ever captured.
@@ -694,12 +748,27 @@ function apply(ctx, config = {}) {
   // one session never interleave. Git now runs asynchronously, so ordering is
   // enforced here instead of by the event loop blocking.
   const sessionChains = new Map()
+  const endedTurns = new Map()
+  const MAX_ENDED_TURNS = 4096
 
   function enqueueTurnTask(sessionId, task) {
     const previous = sessionChains.get(sessionId) ?? Promise.resolve()
     const next = previous.then(task)
-    sessionChains.set(sessionId, next.catch(() => {}))
+    const settled = next.catch(() => {})
+    sessionChains.set(sessionId, settled)
+    void settled.then(() => {
+      if (sessionChains.get(sessionId) === settled)
+        sessionChains.delete(sessionId)
+    })
     return next
+  }
+
+  function rememberEndedTurn(key) {
+    const alreadyEnded = endedTurns.has(key)
+    endedTurns.set(key, true)
+    while (endedTurns.size > MAX_ENDED_TURNS)
+      endedTurns.delete(endedTurns.keys().next().value)
+    return alreadyEnded
   }
 
   function ensureRuntime(agent) {
@@ -717,7 +786,7 @@ function apply(ctx, config = {}) {
         ctx.logger?.warn?.(`[turnrewind] skip snapshot tracking for ${workspaceDir}: ${probe.reason}`)
         return undefined
       }
-      const store = createSnapshotStore(ROOT_DIR, workspaceDir)
+      const store = createSnapshotStore(dataRoot, workspaceDir)
       const latest = getLatestSnapshotRef(ledger, workspaceKey)
       registerWorkspace(ledger, workspaceKey, workspaceDir, store.repoDir)
       runtime = {
@@ -727,15 +796,193 @@ function apply(ctx, config = {}) {
         workspaceDir,
         parentRef: latest,
         undoing: false,
+        disposed: false,
       }
       workspaceStores.set(workspaceKey, runtime)
     }
     return runtime
   }
 
-  ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
+  function recordSkipped(turnId, sessionId, workspaceKey, startedAt, reason, notify = true) {
+    untrackedTurns.add(turnId)
+    try {
+      if (notify) {
+        recordSkippedTurn(ledger, {
+          turnId,
+          sessionId,
+          workspaceKey,
+          startedAt,
+        }, reason)
+      }
+      else {
+        skipTurn(ledger, {
+          turnId,
+          sessionId,
+          workspaceKey,
+          startedAt,
+        }, reason)
+      }
+    }
+    catch (error) {
+      console.error(`turnrewind: failed to record skipped turn ${turnId}: ${String(error)}`)
+    }
+    console.error(`turnrewind: skipped turn ${turnId}: ${reason}`)
+  }
+
+  function reserveTurnBaseline(agent, turn) {
+    if (disposed)
+      return undefined
+    const sessionId = agent.session.id
+    const key = activeKey(sessionId, turn)
+    const existing = active.get(key)
+    if (existing)
+      return existing
+    if (untrackedTurns.has(key) || endedTurns.has(key))
+      return undefined
+    const existingTurn = getTurn(ledger, key)
+    if (existingTurn)
+      return undefined
+    const startedAt = new Date().toISOString()
+    const workspaceDir = workspaceForAgent(agent)
+    if (!workspaceDir) {
+      // The hard guard in workspaceForSession refused the cwd (e.g. $HOME).
+      // Keep a durable skipped record so /undo explains why instead of
+      // pretending the session has no workspace.
+      const cwd = agent?.session?.header?.cwd
+      if (typeof cwd === 'string' && cwd.length > 0) {
+        const assessment = assessWorkspace(resolve(cwd))
+        if (!assessment.eligible)
+          recordSkipped(key, sessionId, workspaceKeyFor(resolve(cwd)), startedAt, assessment.reason)
+      }
+      return undefined
+    }
+
+    const workspaceKey = workspaceKeyFor(workspaceDir)
+    const issue = workspaceIssue(workspaceDir)
+    if (issue) {
+      recordSkipped(key, sessionId, workspaceKey, startedAt, issue)
+      return undefined
+    }
+
+    const runtime = ensureRuntime(agent)
+    if (!runtime) {
+      // Passed the metadata guard but refused by the deeper probe (depth/dir
+      // caps): surface that reason instead of staying silent.
+      const reason = rejectedWorkspaces.get(workspaceKey)
+      if (reason)
+        recordSkipped(key, sessionId, workspaceKey, startedAt, `TURNREWIND_WORKSPACE_TOO_LARGE: ${reason}`)
+      return undefined
+    }
+
+    if (runtime.undoing) {
+      recordSkipped(key, sessionId, workspaceKey, startedAt, 'TURNREWIND_WORKSPACE_BUSY: an undo operation is running')
+      return undefined
+    }
+
+    // `agent/inbox/claimed` is a fire-and-forget notification. Create the
+    // deferred synchronously so the awaited pre-step waterfall can always find
+    // the reservation after Inbox.claim() returns.
+    const beforeRef = refSuffix(key, 'before')
+    const baseline = createDeferred()
+    const entry = {
+      runtime,
+      sessionId,
+      workspaceKey: runtime.workspaceKey,
+      turnId: key,
+      beforeRef,
+      baseline,
+      baselineReady: false,
+      startedAt,
+      turn,
+    }
+    active.set(key, entry)
+
+    const baselineTask = async () => {
+      if (disposed || active.get(key) !== entry) {
+        settleDeferred(baseline, { ok: false, reason: 'turn was replaced before baseline capture' })
+        return
+      }
+      try {
+        const available = await gitAvailable()
+        if (disposed || runtime.disposed) {
+          settleDeferred(baseline, { ok: false, reason: 'turnrewind plugin disposed during baseline capture' })
+          return
+        }
+        if (!available) {
+          active.delete(key)
+          const reason = 'TURNREWIND_GIT_UNAVAILABLE: the git executable was not found on PATH; file undo is disabled'
+          recordSkipped(key, sessionId, runtime.workspaceKey, startedAt, reason)
+          settleDeferred(baseline, { ok: false, reason })
+          return
+        }
+        // A model switch can open B immediately after A is interrupted. Finalize A
+        // before capturing B's baseline so B does not absorb A's partial files.
+        await settleSessionTurns(ledger, active, sessionId, key, 'interrupted by a newer turn in the same session')
+        if (disposed || runtime.disposed) {
+          settleDeferred(baseline, { ok: false, reason: 'turnrewind plugin disposed during baseline capture' })
+          return
+        }
+        await captureSnapshot(runtime.store, beforeRef, `turnrewind before ${key}`, runtime.parentRef)
+        if (disposed || runtime.disposed) {
+          settleDeferred(baseline, { ok: false, reason: 'turnrewind plugin disposed during baseline capture' })
+          return
+        }
+        insertTurn(ledger, {
+          turnId: key,
+          sessionId,
+          parentTurnId: undefined,
+          workspaceKey: runtime.workspaceKey,
+          startedAt,
+          beforeRef,
+        })
+        entry.baselineReady = true
+        settleDeferred(baseline, { ok: true })
+      }
+      catch (error) {
+        active.delete(key)
+        const reason = `TURNREWIND_CAPTURE_FAILED: ${String(error)}`
+        // Transient capture failure (disk full, permissions): record the skip
+        // before releasing the barrier, so the turn is explicitly untracked.
+        if (!disposed && !runtime.disposed)
+          recordSkipped(key, sessionId, runtime.workspaceKey, startedAt, reason, false)
+        settleDeferred(baseline, { ok: false, reason })
+        if (!disposed && !runtime.disposed)
+          console.error(`turnrewind: failed to start turn ${key}: ${String(error)}`)
+      }
+    }
+    void enqueueTurnTask(sessionId, baselineTask).catch((error) => {
+      // Keep the barrier finite even if future changes add an exception outside
+      // baselineTask's guarded body.
+      if (active.get(key) === entry)
+        active.delete(key)
+      const reason = `TURNREWIND_CAPTURE_FAILED: ${String(error)}`
+      if (!disposed && !runtime.disposed)
+        recordSkipped(key, sessionId, runtime.workspaceKey, startedAt, reason, false)
+      settleDeferred(baseline, { ok: false, reason })
+      if (!disposed && !runtime.disposed)
+        console.error(`turnrewind: baseline queue failed for ${key}: ${String(error)}`)
+    })
+    return entry
+  }
+
+  ctx.on('agent/pre-step', async ({ agent, turn, signal }, next) => {
+    // `agent/inbox/claimed` is an emit notification: Cordis deliberately does
+    // not await listener promises. It synchronously reserves the active entry
+    // and starts the baseline task, while this awaited waterfall is the actual
+    // execution barrier. No downstream pre-step listener, model request, or
+    // tool call may run until the before snapshot (or an explicit skip/failure)
+    // has settled. The fallback creates the reservation here as well, so a
+    // missed notification cannot silently allow an unprotected turn through.
+    const key = activeKey(agent.session.id, turn)
+    const entry = active.get(key) ?? (untrackedTurns.has(key) || endedTurns.has(key) ? undefined : reserveTurnBaseline(agent, turn))
+    await waitForTurnBaseline(active, agent.session.id, turn, signal)
+    signal.throwIfAborted()
+    if (disposed)
+      return { kind: 'reject' }
+    if (!entry && workspaceForAgent(agent) && !untrackedTurns.has(key) && !endedTurns.has(key))
+      console.error(`turnrewind: no baseline reservation for ${key}; turn is explicitly untracked`)
     const decision = await next()
-    if (decision.kind === 'reject' || signal.aborted)
+    if (decision.kind === 'reject' || signal.aborted || disposed)
       return decision
     // Claiming must work even when workspaceForAgent refuses the cwd (home
     // dir): that is exactly the session kind the unsupported heads-up is
@@ -755,139 +1002,17 @@ function apply(ctx, config = {}) {
   })
 
   ctx.on('agent/inbox/claimed', (payload) => {
-    const sessionId = payload.agent.session.id
-    const key = activeKey(sessionId, payload.turn)
-    const workspaceDir = workspaceForAgent(payload.agent)
-    if (!workspaceDir) {
-      // The hard guard in workspaceForSession refused the cwd (e.g. $HOME).
-      // The turn still gets a skipped record so /undo explains why instead of
-      // pretending the session has no workspace at all.
-      const cwd = payload.agent?.session?.header?.cwd
-      if (typeof cwd === 'string' && cwd.length > 0) {
-        const assessment = assessWorkspace(resolve(cwd))
-        if (!assessment.eligible) {
-          try {
-            recordSkippedTurn(ledger, {
-              turnId: key,
-              sessionId,
-              workspaceKey: workspaceKeyFor(resolve(cwd)),
-              startedAt: new Date().toISOString(),
-            }, assessment.reason)
-          }
-          catch (error) {
-            console.error(`turnrewind: failed to record skipped turn ${key}: ${String(error)}`)
-          }
-          console.error(`turnrewind: skipped turn ${key}: ${assessment.reason}`)
-        }
-      }
-      return
-    }
-    const issue = workspaceIssue(workspaceDir)
-    if (issue) {
-      // Record the refusal and queue a one-time heads-up so the user sees why
-      // this turn will not be undoable instead of discovering it via /undo.
-      try {
-        recordSkippedTurn(ledger, {
-          turnId: key,
-          sessionId,
-          workspaceKey: workspaceKeyFor(workspaceDir),
-          startedAt: new Date().toISOString(),
-        }, issue)
-      }
-      catch (error) {
-        console.error(`turnrewind: failed to record skipped turn ${key}: ${String(error)}`)
-      }
-      console.error(`turnrewind: skipped turn ${key}: ${issue}`)
-      return
-    }
-    const runtime = ensureRuntime(payload.agent)
-    if (!runtime) {
-      // Passed the metadata guard but refused by the deeper probe probe
-      // (depth/dir caps): surface that reason instead of staying silent.
-      const reason = rejectedWorkspaces.get(workspaceKeyFor(workspaceDir))
-      if (reason) {
-        try {
-          recordSkippedTurn(ledger, {
-            turnId: key,
-            sessionId,
-            workspaceKey: workspaceKeyFor(workspaceDir),
-            startedAt: new Date().toISOString(),
-          }, `TURNREWIND_WORKSPACE_TOO_LARGE: ${reason}`)
-        }
-        catch (error) {
-          console.error(`turnrewind: failed to record skipped turn ${key}: ${String(error)}`)
-        }
-        console.error(`turnrewind: skipped turn ${key}: ${reason}`)
-      }
-      return
-    }
-    if (runtime.undoing || active.has(key)) {
-      console.error(`turnrewind: skipped turn ${key} while an undo is running or on duplicate claim`)
-      return
-    }
-    // Reserve the slot synchronously: the baseline capture below is async, and
-    // /undo must never start while it is still writing the snapshot index.
-    const beforeRef = refSuffix(key, 'before')
-    const entry = { runtime, sessionId, workspaceKey: runtime.workspaceKey, turnId: key, beforeRef, turn: payload.turn }
-    active.set(key, entry)
-    enqueueTurnTask(sessionId, async () => {
-      if (active.get(key) !== entry)
-        return
-      if (!(await gitAvailable())) {
-        active.delete(key)
-        const reason = 'TURNREWIND_GIT_UNAVAILABLE: the git executable was not found on PATH; file undo is disabled'
-        try {
-          recordSkippedTurn(ledger, {
-            turnId: key,
-            sessionId,
-            workspaceKey: runtime.workspaceKey,
-            startedAt: new Date().toISOString(),
-          }, reason)
-        }
-        catch (error) {
-          console.error(`turnrewind: failed to record skipped turn ${key}: ${String(error)}`)
-        }
-        console.error(`turnrewind: skipped turn ${key}: ${reason}`)
-        return
-      }
-      // A model switch can open B immediately after A is interrupted. Finalize A
-      // before capturing B's baseline so B does not absorb A's partial files.
-      await settleSessionTurns(ledger, active, sessionId, key, 'interrupted by a newer turn in the same session')
-      try {
-        await captureSnapshot(runtime.store, beforeRef, `turnrewind before ${key}`, runtime.parentRef)
-        insertTurn(ledger, {
-          turnId: key,
-          sessionId,
-          parentTurnId: undefined,
-          workspaceKey: runtime.workspaceKey,
-          startedAt: new Date().toISOString(),
-          beforeRef,
-        })
-      }
-      catch (error) {
-        active.delete(key)
-        // Transient capture failure (disk full, permissions): record the skip
-        // for /undo feedback, but without the persistent unsupported heads-up.
-        try {
-          skipTurn(ledger, {
-            turnId: key,
-            sessionId,
-            workspaceKey: runtime.workspaceKey,
-            startedAt: new Date().toISOString(),
-          }, `TURNREWIND_CAPTURE_FAILED: ${String(error)}`)
-        }
-        catch (ledgerError) {
-          console.error(`turnrewind: failed to record skipped turn ${key}: ${String(ledgerError)}`)
-        }
-        console.error(`turnrewind: failed to start turn ${key}: ${String(error)}`)
-      }
-    })
+    if (!disposed)
+      reserveTurnBaseline(payload.agent, payload.turn)
   })
 
   ctx.on('session/event', (session, event) => {
-    if (event.type !== 'turn/end' || typeof event.data?.turn !== 'number')
+    if (disposed || event.type !== 'turn/end' || typeof event.data?.turn !== 'number')
       return
     const key = activeKey(session.id, event.data.turn)
+    rememberEndedTurn(key)
+    if (untrackedTurns.delete(key))
+      return
     if (!active.has(key))
       return
     const reason = event.data.reason?.kind
@@ -905,7 +1030,7 @@ function apply(ctx, config = {}) {
     console.error(`turnrewind: observed agent error for ${activeKey(payload.agent.session.id, payload.turn)}: ${String(payload.error)}`)
   })
   ctx.on('agent/status', ({ agent, status }) => {
-    if (status !== 'idle')
+    if (disposed || status !== 'idle')
       return
     const sessionId = agent.session.id
     for (const key of [...active.keys()]) {
@@ -913,10 +1038,23 @@ function apply(ctx, config = {}) {
         enqueueTurnTask(sessionId, () => settleActiveTurn(ledger, active, key, 'agent became idle after interruption'))
     }
   })
-  ctx.effect(() => () => ledger.close(), 'turnrewind ledger')
   ctx.effect(() => () => {
+    // A plugin stop/HMR can happen while pre-step is awaiting a baseline. Mark
+    // every runtime first, release waiters, then wait for FIFO tasks before
+    // closing SQLite.
+    disposed = true
+    for (const runtime of workspaceStores.values())
+      runtime.disposed = true
+    for (const entry of active.values())
+      settleDeferred(entry.baseline, { ok: false, reason: 'turnrewind plugin disposed during baseline capture' })
     active.clear()
+    untrackedTurns.clear()
+    endedTurns.clear()
     workspaceStores.clear()
+    return (async () => {
+      await Promise.allSettled([...sessionChains.values()])
+      ledger.close()
+    })()
   }, 'turnrewind runtime')
   ctx.effect(() => commands.register({
     name: 'undo',

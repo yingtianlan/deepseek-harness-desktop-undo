@@ -10,7 +10,7 @@
 
 - 为已领取的 Agent turn 建立私有 Git 快照；
 - 将快照映射记录到 `$DSH_HOME/ledger.sqlite`；
-- **git 全程异步执行**：快照、diff、恢复都不阻塞 Host 事件循环；同一会话的捕获/结算按 FIFO 串行，不同会话并行；
+- **git 全程异步执行**：快照、diff、恢复都不阻塞 Host 事件循环；同一会话的捕获/结算按 FIFO 串行，不同会话并行；收到 turn 输入后，before snapshot 通过 `agent/pre-step` barrier 完成后才允许模型和工具执行；
 - **git 可用性探测**：系统没有 git 时，turn 显式记为 `skipped`（原因 `TURNREWIND_GIT_UNAVAILABLE`），而不是静默失败；
 - **快照链自愈**：私有快照仓库被删/损坏后，下一次捕获自动降级重建基线（日志有一条 warning），后续 turn 照常可撤销；被清空前留下来的旧 turn 会在 `/undo` 选目标时自动识别为死快照并标记跳过（`snapshot ref missing`），不会甩出 git 原始报错；
 - **工作区资格守卫**：家目录、家目录的祖先、盘根目录，以及超过快照预算（文件数 / 总大小 / 单文件大小）的目录不做快照，turn 记为 `skipped` 并向 `/undo` 说明原因（见「工作区资格与快照预算」）；

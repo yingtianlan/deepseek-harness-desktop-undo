@@ -251,7 +251,8 @@ operation_paths(operation_id, path, expected_current_digest,
 首版用 `spawnSync` 执行全部 git 命令，大工作区上会冻结整个 Host（所有会话、Web UI、健康检查），叠加 Windows Defender 实时扫描时可达分钟级。现已全部改为异步 `spawn`：
 
 - 同一会话的捕获、结算按 FIFO 链串行，`turn/end` 的结算自动排队在基线捕获之后；不同会话之间并行；
-- `agent/inbox/claimed` 同步占位 active 表条目，保证异步基线捕获期间 `/undo` 无法插入；
+- `agent/inbox/claimed` 同步占位 active 表条目并创建 baseline deferred；随后由 awaited `agent/pre-step` waterfall 等待基线完成，因此 `step/start`、模型请求和工具执行不会跑在 before snapshot 之前；
+- 基线任务仍通过每 session FIFO 串行执行；捕获失败会先记录明确的 `skipped` 原因并释放 barrier，turn 本身继续运行但不提供 Undo；
 - 命令 handler 返回 Promise（内核以 `Promise.resolve(output)` 结算），`/undo` 的 diff、冲突检测与恢复均异步执行；
 - git 可用性在进程内探测一次，缺失时 turn 显式记为 `skipped`（`TURNREWIND_GIT_UNAVAILABLE`），不再静默失败；
 - `parentRef` 指向的快照不存在时（快照目录被清理/损坏），捕获降级为无父基线并在日志留一条 warning，快照链自愈而不是级联失败。
