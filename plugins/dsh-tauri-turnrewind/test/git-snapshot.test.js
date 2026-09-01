@@ -1,17 +1,17 @@
 import assert from 'node:assert/strict'
-import { Buffer } from 'node:buffer'
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { it } from 'vitest'
 import { captureSnapshot, classifyPathChange, createSnapshotStore, currentState, diffAgainstDisk, gitAvailable, probeWorkspace, restorePath, snapshotDiff, snapshotFileDiff, stateAt } from '../lib/core/git-snapshot.js'
 import { completeUndoWithNotice, getLatestTurn, insertTurn, openLedger, settleInterruptedTurn, settleTurn } from '../lib/core/ledger.js'
+import { initGitWorkspace } from './git-test-utils.js'
 
 it('captures and restores modified, added, and deleted files', async () => {
   const root = await mkdtemp(join(tmpdir(), 'turnrewind-test-'))
   const workspace = join(root, 'workspace')
   try {
-    await mkdir(workspace, { recursive: true })
+    await initGitWorkspace(workspace)
     await writeFile(join(workspace, 'modified.txt'), 'before')
     await writeFile(join(workspace, 'deleted.txt'), 'to delete')
 
@@ -46,7 +46,7 @@ it('allows sequential undo of an interrupted turn after a later turn', async () 
   const filesB = ['b-1.txt', 'b-2.txt']
   const db = openLedger(join(root, 'ledger'))
   try {
-    await mkdir(workspace, { recursive: true })
+    await initGitWorkspace(workspace)
     const store = createSnapshotStore(join(root, 'data'), workspace)
     const beforeA = await captureSnapshot(store, 'refs/turnrewind/a-before', 'A before')
     for (const file of filesA) await writeFile(join(workspace, file), 'A')
@@ -97,7 +97,7 @@ it('handles non-ASCII paths without reporting a false restore', async () => {
   const workspace = join(root, 'workspace')
   const fileName = '新建文本文档.txt'
   try {
-    await mkdir(workspace, { recursive: true })
+    await initGitWorkspace(workspace)
     await writeFile(join(workspace, fileName), 'before')
     const store = createSnapshotStore(join(root, 'data'), workspace)
     const before = await captureSnapshot(store, 'refs/turnrewind/unicode-before', 'before')
@@ -116,7 +116,7 @@ it('does not treat CRLF conversion as a file conflict', async () => {
   const root = await mkdtemp(join(tmpdir(), 'turnrewind-crlf-test-'))
   const workspace = join(root, 'workspace')
   try {
-    await mkdir(workspace, { recursive: true })
+    await initGitWorkspace(workspace)
     await writeFile(join(workspace, 'line-endings.txt'), 'before\nline\n')
     const store = createSnapshotStore(join(root, 'data'), workspace)
     const before = await captureSnapshot(store, 'refs/turnrewind/crlf-before', 'before')
@@ -134,7 +134,7 @@ it('classifies path changes and produces codex-style diffs', async () => {
   const root = await mkdtemp(join(tmpdir(), 'turnrewind-diff-test-'))
   const workspace = join(root, 'workspace')
   try {
-    await mkdir(workspace, { recursive: true })
+    await initGitWorkspace(workspace)
     await writeFile(join(workspace, 'modified.txt'), 'one\ntwo\n')
     await writeFile(join(workspace, 'deleted.txt'), 'gone\n')
 
@@ -174,7 +174,7 @@ it('truncates long unified diffs', async () => {
   const root = await mkdtemp(join(tmpdir(), 'turnrewind-truncate-test-'))
   const workspace = join(root, 'workspace')
   try {
-    await mkdir(workspace, { recursive: true })
+    await initGitWorkspace(workspace)
     await writeFile(join(workspace, 'big.txt'), 'old\n')
     const store = createSnapshotStore(join(root, 'data'), workspace)
     const before = await captureSnapshot(store, 'refs/turnrewind/truncate-before', 'before')
@@ -194,7 +194,7 @@ it('rejects paths outside the workspace', async () => {
   const root = await mkdtemp(join(tmpdir(), 'turnrewind-path-test-'))
   const workspace = join(root, 'workspace')
   try {
-    await mkdir(workspace, { recursive: true })
+    await initGitWorkspace(workspace)
     assert.throws(() => currentState(workspace, '../outside.txt'), /TURNREWIND_PATH_ESCAPE/)
   }
   finally {
@@ -202,46 +202,19 @@ it('rejects paths outside the workspace', async () => {
   }
 })
 
-it('probes a small workspace as trackable and refuses oversized / deep ones', async () => {
+it('accepts Git worktrees and rejects ordinary directories', async () => {
   const root = await mkdtemp(join(tmpdir(), 'turnrewind-probe-'))
   const workspace = join(root, 'ws')
+  const plain = join(root, 'plain')
   try {
-    await mkdir(workspace, { recursive: true })
-    await writeFile(join(workspace, 'a.txt'), 'hello')
-    await writeFile(join(workspace, 'b.txt'), 'world')
-    // ok: 2 small files
-    const small = probeWorkspace(workspace)
-    assert.equal(small.ok, true)
-    assert.equal(small.fileCount, 2)
-
-    // too many files
-    for (let i = 0; i < 6; i++) await writeFile(join(workspace, `f${i}.txt`), 'x')
-    const many = probeWorkspace(workspace, { maxFileCount: 4 })
-    assert.equal(many.ok, false)
-    assert.match(many.reason, /file count/)
-
-    // single oversized file
-    const big = join(workspace, 'big.bin')
-    await writeFile(big, Buffer.alloc(300))
-    const large = probeWorkspace(workspace, { maxFileBytes: 100 })
-    assert.equal(large.ok, false)
-    assert.match(large.reason, /larger than limit/)
-
-    // deep nesting
-    let dir = workspace
-    for (let i = 0; i < 6; i++) {
-      dir = join(dir, 'd')
-      await mkdir(dir)
-    }
-    const deep = probeWorkspace(workspace, { maxDepth: 3 })
-    assert.equal(deep.ok, false)
-    assert.match(deep.reason, /nesting depth/)
-
-    // excluded dirs (node_modules, .git) are not counted
-    await mkdir(join(workspace, 'node_modules'), { recursive: true })
-    await writeFile(join(workspace, 'node_modules', 'huge.bin'), Buffer.alloc(1000))
-    const withExcluded = probeWorkspace(workspace, { maxFileBytes: 500 })
-    assert.equal(withExcluded.ok, true, 'excluded dirs must not be counted')
+    await initGitWorkspace(workspace)
+    await mkdir(plain, { recursive: true })
+    const tracked = probeWorkspace(workspace)
+    assert.equal(tracked.ok, true)
+    assert.equal(tracked.workspaceDir, workspace)
+    const rejected = probeWorkspace(plain)
+    assert.equal(rejected.ok, false)
+    assert.match(rejected.reason, /GIT_REQUIRED/u)
   }
   finally {
     await rm(root, { recursive: true, force: true })
@@ -252,7 +225,7 @@ it('rebuilds a fresh baseline when the parent snapshot is gone', async () => {
   const root = await mkdtemp(join(tmpdir(), 'turnrewind-orphan-test-'))
   const workspace = join(root, 'workspace')
   try {
-    await mkdir(workspace, { recursive: true })
+    await initGitWorkspace(workspace)
     await writeFile(join(workspace, 'a.txt'), 'one')
     const store = createSnapshotStore(join(root, 'data'), workspace)
     const first = await captureSnapshot(store, 'refs/turnrewind/orphan-first', 'first')

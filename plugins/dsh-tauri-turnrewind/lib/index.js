@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path'
 import process from 'node:process'
 import { createDialogProjection } from './core/dialog-projection.js'
 import { captureSnapshot, classifyPathChange, createSnapshotStore, currentState, diffAgainstDisk, gitAvailable, gitRef, probeWorkspace, restorePath, snapshotDiff, snapshotFileDiff, stateAt, workspaceKey } from './core/git-snapshot.js'
-import { assessWorkspace, defaultBudget } from './core/guard.js'
+import { isSystemSensitiveWorkspace } from './core/guard.js'
 import { claimPendingPlan, claimRewindNotices, completeRedoWithNotice, completeUndoWithNotice, createOperation, createPendingPlan, failTurn, getLatestAppliedUndo, getLatestSnapshotRef, getLatestTurnSummary, getPendingPlanRow, getPendingPlanStatus, getTurn, insertTurn, listNeedsRecoveryWorkspaces, listReversibleTurns, markPendingPlanApplied, markPendingPlanCancelled, markTurnSnapshotMissing, openLedger, recordSkippedTurn, registerWorkspace, releasePendingPlanClaim, settleInterruptedTurn, settleNoopTurn, settleOperation, settleTurn, skipTurn } from './core/ledger.js'
 import { classifyUndo } from './core/planner.js'
 
@@ -33,12 +33,10 @@ function workspaceForSession(session) {
   if (typeof cwd !== 'string' || cwd.length === 0)
     return undefined
   const resolved = resolve(cwd)
-  // Never snapshot the home directory: a full git baseline can walk hundreds
-  // of GB and fail on root-owned dirs (docker volumes, container storage).
-  // Sessions running from $HOME (e.g. the QQ bridge) simply get no turn snapshots.
-  if (resolved === homedir())
+  if (isSystemSensitiveWorkspace(resolved))
     return undefined
-  return resolved
+  const probe = probeWorkspace(resolved)
+  return probe.ok ? probe.workspaceDir : undefined
 }
 
 function workspaceKeyFor(path) {
@@ -46,8 +44,10 @@ function workspaceKeyFor(path) {
 }
 
 function workspaceIssue(workspaceDir) {
-  const assessment = assessWorkspace(workspaceDir)
-  return assessment.eligible ? undefined : assessment.reason
+  if (isSystemSensitiveWorkspace(workspaceDir))
+    return `TURNREWIND_WORKSPACE_UNSUPPORTED: ${workspaceDir} is a system directory`
+  const probe = probeWorkspace(workspaceDir)
+  return probe.ok ? undefined : probe.reason
 }
 
 function activeKey(sessionId, turn) {
@@ -530,9 +530,9 @@ async function applyUndo(runtime, active, invocation) {
   if (!workspaceDir) {
     // The hard guard refused the cwd; report the actual reason when there is one.
     const cwd = invocation.agent?.session?.header?.cwd
-    const assessment = typeof cwd === 'string' && cwd.length > 0 ? assessWorkspace(resolve(cwd)) : undefined
-    if (assessment && !assessment.eligible)
-      return { kind: 'error', text: `Undo is unavailable for this workspace. ${assessment.reason}` }
+    const issue = typeof cwd === 'string' && cwd.length > 0 ? workspaceIssue(resolve(cwd)) : undefined
+    if (issue)
+      return { kind: 'error', text: `Undo is unavailable for this workspace. ${issue}` }
     return { kind: 'error', text: 'Undo is unavailable because this session has no workspace.' }
   }
   const workspaceKey = workspaceKeyFor(workspaceDir)
@@ -692,26 +692,10 @@ async function applyUndo(runtime, active, invocation) {
   }
 }
 
-function apply(ctx, config = {}) {
-  // Workspace snapshot guard: before we ever create a private git tracking repo,
-  // estimate what it would hold (file count / total bytes / largest file /
-  // nesting depth) and refuse to track workspaces that are too big or too deep.
-  // Thresholds are configurable via the plugin's `config` (patch insert), i.e. the
-  // plugin settings. Defaults keep a normal small/mid workspace trackable while
-  // blocking the huge-directory disaster (node_modules-heavy repos, build trees,
-  // and anything resembling $HOME).
-  // Probe limits share one source of truth with the claim-time guard: the
-  // defaultBudget values (and their TURNREWIND_* env overrides) feed the probe,
-  // so a workspace either passes both layers or gets the same numbers in both.
-  // Depth/dir caps stay probe-only (the metadata guard has no recursion caps).
-  const budget = defaultBudget()
-  const guard = Object.assign({
-    maxFileCount: budget.maxFiles,
-    maxTotalBytes: budget.maxTotalBytes,
-    maxFileBytes: budget.maxFileBytes,
-    maxDepth: 20,
-    maxDirs: 10000,
-  }, config.guard)
+function apply(ctx) {
+  // Git mode uses the project's Git worktree as the snapshot boundary. Its
+  // ignore rules replace the old full-directory eligibility scan, while path
+  // validation, conflict checks and the private snapshot repository remain.
   const dataRoot = rootDir()
   const ledger = openLedger(dataRoot)
   const recoveryWorkspaces = new Set(listNeedsRecoveryWorkspaces(ledger))
@@ -719,10 +703,6 @@ function apply(ctx, config = {}) {
   const untrackedTurns = new Set()
   const workspaceStores = new Map()
   let disposed = false
-  // Workspaces rejected by the guard: key -> reason. Cached so we do not re-walk
-  // a huge directory on every turn; an undo for such a workspace is impossible
-  // anyway because no snapshot was ever captured.
-  const rejectedWorkspaces = new Map()
   const commands = ctx.commands
   // Client-visible projection: lets the web UI raise the unavailable-dialog
   // from the session list it already receives, no conversation API needed.
@@ -852,16 +832,8 @@ function apply(ctx, config = {}) {
     if (!workspaceDir)
       return undefined
     const workspaceKey = workspaceKeyFor(workspaceDir)
-    if (rejectedWorkspaces.has(workspaceKey))
-      return undefined
     let runtime = workspaceStores.get(workspaceKey)
     if (!runtime) {
-      const probe = probeWorkspace(workspaceDir, guard)
-      if (!probe.ok) {
-        rejectedWorkspaces.set(workspaceKey, probe.reason)
-        ctx.logger?.warn?.(`[turnrewind] skip snapshot tracking for ${workspaceDir}: ${probe.reason}`)
-        return undefined
-      }
       const store = createSnapshotStore(dataRoot, workspaceDir)
       const latest = getLatestSnapshotRef(ledger, workspaceKey)
       registerWorkspace(ledger, workspaceKey, workspaceDir, store.repoDir)
@@ -921,14 +893,13 @@ function apply(ctx, config = {}) {
     const startedAt = new Date().toISOString()
     const workspaceDir = workspaceForAgent(agent)
     if (!workspaceDir) {
-      // The hard guard in workspaceForSession refused the cwd (e.g. $HOME).
-      // Keep a durable skipped record so /undo explains why instead of
-      // pretending the session has no workspace.
+      // Git-only mode rejects system directories and non-Git workspaces. Keep a
+      // durable skipped record so /undo explains why the turn was not tracked.
       const cwd = agent?.session?.header?.cwd
       if (typeof cwd === 'string' && cwd.length > 0) {
-        const assessment = assessWorkspace(resolve(cwd))
-        if (!assessment.eligible)
-          recordSkipped(key, sessionId, workspaceKeyFor(resolve(cwd)), startedAt, assessment.reason)
+        const issue = workspaceIssue(resolve(cwd))
+        if (issue)
+          recordSkipped(key, sessionId, workspaceKeyFor(resolve(cwd)), startedAt, issue)
       }
       return undefined
     }
@@ -945,14 +916,8 @@ function apply(ctx, config = {}) {
     }
 
     const runtime = ensureRuntime(agent)
-    if (!runtime) {
-      // Passed the metadata guard but refused by the deeper probe (depth/dir
-      // caps): surface that reason instead of staying silent.
-      const reason = rejectedWorkspaces.get(workspaceKey)
-      if (reason)
-        recordSkipped(key, sessionId, workspaceKey, startedAt, `TURNREWIND_WORKSPACE_TOO_LARGE: ${reason}`)
+    if (!runtime)
       return undefined
-    }
 
     if (runtime.undoing) {
       recordSkipped(key, sessionId, workspaceKey, startedAt, 'TURNREWIND_WORKSPACE_BUSY: an undo operation is running')
@@ -1149,9 +1114,9 @@ function apply(ctx, config = {}) {
       if (!workspaceDir) {
         // The hard guard refused the cwd; report the actual reason when there is one.
         const cwd = invocation.agent?.session?.header?.cwd
-        const assessment = typeof cwd === 'string' && cwd.length > 0 ? assessWorkspace(resolve(cwd)) : undefined
-        if (assessment && !assessment.eligible)
-          return { kind: 'error', text: `Undo is unavailable for this workspace. ${assessment.reason}` }
+        const issue = typeof cwd === 'string' && cwd.length > 0 ? workspaceIssue(resolve(cwd)) : undefined
+        if (issue)
+          return { kind: 'error', text: `Undo is unavailable for this workspace. ${issue}` }
         return { kind: 'error', text: 'Undo is unavailable because this session has no workspace.' }
       }
       const workspaceIdentity = workspaceKeyFor(workspaceDir)
@@ -1162,11 +1127,7 @@ function apply(ctx, config = {}) {
         return { kind: 'error', text: `Undo is unavailable for this workspace. ${issue}` }
       const runtime = ensureRuntime(invocation.agent)
       if (!runtime) {
-        // Refused by the deeper probe (depth/dir caps) — surface that reason.
-        const reason = rejectedWorkspaces.get(workspaceKeyFor(workspaceDir))
-        if (reason)
-          return { kind: 'error', text: `Undo is unavailable for this workspace. TURNREWIND_WORKSPACE_TOO_LARGE: ${reason}` }
-        return { kind: 'error', text: 'Undo is unavailable because this session has no workspace.' }
+        return { kind: 'error', text: 'Undo is unavailable because the Git workspace could not be initialized.' }
       }
       return applyUndo(runtime, active, invocation)
     },

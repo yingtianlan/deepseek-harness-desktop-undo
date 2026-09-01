@@ -1,16 +1,17 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { it } from 'vitest'
 import { captureSnapshot, createSnapshotStore } from '../lib/core/git-snapshot.js'
 import { getTurn, insertTurn, openLedger, settleTurn } from '../lib/core/ledger.js'
 import { applyUndo, waitForTurnBaseline } from '../lib/index.js'
+import { initGitWorkspace } from './git-test-utils.js'
 
 async function setupTurn() {
   const root = await mkdtemp(join(tmpdir(), 'turnrewind-lifecycle-test-'))
   const workspace = join(root, 'workspace')
-  await mkdir(workspace, { recursive: true })
+  await initGitWorkspace(workspace)
   await writeFile(join(workspace, 'a.txt'), 'v1\n')
   const db = openLedger(join(root, 'ledger'))
   const store = createSnapshotStore(join(root, 'data'), workspace)
