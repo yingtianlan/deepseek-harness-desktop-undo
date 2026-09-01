@@ -2,7 +2,7 @@ import { existsSync, rmSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import process from 'node:process'
-import { workspaceHash } from './git-snapshot.js'
+import { workspaceHash, workspaceKey } from './git-snapshot.js'
 import { openLedger } from './ledger.js'
 
 export function resolveRootDir(explicit) {
@@ -18,7 +18,7 @@ export function resolveRootDir(explicit) {
  * existed (for example a 250 GB home directory).
  */
 export function purgeWorkspace(rootDir, workspaceDir) {
-  const workspaceKey = resolve(workspaceDir).toLowerCase()
+  const workspaceIdentity = workspaceKey(workspaceDir)
   const repoDir = join(rootDir, 'snapshots', `${workspaceHash(workspaceDir)}.git`)
   const summary = { rootDir, repoDir, repoExisted: false, ledger: undefined }
 
@@ -27,10 +27,10 @@ export function purgeWorkspace(rootDir, workspaceDir) {
     const db = openLedger(rootDir)
     try {
       db.exec('BEGIN')
-      const operations = db.prepare('DELETE FROM operations WHERE target_turn_id IN (SELECT turn_id FROM turns WHERE workspace_key = ?)').run(workspaceKey)
-      const notices = db.prepare('DELETE FROM rewind_notices WHERE workspace_key = ?').run(workspaceKey)
-      const turns = db.prepare('DELETE FROM turns WHERE workspace_key = ?').run(workspaceKey)
-      const workspaces = db.prepare('DELETE FROM workspaces WHERE workspace_key = ?').run(workspaceKey)
+      const operations = db.prepare('DELETE FROM operations WHERE target_turn_id IN (SELECT turn_id FROM turns WHERE workspace_key = ?)').run(workspaceIdentity)
+      const notices = db.prepare('DELETE FROM rewind_notices WHERE workspace_key = ?').run(workspaceIdentity)
+      const turns = db.prepare('DELETE FROM turns WHERE workspace_key = ?').run(workspaceIdentity)
+      const workspaces = db.prepare('DELETE FROM workspaces WHERE workspace_key = ?').run(workspaceIdentity)
       db.exec('COMMIT')
       summary.ledger = {
         operations: operations.changes,

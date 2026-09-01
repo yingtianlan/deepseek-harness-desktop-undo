@@ -107,6 +107,7 @@ export function openLedger(rootDir) {
     // Column already exists.
   }
   db.exec(`UPDATE turns SET status = 'abandoned', reversible = 0, error = 'plugin restarted during active turn' WHERE status = 'active'`)
+  db.prepare(`UPDATE operations SET outcome = 'needs-recovery', settled_at = COALESCE(settled_at, ?), error = 'plugin restarted while the operation was applying; workspace recovery is required' WHERE outcome = 'applying'`).run(new Date().toISOString())
   purgeExpiredPendingPlans(db)
   return db
 }
@@ -133,7 +134,7 @@ export function createPendingPlan(db, plan) {
     // One live plan per session+workspace: a newer preview replaces the older.
     db.prepare('DELETE FROM pending_plans WHERE session_id = ? AND workspace_key = ?')
       .run(plan.sessionId, plan.workspaceKey)
-    const planId = randomUUID().slice(0, 8)
+    const planId = randomUUID()
     const createdAt = new Date().toISOString()
     db.prepare(`
       INSERT INTO pending_plans(plan_id, session_id, workspace_key, turn_id, paths_json, created_at, expires_at)
@@ -156,10 +157,45 @@ export function getPendingPlan(db, planId, sessionId, workspaceKey) {
   if (row === undefined)
     return undefined
   if (row.expires_at < new Date().toISOString()) {
-    db.prepare('DELETE FROM pending_plans WHERE plan_id = ?').run(planId)
+    db.prepare('DELETE FROM pending_plans WHERE plan_id = ? AND status = \'pending\'').run(planId)
     return undefined
   }
   return { turnId: row.turn_id, paths: JSON.parse(row.paths_json), createdAt: row.created_at }
+}
+
+/**
+ * Atomically move one pending plan to `applying` so concurrent confirm/cancel
+ * calls cannot interleave: the conditional UPDATE is serialized by SQLite, so
+ * exactly one caller sees changes === 1 and everyone else gets a deterministic
+ * failure. The pre-reads only pick a precise error code; the UPDATE decides.
+ */
+export function claimPendingPlan(db, planId, sessionId) {
+  const row = db.prepare('SELECT * FROM pending_plans WHERE plan_id = ?').get(planId)
+  if (row === undefined)
+    return { ok: false, code: 404, error: 'plan expired or already applied — run /undo again' }
+  if (row.session_id !== sessionId)
+    return { ok: false, code: 403, error: 'the plan belongs to another session' }
+  if (row.status !== 'pending')
+    return { ok: false, code: 409, error: 'this plan was already applied, cancelled, or is being applied — run /undo again' }
+  if (row.expires_at < new Date().toISOString()) {
+    db.prepare('DELETE FROM pending_plans WHERE plan_id = ? AND status = \'pending\'').run(planId)
+    return { ok: false, code: 404, error: 'plan expired or already applied — run /undo again' }
+  }
+  const claimed = db.prepare(`
+    UPDATE pending_plans SET status = 'applying'
+    WHERE plan_id = ? AND session_id = ? AND status = 'pending'
+  `).run(planId, sessionId)
+  if (claimed.changes !== 1)
+    return { ok: false, code: 409, error: 'this plan was already applied, cancelled, or is being applied — run /undo again' }
+  return { ok: true, row: { ...row, paths: JSON.parse(row.paths_json) } }
+}
+
+/** Return an in-flight claim to `pending` after a failed confirm attempt. */
+export function releasePendingPlanClaim(db, planId) {
+  db.prepare(`
+    UPDATE pending_plans SET status = 'pending'
+    WHERE plan_id = ? AND status = 'applying'
+  `).run(planId)
 }
 
 /**
@@ -171,8 +207,8 @@ export function getPendingPlanRow(db, planId) {
   const row = db.prepare('SELECT * FROM pending_plans WHERE plan_id = ?').get(planId)
   if (row === undefined)
     return undefined
-  if (row.expires_at < new Date().toISOString()) {
-    db.prepare('DELETE FROM pending_plans WHERE plan_id = ?').run(planId)
+  if (row.status === 'pending' && row.expires_at < new Date().toISOString()) {
+    db.prepare('DELETE FROM pending_plans WHERE plan_id = ? AND status = \'pending\'').run(planId)
     return undefined
   }
   return { ...row, paths: JSON.parse(row.paths_json) }
@@ -194,17 +230,17 @@ export function markPendingPlanCancelled(db, planId, sessionId) {
   return result.changes > 0
 }
 
-/** Outcome written by the confirm route so the client card can poll it. */
+/** Outcome written by the confirm route so the client card can poll it. Only a claimed (`applying`) plan can be applied. */
 export function markPendingPlanApplied(db, planId, sessionId, message) {
   db.prepare(`
     UPDATE pending_plans SET status = 'applied', result_text = ?
-    WHERE plan_id = ? AND session_id = ? AND status = 'pending'
+    WHERE plan_id = ? AND session_id = ? AND status = 'applying'
   `).run(message, planId, sessionId)
 }
 
 /** Poll face for the client card: undefined once purged, else the outcome. */
-export function getPendingPlanStatus(db, planId) {
-  const row = db.prepare('SELECT status, result_text, expires_at FROM pending_plans WHERE plan_id = ?').get(planId)
+export function getPendingPlanStatus(db, planId, sessionId) {
+  const row = db.prepare('SELECT status, result_text, expires_at FROM pending_plans WHERE plan_id = ? AND session_id = ?').get(planId, sessionId)
   if (row === undefined)
     return undefined
   if (row.status === 'pending' && row.expires_at < new Date().toISOString()) {
@@ -390,6 +426,15 @@ export function claimRewindNotices(db, sessionId, workspaceKey) {
     turns: JSON.parse(notice.turns_json || '[]'),
     paths: JSON.parse(notice.paths_json),
   }))
+}
+
+export function listNeedsRecoveryWorkspaces(db) {
+  return db.prepare(`
+    SELECT DISTINCT t.workspace_key
+    FROM operations o
+    JOIN turns t ON t.turn_id = o.target_turn_id
+    WHERE o.outcome = 'needs-recovery'
+  `).all().map(row => row.workspace_key)
 }
 
 export function getLatestAppliedUndo(db, sessionId, workspaceKey) {

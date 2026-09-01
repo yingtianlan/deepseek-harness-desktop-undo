@@ -10,7 +10,7 @@
 
 - 为已领取的 Agent turn 建立私有 Git 快照；
 - 将快照映射记录到 `$DSH_HOME/ledger.sqlite`；
-- **git 全程异步执行**：快照、diff、恢复都不阻塞 Host 事件循环；同一会话的捕获/结算按 FIFO 串行，不同会话并行；收到 turn 输入后，before snapshot 通过 `agent/pre-step` barrier 完成后才允许模型和工具执行；
+- **git 全程异步执行**：快照、diff、恢复都不阻塞 Host 事件循环；同一会话的捕获/结算按 FIFO 串行；收到 turn 输入后，before snapshot 通过 `agent/pre-step` barrier 完成后才允许模型和工具执行；同一 workspace 被其他 session 占用时，新 turn 会正常运行但记为 `skipped`，避免共享 snapshot 链互相污染；
 - **git 可用性探测**：系统没有 git 时，turn 显式记为 `skipped`（原因 `TURNREWIND_GIT_UNAVAILABLE`），而不是静默失败；
 - **快照链自愈**：私有快照仓库被删/损坏后，下一次捕获自动降级重建基线（日志有一条 warning），后续 turn 照常可撤销；被清空前留下来的旧 turn 会在 `/undo` 选目标时自动识别为死快照并标记跳过（`snapshot ref missing`），不会甩出 git 原始报错；
 - **工作区资格守卫**：家目录、家目录的祖先、盘根目录，以及超过快照预算（文件数 / 总大小 / 单文件大小）的目录不做快照，turn 记为 `skipped` 并向 `/undo` 说明原因（见「工作区资格与快照预算」）；
@@ -22,7 +22,7 @@
 - 注册人类命令 `/undo`；
 - `/undo` 默认处理当前会话最新的单个可恢复 turn，也可指定完整 turn ID；
 - 同一 workspace 的活动 turn 或 undo 操作互斥；
-- 插件重启时将未完成 turn 标记为 abandoned；
+- 插件重启时将未完成 turn 标记为 abandoned；未完成的 Undo/Redo operation 会标记为 `needs-recovery`，对应 workspace 在清理前拒绝新的 rewind 操作，避免未知磁盘状态被继续覆盖；当前只能先人工检查 workspace，再停止 Host 并使用 `purge-workspace.js` 清理该 workspace 的 turnrewind 数据后恢复使用；
 - 每次 Undo/Redo 的回退提示独立持久化；下一次模型 step 一次性注入全部 pending notice；
 - 不修改用户项目的 HEAD、分支、index、stash 或提交历史。
 
@@ -329,8 +329,18 @@ coverage/
 *.pem
 *.key
 id_rsa*
-credentials.*      # 仅根目录
-secrets.*          # 仅根目录
+credentials.json   # 任意深度
+credentials.yaml
+credentials.yml
+credentials.toml
+credentials.ini
+credentials.cfg
+secrets.json       # 任意深度
+secrets.yaml
+secrets.yml
+secrets.toml
+secrets.ini
+secrets.cfg
 ```
 
 注意两点边界：

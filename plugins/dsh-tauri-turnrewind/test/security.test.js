@@ -15,6 +15,10 @@ it('does not capture common secret files into a snapshot', async () => {
     await writeFile(join(workspace, 'secrets.yaml'), 'key: do-not-store')
     await writeFile(join(workspace, 'server.pem'), '-----BEGIN')
     await writeFile(join(workspace, 'safe.txt'), 'safe')
+    await mkdir(join(workspace, 'config'), { recursive: true })
+    await mkdir(join(workspace, 'nested'), { recursive: true })
+    await writeFile(join(workspace, 'config', 'credentials.json'), '{"token":"nested-do-not-store"}')
+    await writeFile(join(workspace, 'nested', 'secrets.yaml'), 'key: nested-do-not-store')
     const store = createSnapshotStore(join(root, 'data'), workspace)
     const snapshot = await captureSnapshot(store, 'refs/turnrewind/security', 'security')
 
@@ -22,6 +26,8 @@ it('does not capture common secret files into a snapshot', async () => {
     assert.equal((await stateAt(store, snapshot.commit, 'credentials.json')).kind, 'absent')
     assert.equal((await stateAt(store, snapshot.commit, 'secrets.yaml')).kind, 'absent')
     assert.equal((await stateAt(store, snapshot.commit, 'server.pem')).kind, 'absent')
+    assert.equal((await stateAt(store, snapshot.commit, 'config/credentials.json')).kind, 'absent')
+    assert.equal((await stateAt(store, snapshot.commit, 'nested/secrets.yaml')).kind, 'absent')
     assert.equal((await stateAt(store, snapshot.commit, 'safe.txt')).kind, 'file')
     const snapshotFiles = await readdir(join(root, 'data', 'snapshots'))
     assert.equal(snapshotFiles.length, 1)
@@ -50,6 +56,50 @@ it('keeps legitimate source files whose names resemble secrets', async () => {
     assert.equal((await stateAt(store, snapshot.commit, 'src/tokenizer.py')).kind, 'file')
     assert.equal((await stateAt(store, snapshot.commit, 'src/secret_manager.js')).kind, 'file')
     assert.equal((await stateAt(store, snapshot.commit, 'docs/credentials.module.ts')).kind, 'file')
+  }
+  finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+it('excludes abandoned turnrewind temporary files from snapshots', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'turnrewind-temp-file-test-'))
+  const workspace = join(root, 'workspace')
+  try {
+    await mkdir(join(workspace, 'nested'), { recursive: true })
+    await writeFile(join(workspace, 'file.turnrewind-01234567-89ab-cdef-0123-456789abcdef.tmp'), 'temporary')
+    await writeFile(join(workspace, 'nested', 'file.turnrewind-01234567-89ab-cdef-0123-456789abcdef.tmp'), 'temporary')
+    await writeFile(join(workspace, 'kept.txt'), 'kept')
+    const store = createSnapshotStore(join(root, 'data'), workspace)
+    const snapshot = await captureSnapshot(store, 'refs/turnrewind/temp-files', 'temp files')
+    assert.equal((await stateAt(store, snapshot.commit, 'file.turnrewind-01234567-89ab-cdef-0123-456789abcdef.tmp')).kind, 'absent')
+    assert.equal((await stateAt(store, snapshot.commit, 'nested/file.turnrewind-01234567-89ab-cdef-0123-456789abcdef.tmp')).kind, 'absent')
+    assert.equal((await stateAt(store, snapshot.commit, 'kept.txt')).kind, 'file')
+  }
+  finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+it('refuses dangling symlink workspace paths during inspection and restore', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'turnrewind-dangling-link-test-'))
+  const workspace = join(root, 'workspace')
+  try {
+    await mkdir(workspace, { recursive: true })
+    try {
+      await symlink(join(root, 'missing-target'), join(workspace, 'dangling'))
+    }
+    catch (error) {
+      if (error.code === 'EPERM' || error.code === 'EACCES')
+        return
+      throw error
+    }
+    const store = createSnapshotStore(join(root, 'data'), workspace)
+    assert.throws(() => currentState(workspace, 'dangling'), /TURNREWIND_SYMLINK_UNSUPPORTED/)
+    await assert.rejects(
+      () => restorePath(store, 'refs/turnrewind/missing', 'dangling'),
+      /TURNREWIND_SYMLINK_UNSUPPORTED/,
+    )
   }
   finally {
     await rm(root, { recursive: true, force: true })

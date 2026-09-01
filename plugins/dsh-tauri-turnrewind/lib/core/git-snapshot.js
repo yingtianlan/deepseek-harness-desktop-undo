@@ -26,6 +26,7 @@ const EXCLUDE_PATHS = [
   ':(exclude,glob)**/coverage/**',
   ':(exclude,glob).turnrewind/**',
   ':(exclude,glob)**/.turnrewind/**',
+  ':(exclude,glob)**/*.turnrewind-*.tmp',
   ':(exclude,glob).env',
   ':(exclude,glob)**/.env',
   ':(exclude,glob).env.*',
@@ -34,8 +35,30 @@ const EXCLUDE_PATHS = [
   ':(exclude,glob)**/*.key',
   ':(exclude,glob)id_rsa*',
   ':(exclude,glob)**/id_rsa*',
-  ':(exclude,glob)credentials.*',
-  ':(exclude,glob)secrets.*',
+  ':(exclude,glob)credentials.json',
+  ':(exclude,glob)**/credentials.json',
+  ':(exclude,glob)credentials.yaml',
+  ':(exclude,glob)**/credentials.yaml',
+  ':(exclude,glob)credentials.yml',
+  ':(exclude,glob)**/credentials.yml',
+  ':(exclude,glob)credentials.toml',
+  ':(exclude,glob)**/credentials.toml',
+  ':(exclude,glob)credentials.ini',
+  ':(exclude,glob)**/credentials.ini',
+  ':(exclude,glob)credentials.cfg',
+  ':(exclude,glob)**/credentials.cfg',
+  ':(exclude,glob)secrets.json',
+  ':(exclude,glob)**/secrets.json',
+  ':(exclude,glob)secrets.yaml',
+  ':(exclude,glob)**/secrets.yaml',
+  ':(exclude,glob)secrets.yml',
+  ':(exclude,glob)**/secrets.yml',
+  ':(exclude,glob)secrets.toml',
+  ':(exclude,glob)**/secrets.toml',
+  ':(exclude,glob)secrets.ini',
+  ':(exclude,glob)**/secrets.ini',
+  ':(exclude,glob)secrets.cfg',
+  ':(exclude,glob)**/secrets.cfg',
 ]
 
 /**
@@ -151,8 +174,17 @@ function assertSafePath(workspaceDir, path) {
   const suffix = relative(root, target)
   for (const part of suffix.split(sep).filter(Boolean)) {
     current = join(current, part)
-    if (existsSync(current) && lstatSync(current).isSymbolicLink()) {
-      throw new Error(`TURNREWIND_SYMLINK_UNSUPPORTED: ${path}`)
+    // lstatSync must be used without an existsSync pre-check: existsSync
+    // returns false for dangling links, but a dangling link is still an unsafe
+    // path component and must never be replaced or traversed.
+    try {
+      if (lstatSync(current).isSymbolicLink())
+        throw new Error(`TURNREWIND_SYMLINK_UNSUPPORTED: ${path}`)
+    }
+    catch (error) {
+      if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR')
+        continue
+      throw error
     }
   }
   return target
@@ -162,10 +194,18 @@ function snapshotPathspecs() {
   return EXCLUDE_PATHS
 }
 
-export function workspaceHash(workspaceDir) {
+/**
+ * Canonical workspace identity shared by the ledger key, the snapshot repo
+ * hash and maintenance purges: case-folded only on case-insensitive platforms,
+ * so Unix paths differing in case stay distinct while Windows paths unify.
+ */
+export function workspaceKey(workspaceDir) {
   const normalized = resolve(workspaceDir)
-  const identity = process.platform === 'win32' ? normalized.toLowerCase() : normalized
-  return createHash('sha256').update(identity).digest('hex').slice(0, 24)
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized
+}
+
+export function workspaceHash(workspaceDir) {
+  return createHash('sha256').update(workspaceKey(workspaceDir)).digest('hex').slice(0, 24)
 }
 
 /** Pure path computation; the repository itself is ensured lazily on capture. */
@@ -182,13 +222,16 @@ function isExcludedPath(relPath, isDir) {
   const base = basename(relPath)
   if (isDir)
     return EXCLUDE_DIRS.has(base)
+  if (/\.turnrewind-[0-9a-f-]+\.tmp$/iu.test(base))
+    return true
   // Files excluded by EXCLUDE_PATHS: .env, .env.*, *.pem, *.key, id_rsa*,
-  // credentials.*, secrets.*
+  // and high-confidence structured credentials/secrets files. Keep source and
+  // documentation files such as credentials.module.ts trackable.
   if (/^\.env(?:$|\.)/.test(base))
     return true
   if (/\.(?:pem|key)$/i.test(base))
     return true
-  if (base.startsWith('id_rsa') || /^credentials\./.test(base) || /^secrets\./.test(base))
+  if (base.startsWith('id_rsa') || /^(?:credentials|secrets)\.(?:json|ya?ml|toml|ini|cfg)$/i.test(base))
     return true
   return false
 }
@@ -309,8 +352,8 @@ export async function captureSnapshot(store, refName, message, parentRef) {
 }
 
 export async function snapshotDiff(store, beforeCommit, afterCommit) {
-  const output = await runGit(store.repoDir, store.workspaceDir, ['diff', '--name-only', '--no-renames', beforeCommit, afterCommit])
-  return [...new Set(output.toString('utf8').split(/\r?\n/).map(value => value.trim()).filter(Boolean))]
+  const output = await runGit(store.repoDir, store.workspaceDir, ['diff', '--name-only', '-z', '--no-renames', beforeCommit, afterCommit])
+  return [...new Set(output.toString('utf8').split('\0').filter(Boolean))]
 }
 
 const DEFAULT_MAX_DIFF_LINES = 120
@@ -417,8 +460,8 @@ export async function diffAgainstDisk(store, commit, path, maxLines) {
 }
 
 async function commitEntry(store, commit, path) {
-  const output = await runGit(store.repoDir, store.workspaceDir, ['ls-tree', '-r', '--name-only', commit, '--', path])
-  return output.toString('utf8').split(/\r?\n/).includes(path)
+  const output = await runGit(store.repoDir, store.workspaceDir, ['ls-tree', '-r', '--name-only', '-z', commit, '--', path])
+  return output.toString('utf8').split('\0').includes(path)
 }
 
 async function commitBytes(store, commit, path) {

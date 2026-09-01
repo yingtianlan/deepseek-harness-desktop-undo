@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { it } from 'vitest'
-import { claimRewindNotices, completeRedoWithNotice, completeUndoWithNotice, createOperation, getLatestAppliedUndo, getLatestSnapshotRef, getLatestTurn, getTurn, insertTurn, listReversibleTurns, markTurnSnapshotMissing, openLedger, queueRewindNotice, recordSkippedTurn, settleInterruptedTurn, settleNoopTurn, settleOperation, settleTurn } from '../lib/core/ledger.js'
+import { claimPendingPlan, claimRewindNotices, completeRedoWithNotice, completeUndoWithNotice, createOperation, createPendingPlan, getLatestAppliedUndo, getLatestSnapshotRef, getLatestTurn, getPendingPlanStatus, getTurn, insertTurn, listNeedsRecoveryWorkspaces, listReversibleTurns, markPendingPlanApplied, markPendingPlanCancelled, markTurnSnapshotMissing, openLedger, queueRewindNotice, recordSkippedTurn, releasePendingPlanClaim, settleInterruptedTurn, settleNoopTurn, settleOperation, settleTurn } from '../lib/core/ledger.js'
 
 it('persists turn lifecycle and resumes from the latest durable snapshot', async () => {
   const root = await mkdtemp(join(tmpdir(), 'turnrewind-ledger-test-'))
@@ -338,6 +338,69 @@ it('lists reversible turns newest-first and marks dead snapshots skipped', async
   }
   finally {
     db.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+it('claims a pending plan exactly once and serializes cancel/apply outcomes', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'turnrewind-plan-claim-test-'))
+  const db = openLedger(root)
+  try {
+    const planId = createPendingPlan(db, {
+      sessionId: 'session',
+      workspaceKey: 'workspace',
+      turnId: 'session:1',
+      paths: ['a.txt'],
+    })
+    const first = claimPendingPlan(db, planId, 'session')
+    assert.equal(first.ok, true)
+    assert.equal(getPendingPlanStatus(db, planId, 'session').status, 'applying')
+    assert.equal(claimPendingPlan(db, planId, 'session').ok, false)
+    assert.equal(markPendingPlanCancelled(db, planId, 'session'), false)
+
+    releasePendingPlanClaim(db, planId)
+    assert.equal(getPendingPlanStatus(db, planId, 'session').status, 'pending')
+    const second = claimPendingPlan(db, planId, 'session')
+    assert.equal(second.ok, true)
+    markPendingPlanApplied(db, planId, 'session', 'applied once')
+    assert.deepEqual(getPendingPlanStatus(db, planId, 'session'), { status: 'applied', resultText: 'applied once' })
+    assert.equal(claimPendingPlan(db, planId, 'session').ok, false)
+  }
+  finally {
+    db.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+it('fences applying operations as recovery-required on reopen', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'turnrewind-operation-recovery-test-'))
+  const first = openLedger(root)
+  insertTurn(first, {
+    turnId: 'session:applying',
+    sessionId: 'session',
+    workspaceKey: 'workspace-recovery',
+    startedAt: '2026-01-01T00:00:00.000Z',
+    beforeRef: 'refs/turnrewind/applying-before',
+  })
+  settleTurn(first, 'session:applying', 'refs/turnrewind/applying-after')
+  createOperation(first, {
+    operationId: 'operation-applying',
+    kind: 'undo',
+    targetTurnId: 'session:applying',
+    requestedAt: '2026-01-01T00:01:00.000Z',
+    beforeRef: 'refs/turnrewind/operation-before',
+  })
+  first.close()
+
+  const reopened = openLedger(root)
+  try {
+    const operation = reopened.prepare('SELECT outcome, error FROM operations WHERE operation_id = ?').get('operation-applying')
+    assert.equal(operation.outcome, 'needs-recovery')
+    assert.match(operation.error, /restarted while the operation was applying/u)
+    assert.deepEqual(listNeedsRecoveryWorkspaces(reopened), ['workspace-recovery'])
+  }
+  finally {
+    reopened.close()
     await rm(root, { recursive: true, force: true })
   }
 })

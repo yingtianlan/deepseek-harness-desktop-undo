@@ -1,11 +1,12 @@
-import { randomUUID } from 'node:crypto'
+import { Buffer } from 'node:buffer'
+import { createHash, randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import process from 'node:process'
 import { createDialogProjection } from './core/dialog-projection.js'
-import { captureSnapshot, classifyPathChange, createSnapshotStore, currentState, diffAgainstDisk, gitAvailable, gitRef, probeWorkspace, restorePath, snapshotDiff, snapshotFileDiff, stateAt } from './core/git-snapshot.js'
+import { captureSnapshot, classifyPathChange, createSnapshotStore, currentState, diffAgainstDisk, gitAvailable, gitRef, probeWorkspace, restorePath, snapshotDiff, snapshotFileDiff, stateAt, workspaceKey } from './core/git-snapshot.js'
 import { assessWorkspace, defaultBudget } from './core/guard.js'
-import { claimRewindNotices, completeRedoWithNotice, completeUndoWithNotice, createOperation, createPendingPlan, failTurn, getLatestAppliedUndo, getLatestSnapshotRef, getLatestTurnSummary, getPendingPlan, getPendingPlanRow, getPendingPlanStatus, getTurn, insertTurn, listReversibleTurns, markPendingPlanApplied, markPendingPlanCancelled, markTurnSnapshotMissing, openLedger, recordSkippedTurn, registerWorkspace, settleInterruptedTurn, settleNoopTurn, settleOperation, settleTurn, skipTurn } from './core/ledger.js'
+import { claimPendingPlan, claimRewindNotices, completeRedoWithNotice, completeUndoWithNotice, createOperation, createPendingPlan, failTurn, getLatestAppliedUndo, getLatestSnapshotRef, getLatestTurnSummary, getPendingPlanRow, getPendingPlanStatus, getTurn, insertTurn, listNeedsRecoveryWorkspaces, listReversibleTurns, markPendingPlanApplied, markPendingPlanCancelled, markTurnSnapshotMissing, openLedger, recordSkippedTurn, registerWorkspace, releasePendingPlanClaim, settleInterruptedTurn, settleNoopTurn, settleOperation, settleTurn, skipTurn } from './core/ledger.js'
 import { classifyUndo } from './core/planner.js'
 
 const name = 'dsh-tauri-turnrewind'
@@ -14,10 +15,13 @@ function rootDir() {
   return process.env.DSH_HOME ? resolve(process.env.DSH_HOME) : join(homedir(), '.dsh')
 }
 
-const TURN_ID_RE = /[^\w.-]/gu
+export function turnSnapshotRef(turnId, phase) {
+  const digest = createHash('sha256').update(turnId).digest('hex').slice(0, 32)
+  return `refs/turnrewind/turn-${digest}-${phase}`
+}
 
 function refSuffix(turnId, phase) {
-  return `refs/turnrewind/turn-${turnId.replace(TURN_ID_RE, '_')}-${phase}`
+  return turnSnapshotRef(turnId, phase)
 }
 
 function workspaceForAgent(agent) {
@@ -38,7 +42,7 @@ function workspaceForSession(session) {
 }
 
 function workspaceKeyFor(path) {
-  return path.toLowerCase()
+  return workspaceKey(path)
 }
 
 function workspaceIssue(workspaceDir) {
@@ -278,6 +282,14 @@ function workspaceHasActiveTurn(active, workspaceKey) {
   return false
 }
 
+function workspaceHasActiveTurnForOtherSession(active, workspaceKey, sessionId) {
+  for (const entry of active.values()) {
+    if (entry.workspaceKey === workspaceKey && entry.sessionId !== sessionId)
+      return true
+  }
+  return false
+}
+
 async function settleActiveTurn(ledger, active, key, reason) {
   const current = active.get(key)
   if (!current || current.runtime.disposed)
@@ -387,6 +399,8 @@ async function applyRedo(runtime, invocation, workspaceDir, workspaceKey) {
  * POST-only JSON in / JSON out, mutation routes restricted to loopback peers
  * (the harness web UI itself is served on this host, so its page qualifies).
  */
+const MAX_ROUTE_BODY_BYTES = 16 * 1024
+
 function jsonRoute(path, handler, { mutate = false } = {}) {
   return {
     kind: 'exact',
@@ -397,11 +411,29 @@ function jsonRoute(path, handler, { mutate = false } = {}) {
         res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' })
         res.end(body)
       }
+      if (mutate && req.method !== 'POST') {
+        res.setHeader('allow', 'POST')
+        return send(405, { error: 'mutation routes require POST' })
+      }
       const parts = []
-      req.on('data', chunk => parts.push(typeof chunk === 'string' ? chunk : chunk.toString('utf8')))
+      let totalBytes = 0
+      let tooLarge = false
+      req.on('data', (chunk) => {
+        if (tooLarge)
+          return
+        const value = typeof chunk === 'string' ? chunk : chunk.toString('utf8')
+        totalBytes += Buffer.byteLength(value, 'utf8')
+        if (totalBytes > MAX_ROUTE_BODY_BYTES) {
+          tooLarge = true
+          return
+        }
+        parts.push(value)
+      })
       req.on('error', () => send(400, { error: 'request stream failed' }))
       req.on('end', () => {
         void (async () => {
+          if (tooLarge)
+            return send(413, { error: 'request body too large' })
           if (mutate) {
             const peer = req.socket?.remoteAddress ?? ''
             const loopback = peer === '127.0.0.1' || peer === '::1' || peer === '::ffff:127.0.0.1'
@@ -522,13 +554,29 @@ async function applyUndo(runtime, active, invocation) {
 
   let target
   let pendingPlan
+  let pendingPlanClaimed = false
+  let pendingPlanCommitted = false
+  function abortPendingPlanClaim() {
+    if (pendingPlanClaimed) {
+      releasePendingPlanClaim(runtime.db, parsed.turnId)
+      pendingPlanClaimed = false
+    }
+    runtime.undoing = false
+  }
   if (parsed.confirm) {
-    pendingPlan = getPendingPlan(runtime.db, parsed.turnId, invocation.agent.session.id, workspaceKey)
-    if (!pendingPlan)
-      return { kind: 'error', text: `No pending undo plan ${parsed.turnId} for this session (it expired after 5 minutes, was replaced by a newer preview, or already ran). Run /undo again to preview a fresh plan.` }
+    const claim = claimPendingPlan(runtime.db, parsed.turnId, invocation.agent.session.id)
+    if (!claim.ok)
+      return { kind: 'error', text: claim.error }
+    pendingPlanClaimed = true
+    // Reserve the workspace before the first await so another confirm route
+    // cannot start a concurrent restore during snapshot validation.
+    runtime.undoing = true
+    pendingPlan = { turnId: claim.row.turn_id, paths: claim.row.paths, createdAt: claim.row.created_at }
     target = getTurn(runtime.db, pendingPlan.turnId)
-    if (!target || !await turnRefsExist(runtime.store, target))
+    if (!target || !await turnRefsExist(runtime.store, target)) {
+      abortPendingPlanClaim()
       return { kind: 'error', text: 'The pending plan\u0027s snapshot data no longer exists. Run /undo again to preview a fresh plan.' }
+    }
   }
   else if (parsed.turnId) {
     target = getTurn(runtime.db, parsed.turnId)
@@ -558,19 +606,29 @@ async function applyUndo(runtime, active, invocation) {
     return { kind: 'error', text: `No reversible turn was found for this session.${detail}` }
   }
   const ownershipError = assertSessionOwner(target, invocation.agent)
-  if (ownershipError)
+  if (ownershipError) {
+    abortPendingPlanClaim()
     return ownershipError
-  if (target.workspace_key !== workspaceKey)
+  }
+  if (target.workspace_key !== workspaceKey) {
+    abortPendingPlanClaim()
     return { kind: 'error', text: 'The selected turn belongs to another workspace.' }
+  }
   if (!['settled', 'interrupted'].includes(target.status) || target.reversible !== 1 || !target.before_ref || !target.after_ref) {
+    abortPendingPlanClaim()
     return { kind: 'error', text: 'The selected turn does not have a complete reversible snapshot.' }
   }
 
   runtime.undoing = true
   try {
     const paths = await snapshotDiff(runtime.store, target.before_ref, target.after_ref)
-    if (paths.length === 0)
+    if (paths.length === 0) {
+      if (pendingPlanClaimed) {
+        markPendingPlanApplied(runtime.db, parsed.turnId, invocation.agent.session.id, 'No file changes were recorded for this turn.')
+        pendingPlanCommitted = true
+      }
       return { kind: 'success', text: 'No file changes were recorded for this turn.' }
+    }
 
     const entries = await buildPlanEntries(runtime, workspaceDir, target, paths)
     const conflicts = entries.filter(entry => entry.conflict)
@@ -602,8 +660,10 @@ async function applyUndo(runtime, active, invocation) {
 
     // Confirmed execution: re-verify nothing changed on disk since the
     // preview before overwriting anything.
-    if (parsed.confirm && conflicts.length > 0)
+    if (parsed.confirm && conflicts.length > 0) {
+      abortPendingPlanClaim()
       return { kind: 'error', text: `The workspace changed since the preview (${conflicts.length} conflicted file(s)). Run /undo again to refresh the plan; use --force/--skip-conflicts deliberately if needed.` }
+    }
 
     try {
       const text = await executeUndoRestore(runtime, {
@@ -614,8 +674,10 @@ async function applyUndo(runtime, active, invocation) {
         entries,
         skipConflicts: parsed.skipConflicts,
       })
-      if (parsed.confirm)
+      if (parsed.confirm) {
         markPendingPlanApplied(runtime.db, parsed.turnId, invocation.agent.session.id, text)
+        pendingPlanCommitted = true
+      }
       return { kind: 'success', text }
     }
     catch (error) {
@@ -623,7 +685,10 @@ async function applyUndo(runtime, active, invocation) {
     }
   }
   finally {
-    runtime.undoing = false
+    if (pendingPlanClaimed && !pendingPlanCommitted)
+      abortPendingPlanClaim()
+    else
+      runtime.undoing = false
   }
 }
 
@@ -649,6 +714,7 @@ function apply(ctx, config = {}) {
   }, config.guard)
   const dataRoot = rootDir()
   const ledger = openLedger(dataRoot)
+  const recoveryWorkspaces = new Set(listNeedsRecoveryWorkspaces(ledger))
   const active = new Map()
   const untrackedTurns = new Set()
   const workspaceStores = new Map()
@@ -671,19 +737,24 @@ function apply(ctx, config = {}) {
       const sessionId = String(body.sessionId ?? '')
       if (planId === '' || sessionId === '')
         return [400, { error: 'planId and sessionId are required' }]
-      const row = getPendingPlanRow(ledger, planId)
-      if (row === undefined)
+      const previewRow = getPendingPlanRow(ledger, planId)
+      if (previewRow === undefined)
         return [404, { error: 'plan expired or already applied — run /undo again' }]
-      if (row.session_id !== sessionId)
+      if (previewRow.session_id !== sessionId)
         return [403, { error: 'the plan belongs to another session' }]
-      if (row.status !== 'pending')
+      if (previewRow.status !== 'pending')
         return [409, { error: 'this plan was already applied or cancelled — run /undo again' }]
-      const planRuntime = workspaceStores.get(row.workspace_key)
+      const planRuntime = workspaceStores.get(previewRow.workspace_key)
       if (planRuntime === undefined)
         return [409, { error: 'the host restarted since this preview; run /undo again' }]
-      if (planRuntime.undoing || workspaceHasActiveTurn(active, row.workspace_key))
+      if (planRuntime.undoing || workspaceHasActiveTurn(active, previewRow.workspace_key))
         return [409, { error: 'the workspace is busy — wait for the current turn to finish' }]
+      const claim = claimPendingPlan(ledger, planId, sessionId)
+      if (!claim.ok)
+        return [claim.code, { error: claim.error }]
+      const row = claim.row
       planRuntime.undoing = true
+      let committed = false
       return (async () => {
         try {
           const target = getTurn(ledger, row.turn_id)
@@ -692,6 +763,7 @@ function apply(ctx, config = {}) {
           const paths = await snapshotDiff(planRuntime.store, target.before_ref, target.after_ref)
           if (paths.length === 0) {
             markPendingPlanApplied(ledger, planId, sessionId, 'No file changes were recorded for this turn.')
+            committed = true
             return [200, { ok: true, message: 'No file changes were recorded for this turn.' }]
           }
           const entries = await buildPlanEntries(planRuntime, planRuntime.workspaceDir, target, paths)
@@ -707,9 +779,12 @@ function apply(ctx, config = {}) {
             skipConflicts: false,
           })
           markPendingPlanApplied(ledger, planId, sessionId, message)
+          committed = true
           return [200, { ok: true, message }]
         }
         finally {
+          if (!committed)
+            releasePendingPlanClaim(ledger, planId)
           planRuntime.undoing = false
         }
       })()
@@ -727,11 +802,12 @@ function apply(ctx, config = {}) {
     function statusRoute(body, req) {
       const url = new URL(req.url ?? '/', 'http://localhost')
       const planId = String(url.searchParams.get('planId') ?? '')
-      if (planId === '')
-        return [400, { error: 'planId is required' }]
-      const status = getPendingPlanStatus(ledger, planId)
+      const sessionId = String(url.searchParams.get('sessionId') ?? '')
+      if (planId === '' || sessionId === '')
+        return [400, { error: 'planId and sessionId are required' }]
+      const status = getPendingPlanStatus(ledger, planId, sessionId)
       if (status === undefined)
-        return [404, { error: 'plan expired or already applied — run /undo again' }]
+        return [404, { error: 'plan expired, unavailable, or owned by another session — run /undo again' }]
       return [200, status]
     }
 
@@ -858,6 +934,10 @@ function apply(ctx, config = {}) {
     }
 
     const workspaceKey = workspaceKeyFor(workspaceDir)
+    if (recoveryWorkspaces.has(workspaceKey)) {
+      recordSkipped(key, sessionId, workspaceKey, startedAt, 'TURNREWIND_RECOVERY_REQUIRED: a previous undo or redo was interrupted; inspect the workspace and clear its recovery state before using rewind again')
+      return undefined
+    }
     const issue = workspaceIssue(workspaceDir)
     if (issue) {
       recordSkipped(key, sessionId, workspaceKey, startedAt, issue)
@@ -876,6 +956,10 @@ function apply(ctx, config = {}) {
 
     if (runtime.undoing) {
       recordSkipped(key, sessionId, workspaceKey, startedAt, 'TURNREWIND_WORKSPACE_BUSY: an undo operation is running')
+      return undefined
+    }
+    if (workspaceHasActiveTurnForOtherSession(active, workspaceKey, sessionId)) {
+      recordSkipped(key, sessionId, workspaceKey, startedAt, 'TURNREWIND_WORKSPACE_BUSY: another session is using this workspace')
       return undefined
     }
 
@@ -1070,6 +1154,9 @@ function apply(ctx, config = {}) {
           return { kind: 'error', text: `Undo is unavailable for this workspace. ${assessment.reason}` }
         return { kind: 'error', text: 'Undo is unavailable because this session has no workspace.' }
       }
+      const workspaceIdentity = workspaceKeyFor(workspaceDir)
+      if (recoveryWorkspaces.has(workspaceIdentity))
+        return { kind: 'error', text: 'Undo is unavailable because a previous undo or redo was interrupted. Inspect the workspace, then purge its turnrewind data before retrying.' }
       const issue = workspaceIssue(workspaceDir)
       if (issue)
         return { kind: 'error', text: `Undo is unavailable for this workspace. ${issue}` }

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { it } from 'vitest'
 import { createSnapshotStore, gitRef } from '../lib/core/git-snapshot.js'
-import { apply } from '../lib/index.js'
+import { apply, turnSnapshotRef } from '../lib/index.js'
 
 function createHarnessContext() {
   const events = new Map()
@@ -46,6 +46,17 @@ function createHarnessContext() {
     },
   }
   return { ctx, events, cleanups, routes, commands }
+}
+
+async function waitForRef(store, workspace, ref, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const value = await gitRef(store.repoDir, workspace, ref)
+    if (value)
+      return value
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 100))
+  }
+  return undefined
 }
 
 async function withHarness(test) {
@@ -111,8 +122,8 @@ it('keeps consecutive claimed turns independent until both baselines are ready',
     await Promise.all([firstStep, secondStep])
 
     const store = createSnapshotStore(dshHome, workspace)
-    assert.ok(await gitRef(store.repoDir, workspace, 'refs/turnrewind/turn-barrier-sequence_1-before'))
-    assert.ok(await gitRef(store.repoDir, workspace, 'refs/turnrewind/turn-barrier-sequence_2-before'))
+    assert.ok(await waitForRef(store, workspace, turnSnapshotRef('barrier-sequence:1', 'before')))
+    assert.ok(await waitForRef(store, workspace, turnSnapshotRef('barrier-sequence:2', 'before')))
   })
 })
 
@@ -130,16 +141,36 @@ it('does not recreate a completed turn after a duplicate claim', async () => {
     await new Promise(resolvePromise => setTimeout(resolvePromise, 300))
 
     const store = createSnapshotStore(dshHome, workspace)
-    const before = await gitRef(store.repoDir, workspace, 'refs/turnrewind/turn-barrier-duplicate_1-before')
-    const after = await gitRef(store.repoDir, workspace, 'refs/turnrewind/turn-barrier-duplicate_1-after')
+    const beforeRef = turnSnapshotRef('barrier-duplicate:1', 'before')
+    const afterRef = turnSnapshotRef('barrier-duplicate:1', 'after')
+    const before = await waitForRef(store, workspace, beforeRef)
+    const after = await waitForRef(store, workspace, afterRef)
     assert.ok(before)
     assert.ok(after)
 
     claimed[0]({ agent, turn: 1 })
     await Promise.resolve()
     await new Promise(resolvePromise => setTimeout(resolvePromise, 100))
-    assert.equal(await gitRef(store.repoDir, workspace, 'refs/turnrewind/turn-barrier-duplicate_1-before'), before)
-    assert.equal(await gitRef(store.repoDir, workspace, 'refs/turnrewind/turn-barrier-duplicate_1-after'), after)
+    assert.equal(await gitRef(store.repoDir, workspace, beforeRef), before)
+    assert.equal(await gitRef(store.repoDir, workspace, afterRef), after)
+  })
+})
+
+it('does not snapshot overlapping turns from another session in the same workspace', async () => {
+  await withHarness(async ({ harness, workspace, dshHome }) => {
+    const claimed = harness.events.get('agent/inbox/claimed')
+    const preStep = harness.events.get('agent/pre-step')
+    const first = { session: { id: 'workspace-owner', header: { cwd: workspace } } }
+    const second = { session: { id: 'workspace-other', header: { cwd: workspace } } }
+
+    claimed[0]({ agent: first, turn: 1 })
+    await preStep[0]({ agent: first, turn: 1, signal: new AbortController().signal }, async () => ({ kind: 'enter', messages: [] }))
+    claimed[0]({ agent: second, turn: 1 })
+    await preStep[0]({ agent: second, turn: 1, signal: new AbortController().signal }, async () => ({ kind: 'enter', messages: [] }))
+
+    const store = createSnapshotStore(dshHome, workspace)
+    assert.ok(await gitRef(store.repoDir, workspace, turnSnapshotRef('workspace-owner:1', 'before')))
+    assert.equal(await gitRef(store.repoDir, workspace, turnSnapshotRef('workspace-other:1', 'before')), undefined)
   })
 })
 
@@ -157,6 +188,6 @@ it('ignores a late claim after turn/end without leaving a live baseline', async 
     assert.equal(decision.kind, 'enter')
     await new Promise(resolvePromise => setTimeout(resolvePromise, 100))
     const store = createSnapshotStore(dshHome, workspace)
-    assert.equal(await gitRef(store.repoDir, workspace, 'refs/turnrewind/turn-barrier-late-claim_2-before'), undefined)
+    assert.equal(await gitRef(store.repoDir, workspace, turnSnapshotRef('barrier-late-claim:2', 'before')), undefined)
   })
 })
