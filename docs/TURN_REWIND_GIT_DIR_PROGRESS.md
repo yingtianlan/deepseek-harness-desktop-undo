@@ -69,6 +69,14 @@ DSH_HOME
 - `maintenance.test.js` 新增 purge 安全测试：purge 只删除该 workspace 的 snapshot repo 与账本行，用户 `.git` 目录、HEAD、porcelain status、工作区文件以及其他 workspace 的 snapshot repo 和账本行全部完好；
 - `test/git-test-utils.js` 为每个测试仓库显式设置 `core.autocrlf=false`：Git for Windows 系统级默认 `core.autocrlf=true` 会让 worktree checkout/add 发生行尾转换，导致 fixture 依赖机器配置（本机已实测踩到）；
 - 新增 `test/git-gc.test.js`：alternates 失效自愈——构造“文件已删除 + blob 从源仓库借用（`hash-object -w` 不可达对象）+ 源 `gc --prune=now`”的真实断裂场景，验证读取路径断（`stateAt` reject）、下一次 capture 检测到父链缺对象并自愈为自包含基线（alternates 消失、对象物理落本地、后续 capture 独立可读）；
+- 真机 DSH Host 验证已完成（dev 环境：`DSH_HOME=~/.dsh.dev-gitdir`，profile 以 `link:` 挂载本分支插件源码）：
+  - 一次 turn 内新建/修改/删除文件 → `snapshots/<hash>.git` 生成、`ledger.sqlite` 有 turns 行；
+  - 两阶段 `/undo`（预览红绿 diff → 卡内 ✓）→ 三个文件全部恢复至 turn 前状态；
+  - `git status` 在 turn 前后逐字节一致——用户 `.git` 零污染在真机复现；
+  - 非 Git 工作区会话：turn 正常执行、undo 拒绝并说明原因（`TURNREWIND_GIT_REQUIRED`）；
+  - 连通性巡检真机实测：对私有快照 repo 全量 `rev-list --objects --missing=print --all`，全链零缺失、正常退出；连续多轮正常使用（含 amend + `gc --prune=now`）均无误触发自愈——无假阳性；
+  - 自愈触发路径由 `git-gc.test.js` 单测钉死（正常使用中借用的 blob 一般是可达对象，真机强凑“不可达借用 + 删除 + gc”三件套无必要）；
+- 桌面端配套修复：上游把 alpha 发布成 latest（漏标 Pre-release label）导致首装在 `DSH_PREVIEW_RELEASE` 上安全中止——`fetch_latest_dsh_pkg_info` 现在回退解析最新稳定版（`de04c6d`），340 项 Rust 测试通过；
 - 当前已执行的全量插件回归：
 
 ```text
@@ -79,12 +87,12 @@ Failed:     0
 
 ## 3. 当前未完成项
 
-本分支目前仍是 WIP，不能直接合并或作为生产版本使用。
+本分支功能与真机验证已完成，可作为实验分支评审；合并前仍需上游评估取舍（Git-only workspace、ignore 委托、预算守卫移除）。
 
-### 必须完成
+### 可选优化
 
-1. 连通性检查的性能优化（可选）：当前每次 capture 走全链 `rev-list`（O(链上对象总数)）。优化方向：常态走 `--not <parent>` 的增量检查 + 源对象库 mtime 变化时触发全链检查。大仓库上需先实测 capture 耗时；
-2. 必要的真实 DSH Host 真机验证（插件回归 14 文件/69 测试、eslint、Node import smoke 已全部通过；插件 README、`docs/TURN_REWIND.md` 与生产审计报告均已补充 Git 目录模式/实验分支说明，过时的预算守卫章节已改写）。
+1. 连通性检查的性能优化：当前每次 capture 走全链 `rev-list`（O(链上对象总数)）。优化方向：常态走 `--not <parent>` 的增量检查 + 源对象库 mtime 变化时触发全链检查。大仓库上需先实测 capture 耗时；
+2. 非 Git 工作区会话创建时即时弹窗（当前 skip 通知走下一轮 step 注入 + 投影弹窗，会话首轮结束前用户无感知）。
 
 ### 仍需保留的安全边界
 
