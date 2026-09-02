@@ -34,7 +34,7 @@ const GIT_SUBPROCESS_TIMEOUT_MS = 5 * 60 * 1000
  * used to be synchronous, which froze the whole host — every session, the web
  * UI and the health check — for the duration of `git add` on big workspaces.
  */
-function runGit(repoDir, workspaceDir, args, extraEnv = {}, maxBytes = MAX_OUTPUT_BYTES) {
+export function runGit(repoDir, workspaceDir, args, extraEnv = {}, maxBytes = MAX_OUTPUT_BYTES) {
   return new Promise((resolvePromise, rejectPromise) => {
     const child = spawn('git', ['-c', 'core.quotepath=false', '--git-dir', repoDir, '--work-tree', workspaceDir, ...args], {
       cwd: workspaceDir,
@@ -70,22 +70,37 @@ function runGit(repoDir, workspaceDir, args, extraEnv = {}, maxBytes = MAX_OUTPU
         errors.push(chunk)
     })
     child.on('error', error => fail(new Error(`TURNREWIND_GIT_EXEC: ${error.message}`)))
-    child.on('close', (code) => {
+    child.on('close', (code, signal) => {
       if (settled)
         return
       settled = true
       clearTimeout(timeout)
       const stdout = Buffer.concat(chunks)
-      // code null = killed by the timeout's SIGKILL; the timeout already
-      // rejected the promise, this only guards the normal exit path.
-      if (code !== null && code !== 0) {
-        const detail = Buffer.concat(errors).toString('utf8').trim() || stdout.toString('utf8').trim() || `exit ${code}`
+      // A clean exit is the only path that resolves (see gitExitIsClean).
+      // Our own timeout kill already settled above, so anything unclean
+      // here is an external kill with truncated output.
+      if (!gitExitIsClean(code, signal)) {
+        const detail = Buffer.concat(errors).toString('utf8').trim() || stdout.toString('utf8').trim() || (signal ? `killed by ${signal}` : `exit ${code}`)
         rejectPromise(new Error(`TURNREWIND_GIT_FAILED: ${detail}`))
         return
       }
       resolvePromise(stdout)
     })
   })
+}
+
+/**
+ * Pure verdict for a git subprocess exit: only a clean exit (code 0, no
+ * signal) may resolve. code null or a signal means the process died
+ * externally (OOM killer, taskkill, antivirus, host suspension) and any
+ * buffered output is a truncated half-stream that must reject - resolving
+ * would e.g. commit a half-finished 'git add' as the turn snapshot.
+ */
+export function gitExitIsClean(code, signal) {
+  // Node passes signal as null (and older versions may pass undefined) on
+  // a clean exit; treat both as no-signal.
+  const noSignal = signal === null || signal === undefined
+  return code === 0 && noSignal
 }
 
 async function runGitText(repoDir, workspaceDir, args, extraEnv = {}) {
@@ -98,6 +113,9 @@ let gitProbeFailedAt = 0
 
 /** Re-probe a failed availability check after this long (git may be installed while the host runs). */
 const GIT_PROBE_RETRY_MS = 5 * 60 * 1000
+
+/** The availability probe feeds the pre-step barrier: a hung `git --version` must not park a turn forever. */
+const GIT_PROBE_TIMEOUT_MS = 30 * 1000
 
 /**
  * Whether a usable git executable is on PATH. Successful probes are cached for
@@ -113,18 +131,33 @@ export function gitAvailable() {
   gitProbeResult ??= new Promise((resolvePromise) => {
     const child = spawn('git', ['--version'])
     let settled = false
+    // The probe feeds the pre-step barrier: without a budget a hung
+    // `git --version` would park the barrier forever. A timed-out or
+    // externally-killed probe counts as unavailable (retried after TTL).
+    let probeTimeout
+    const settle = (value) => {
+      if (settled)
+        return undefined
+      settled = true
+      clearTimeout(probeTimeout)
+      resolvePromise(value)
+    }
     const markFailure = () => {
       gitProbeFailedAt = Date.now()
     }
-    const settle = value => (settled ? undefined : (settled = true, resolvePromise(value)))
+    probeTimeout = setTimeout(() => {
+      markFailure()
+      child.kill('SIGKILL')
+      settle(false)
+    }, GIT_PROBE_TIMEOUT_MS)
     child.on('error', () => {
       markFailure()
       settle(false)
     })
-    child.on('close', (code) => {
-      if (code !== 0)
+    child.on('close', (code, signal) => {
+      if (code !== 0 || signal !== null)
         markFailure()
-      settle(code === 0)
+      settle(code === 0 && signal === null)
     })
   })
   return gitProbeResult
@@ -154,13 +187,14 @@ async function ensureRepository(store) {
         clearTimeout(timeout)
         rejectPromise(new Error(`TURNREWIND_GIT_INIT: ${error.message}`))
       })
-      child.on('close', (code) => {
+      child.on('close', (code, signal) => {
         if (settled)
           return
         settled = true
         clearTimeout(timeout)
-        if (code !== 0) {
-          rejectPromise(new Error(`TURNREWIND_GIT_INIT: ${Buffer.concat(errors).toString('utf8').trim() || 'git init failed'}`))
+        if (!gitExitIsClean(code, signal)) {
+          const detail = Buffer.concat(errors).toString('utf8').trim() || (signal ? `killed by ${signal}` : `exit ${code}`)
+          rejectPromise(new Error(`TURNREWIND_GIT_FAILED: ${detail}`))
           return
         }
         resolvePromise()
@@ -398,15 +432,18 @@ function runGitStdin(repoDir, workspaceDir, args, input) {
     child.stdout.on('data', chunk => chunks.push(chunk))
     child.stderr.on('data', chunk => errors.push(chunk))
     child.on('error', error => fail(new Error(`TURNREWIND_GIT_EXEC: ${error.message}`)))
-    child.on('close', (code) => {
+    child.on('close', (code, signal) => {
       if (settled)
         return
-      settled = true
-      clearTimeout(timeout)
-      if (code !== null && code !== 0) {
-        fail(new Error(`TURNREWIND_GIT_FAILED: ${Buffer.concat(errors).toString('utf8').trim() || `exit ${code}`}`))
+      // Unclean exit = external kill with truncated output (see
+      // gitExitIsClean); our own timeout settled above. Leave settled=false
+      // here so fail() can reject the promise and guard the race.
+      if (!gitExitIsClean(code, signal)) {
+        fail(new Error(`TURNREWIND_GIT_FAILED: ${Buffer.concat(errors).toString('utf8').trim() || (signal ? `killed by ${signal}` : `exit ${code}`)}`))
         return
       }
+      settled = true
+      clearTimeout(timeout)
       resolvePromise(Buffer.concat(chunks))
     })
     // Ignore EPIPE if git exits before consuming all input.

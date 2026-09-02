@@ -5,8 +5,10 @@ import process from 'node:process'
 
 const MAX_OUTPUT_BYTES = 1024 * 1024
 // spawnSync blocks the event loop; a hard timeout keeps a wedged git from
-// freezing the host forever (same wall clock as the async spawn budget).
-const SYNC_GIT_TIMEOUT_MS = 5 * 60 * 1000
+// freezing the host forever. These are local metadata rev-parse calls only,
+// so 15s is already generous - a workload slow enough to hit it is wedged,
+// not busy (the heavy async captures keep their own 5-minute budget).
+const SYNC_GIT_TIMEOUT_MS = 15 * 1000
 
 function runGitSync(workspaceDir, args) {
   const result = spawnSync('git', ['-c', 'core.quotepath=false', ...args], {
