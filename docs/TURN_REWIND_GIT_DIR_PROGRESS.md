@@ -84,8 +84,7 @@ Failed:     0
 ### 必须完成
 
 1. 连通性检查的性能优化（可选）：当前每次 capture 走全链 `rev-list`（O(链上对象总数)）。优化方向：常态走 `--not <parent>` 的增量检查 + 源对象库 mtime 变化时触发全链检查。大仓库上需先实测 capture 耗时；
-2. 更新插件 README、`docs/TURN_REWIND.md` 和生产审计报告，明确本模式是实验分支、Git-only workspace 和仍未解决的风险（README 中的预算守卫/`TURNREWIND_MAX_*` 章节已过时）；
-3. 完整插件回归、lint、Node import smoke 已全部通过（见上节），剩余必要的真实 DSH Host 真机验证。
+2. 必要的真实 DSH Host 真机验证（插件回归 14 文件/69 测试、eslint、Node import smoke 已全部通过；插件 README、`docs/TURN_REWIND.md` 与生产审计报告均已补充 Git 目录模式/实验分支说明，过时的预算守卫章节已改写）。
 
 ### 仍需保留的安全边界
 

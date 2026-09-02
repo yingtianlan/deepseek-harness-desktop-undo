@@ -235,11 +235,13 @@ operation_paths(operation_id, path, expected_current_digest,
 
 若扫描失败、被取消或有未授权路径，turn 必须标记 `reversible = false` 或 `partiallyReversible = true`，并附带明确原因。
 
-### 5.3 工作区资格守卫（已落地）
+### 5.3 工作区资格守卫（Git 目录实验分支已改写）
 
-首个原型曾对任意工作区直接建立全量基线：一位 QQ 机器人用户的会话默认工作目录是家目录（约 250 GB），首个 `git add --all` 级别的基线快照直接耗尽磁盘。OpenCode 的对照实现给出了两条可借鉴的约束：它对非 Git 工作区完全不启用快照；对 Git 工作区也只枚举 `git status` 语义下的变更路径、通过共享用户对象库（`objects/info/alternates`）和复制用户 index 白拿基线，并对未跟踪大文件设置单文件上限。
+首个原型曾对任意工作区直接建立全量基线：一位 QQ 机器人用户的会话默认工作目录是家目录（约 250 GB），首个 `git add --all` 级别的基线快照直接耗尽磁盘。OpenCode 的对照实现给出了两条可借鉴的约束：它对非 Git 工作区完全不启用快照；对 Git 工作区通过共享用户对象库（`objects/info/alternates`）和复制用户 index 复用基线，并对未跟踪大文件设置单文件上限。
 
-在引入 OpenCode 式增量基线（见 Phase 4）之前，快照前必须先通过两层资格检查，不合格的 turn 记为 `skipped`（`reversible = 0`）并如实向用户说明原因，绝不为它建立「看似可撤销」的记录：
+> **Git 目录模式（实验分支 `dsh/turnrewind-git-dir-undo`）**：该实验分支已把上述 OpenCode 式约束落地——非 Git 工作区直接 `TURNREWIND_GIT_REQUIRED`、通过 alternates 共享对象库（含 gc 失效自愈）、子目录归并到 worktree 根、ignore 语义完全委托源仓库；预算预扫描与自定义敏感文件名单被有意删除。本节其余内容描述的是该实验之前的**主线行为**；实验细节与进度见 `TURN_REWIND_GIT_DIR_PROGRESS.md`。
+
+主线在引入 OpenCode 式增量基线（见 Phase 4）之前，快照前必须先通过两层资格检查，不合格的 turn 记为 `skipped`（`reversible = 0`）并如实向用户说明原因，绝不为它建立「看似可撤销」的记录：
 
 1. **系统目录直接拒绝**：家目录本身、家目录的祖先、任何盘符根目录；
 2. **预算预扫描**（元数据遍历、超限即中止）：文件数、总大小、单文件大小（与恢复读取上限一致）三重上限，`.git`/`node_modules` 等排除目录不计入；上限可通过环境变量调整。

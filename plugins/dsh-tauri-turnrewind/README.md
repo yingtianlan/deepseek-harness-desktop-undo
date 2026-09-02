@@ -3,6 +3,8 @@
 本地开发中的 DSH turn 回滚插件。
 
 > 当前 `cordis.patch.yml` 已为本地 debug profile 的实验启用而挂载插件。它仍是原型：恢复路径直接使用 Node/Git，尚未接入受控的宿主 sandbox/Tauri bridge；仅可在可丢弃的测试工作区中启用，不能作为生产功能使用。
+>
+> **Git 目录模式（实验分支）**：本分支把快照模型切换为「工作区必须是 Git worktree」（OpenCode 风格）：非 Git 目录显式记为不可追踪（`TURNREWIND_GIT_REQUIRED`）；ignore 规则（`.gitignore` / `.git/info/exclude` / global excludes / `.gitattributes`）委托给源仓库；私有 snapshot repo 通过 alternates 借用源对象。设计与进度见 `docs/TURN_REWIND_GIT_DIR_PROGRESS.md`——该文档明确本模式是独立实验分支，尚未合并回主功能分支。
 
 ## 当前状态
 
@@ -13,7 +15,8 @@
 - **git 全程异步执行**：快照、diff、恢复都不阻塞 Host 事件循环；同一会话的捕获/结算按 FIFO 串行；收到 turn 输入后，before snapshot 通过 `agent/pre-step` barrier 完成后才允许模型和工具执行；同一 workspace 被其他 session 占用时，新 turn 会正常运行但记为 `skipped`，避免共享 snapshot 链互相污染；
 - **git 可用性探测**：系统没有 git 时，turn 显式记为 `skipped`（原因 `TURNREWIND_GIT_UNAVAILABLE`），而不是静默失败；
 - **快照链自愈**：私有快照仓库被删/损坏后，下一次捕获自动降级重建基线（日志有一条 warning），后续 turn 照常可撤销；被清空前留下来的旧 turn 会在 `/undo` 选目标时自动识别为死快照并标记跳过（`snapshot ref missing`），不会甩出 git 原始报错；
-- **工作区资格守卫**：家目录、家目录的祖先、盘根目录，以及超过快照预算（文件数 / 总大小 / 单文件大小）的目录不做快照，turn 记为 `skipped` 并向 `/undo` 说明原因（见「工作区资格与快照预算」）；
+- **alternates 失效自愈**：私有 repo 通过 alternates 借用源仓库对象，而源仓库 `git gc --prune=now`（amend/rebase 的日常残留）可能删掉被借用且不可达的对象；每次 capture 后做连通性检查（`git rev-list --objects --missing=print`），发现缺对象即降级为自包含存储（不再借用、不再复制源 index）并重建基线，旧 turn 走死快照跳过路径；
+- **工作区资格守卫（Git 目录模式）**：会话 cwd 必须位于 Git worktree（子目录自动归并到 worktree 根，共享同一快照域）；家目录、家目录祖先、盘根等系统目录直接拒绝；非 Git 目录记为 `TURNREWIND_GIT_REQUIRED`，不再做全目录预算扫描（见「工作区资格」）；
 - **不可用弹窗**：客户端半（`lib/client.js`）通过 `turnrewind` 会话投影检测到不可用提示时，在 Web UI 内弹出模态对话框（中英双语、跟随应用主题、每个浏览器只弹一次）；
 - **两阶段 `/undo`**：先出预览卡（红绿 diff + `+x -y` 徽标 + 文件清单），卡内 ✓/✗ 按钮确认执行或取消——不看预览就不会误执行；计划 5 分钟过期，确认时二次校验磁盘；
 - 恢复前比较当前文件与 turn 完成时的快照，发现变化则拒绝覆盖，并给出「turn 产物 → 当前磁盘」的冲突 diff；
@@ -69,26 +72,20 @@
 
 父对话递归撤销、消息旁 Undo 按钮和设置页模式切换尚未实现。
 
-## 工作区资格与快照预算
+## 工作区资格（Git 目录模式）
 
-快照的第一版实现会对任意工作区做全量基线，曾有用户在 QQ 机器人会话（默认工作目录是家目录、约 250 GB 内容）上触发 `git add --all` 级别的灾难。现在 turn 开始前会先做资格检查，不合格的工作区**不建快照、不产生可撤销 turn**，并在账本中记为 `skipped`（`/undo` 会显示原因）。两层检查：
+快照的第一版实现会对任意工作区做全量基线，曾有用户在 QQ 机器人会话（默认工作目录是家目录、约 250 GB 内容）上触发 `git add --all` 级别的灾难。本分支（Git 目录模式）改为以**源仓库的 Git worktree 为快照边界**，不再做全目录预算扫描。turn 开始前的资格检查：
 
 1. **系统目录直接拒绝**：家目录本身、家目录的祖先目录（如 `C:\Users`、`C:\`）、以及任何盘符根目录。这类目录无论多小都不做快照。
-2. **预算预扫描**（带元数据的快速遍历，超限立即中止）：
-   - 文件数上限：默认 50,000（环境变量 `TURNREWIND_MAX_FILES`）；
-   - 总大小上限：默认 1 GiB（环境变量 `TURNREWIND_MAX_BYTES`）；
-   - 单文件上限：64 MB（与恢复读取上限一致，超限文件永远无法恢复，因此整个工作区拒绝快照）；
-   - 目录嵌套深度 20 层、目录总数 10,000（ensureRuntime 探测层专属，`config.guard` 可覆盖）；
-   - `.git`、`node_modules`、`dist`、`build`、`coverage`、`.turnrewind` 目录不计入预算。
-
-预算数值在 turn 领取守卫与 ensureRuntime 探测两层之间共用同一来源（环境变量对两层同时生效）；两条路径产生的被拒 turn 都会写入 skipped 记录并向 `/undo` 与弹窗说明原因，不存在静默拒绝。
+2. **必须是 Git worktree**：会话 cwd 不在 Git worktree 内的 turn 记为 `skipped`（原因 `TURNREWIND_GIT_REQUIRED`）。子目录会话自动归并到 worktree 根（`git rev-parse --show-toplevel`），共享同一快照域；同一仓库的 linked worktree 各自成域。
+3. **快照范围委托给源仓库 ignore 规则**：`.gitignore`、`.git/info/exclude`（每次 capture 重同步）、global excludes 与 `.gitattributes` 语义与源仓库一致；插件自身只额外排除 `.git` 元数据与 turnrewind 临时文件。**不再有自定义敏感文件名单**——未写进 ignore 的文件（含 `.env`、密钥类文件）会被快照；这是有意的取舍：`token.ts`、`credentials.module.ts` 等合法源码曾被旧规则静默排除，导致 undo 永远无法恢复它们。若不希望某些文件进入快照，请把它们加进源仓库的 ignore 规则。
 
 被拒绝的 turn 仍正常执行，只是不提供 undo。同时该会话会收到一条一次性提示（`[Turn rewind unavailable]`），说明工作区被拒绝的原因；每个会话只提示一次，后续 turn 不再重复打扰。提示会以两种形态呈现：
 
 1. **会话内消息**：插件来源的上下文注入消息，模型和用户都可见、可审计；
 2. **Web UI 弹窗**：宿主端 `turnrewind` 会话投影（`lib/core/dialog-projection.js`）把提示折叠进会话列表快照，客户端半（`lib/client.js`）从 `sessions.list` 的 `projectionValues.turnrewind` 读到后弹出模态对话框，按提示 id 在 `localStorage` 去重——同一浏览器每条提示只弹一次，重装/换浏览器会重弹一次。
 
-若确有合法的大工作区需要 undo，可通过环境变量放宽预算，自行承担快照耗时与磁盘占用。
+大工作区的取舍：不再做预算预扫描，快照耗时与磁盘占用随仓库规模增长（Git ignore 能排除 `node_modules` 等，但容量/性能风险仍由使用者自行承担）；单文件恢复上限仍为 64 MB。
 
 ### 清理已膨胀的快照数据
 
@@ -262,26 +259,11 @@ notice 只消费一次。下一次模型 step 后不会重复注入。
 
 ## Git 与快照存储
 
-### 快照护栏（建 git 追踪前先预估）
+### 快照边界与对象借用（Git 目录模式）
 
-在创建任何私有 Git 快照仓库之前，插件会先**预估该工作区会被追踪多少内容**：统计文件数、总大小、单个最大文件、目录嵌套深度（复用与真实快照相同的排除规则，如 node_modules/.git/dist 等不统计）。只要任意一项超过配置阈值，就**不建立 git 追踪**，该工作区的 turn 不会做快照、`/undo` 也不可用（因为没有可恢复内容）。这能避免把巨大或极深的目录（node_modules 密集仓库、构建树、以及任何类似家目录的东西）整盘塞进私有仓库。
+私有 snapshot repo 保存于 `$DSH_HOME/snapshots/<workspace-hash>.git`，与用户项目的 `.git` 完全隔离：capture 使用临时 `GIT_INDEX_FILE`（finally 中删除），snapshot refs 仅允许 `refs/turnrewind/` 前缀；不修改用户项目的 `HEAD`、branch、index、stash 或提交历史（有逐字节不变测试钉住）。初始化时通过 `objects/info/alternates` 借用源仓库对象以减少重复存储，并同步源仓库 `.git/info/exclude`；源仓库 `gc --prune=now` 删掉被借用对象时，下一次 capture 的连通性检查会检测到并降级为自包含存储（见「当前状态」中的 alternates 失效自愈）。
 
-阈值是插件设置，可在 profile 的 `cordis.patch.yml` 的插件 config 里调整：
-
-```yaml
-- insert:
-    - id: turnrewind
-      name: dsh-tauri-turnrewind
-      config:
-        guard:
-          maxFileCount: 10000 # 最多追踪文件数
-          maxTotalBytes: 536870912 # 总大小上限(512MB)
-          maxFileBytes: 52428800 # 单个文件上限(50MB)
-          maxDepth: 20 # 目录嵌套深度上限
-          maxDirs: 10000 # 目录数上限
-```
-
-被护栏拒绝的工作区会在日志里输出 `turnrewind: skip snapshot tracking for <dir>: <reason>`，且结果被缓存（不会每回合重扫大目录）。与 `$HOME` 防护互为兜底：会话 cwd 为家目录时直接拒绝，其他大目录由本护栏拦截。
+家目录防护与 Git worktree 要求互为兜底：会话 cwd 为家目录/盘根等系统目录时直接拒绝；不在 Git worktree 内的目录记为 `TURNREWIND_GIT_REQUIRED`，不做全目录预算扫描，也没有可配置的 `guard` 预算项（旧版本的 `config.guard` / `TURNREWIND_MAX_*` 已随本模式移除）。
 
 快照存放在插件私有目录：
 
