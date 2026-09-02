@@ -50,7 +50,8 @@ DSH_HOME
 - snapshot capture 复用 source workspace 的 `.gitignore` 和 global Git ignore 语义；
 - 自定义敏感文件规则已收窄为 Git 元数据和 turnrewind 临时文件，避免把 `token.ts`、`credentials.module.ts` 等合法源码静默排除；
 - snapshot refs 仅接受 `refs/turnrewind/` 前缀，并拒绝明显的路径穿越形式；
-- Git 路径 diff 继续使用 NUL 分隔。
+- Git 路径 diff 继续使用 NUL 分隔；
+- **alternates 失效自愈**：每次 capture 后用 `git rev-list --objects --missing=print` 做连通性检查——源仓库 `gc --prune=now`（amend/rebase 的日常残留）可能删除被 snapshot 链借用且不可达的对象；检测到缺对象时自动降级：删除私有 snapshot repo、以**自包含模式**（不再写 alternates、不再复制 source index）重建全新基线。旧 turn 成为死快照走既有的 planner 跳过路径，后续 turn 永久不再借用。检查失败（极老 git/瞬时错误）只跳过自愈并告警，绝不误伤健康链。已在磁盘上的文件会在下次 capture 时因 read-tree 的 stat-less index 被重新哈希而自动补写本地 blob，因此永久性断裂只发生在“文件已删 + blob 是借用 + 源 gc”的组合上，检测正覆盖这一路径。
 
 ### 测试
 
@@ -67,11 +68,12 @@ DSH_HOME
 - 新增 `test/git-worktree.test.js`：linked worktree 隔离——同一仓库两个 worktree 得到两个独立 snapshot repo 与 refs（互不泄漏、共享同一 common objects alternates）、源仓库 HEAD/branch/status/refs 逐字节不变、worktree 子目录 cwd 归并到该 worktree 的 store；以及打包对象（`git gc --prune=now`）经 alternates 的 capture/restore 读写路径；
 - `maintenance.test.js` 新增 purge 安全测试：purge 只删除该 workspace 的 snapshot repo 与账本行，用户 `.git` 目录、HEAD、porcelain status、工作区文件以及其他 workspace 的 snapshot repo 和账本行全部完好；
 - `test/git-test-utils.js` 为每个测试仓库显式设置 `core.autocrlf=false`：Git for Windows 系统级默认 `core.autocrlf=true` 会让 worktree checkout/add 发生行尾转换，导致 fixture 依赖机器配置（本机已实测踩到）；
+- 新增 `test/git-gc.test.js`：alternates 失效自愈——构造“文件已删除 + blob 从源仓库借用（`hash-object -w` 不可达对象）+ 源 `gc --prune=now`”的真实断裂场景，验证读取路径断（`stateAt` reject）、下一次 capture 检测到父链缺对象并自愈为自包含基线（alternates 消失、对象物理落本地、后续 capture 独立可读）；
 - 当前已执行的全量插件回归：
 
 ```text
-Test Files: 13 passed
-Tests:      68 passed
+Test Files: 14 passed
+Tests:      69 passed
 Failed:     0
 ```
 
@@ -81,7 +83,7 @@ Failed:     0
 
 ### 必须完成
 
-1. alternates 剩余风险：源仓库 `git gc`/`git prune` 可能删除仅被 snapshot 链引用（经 alternates 复用、源侧已不可达）的对象；需要失效检测或回退独立对象存储。常规路径（打包对象读写、source index 初始化、dirty 仓库）已有测试钉住；
+1. 连通性检查的性能优化（可选）：当前每次 capture 走全链 `rev-list`（O(链上对象总数)）。优化方向：常态走 `--not <parent>` 的增量检查 + 源对象库 mtime 变化时触发全链检查。大仓库上需先实测 capture 耗时；
 2. 更新插件 README、`docs/TURN_REWIND.md` 和生产审计报告，明确本模式是实验分支、Git-only workspace 和仍未解决的风险（README 中的预算守卫/`TURNREWIND_MAX_*` 章节已过时）；
 3. 完整插件回归、lint、Node import smoke 已全部通过（见上节），剩余必要的真实 DSH Host 真机验证。
 
@@ -105,7 +107,7 @@ Failed:     0
 | 项目 | 当前取舍 |
 | --- | --- |
 | 快照存储 | 仍为 DSH_HOME 下的独立 Git repo，不污染用户 `.git` |
-| Git 对象复用 | 通过 alternates 尝试复用 source objects；失败时应能回退到独立对象 |
+| Git 对象复用 | 通过 alternates 借用 source objects；capture 后连通性检查发现被源 gc 削掉的对象时自愈为自包含存储（不再借用）。检查成本：每次 capture 全链 rev-list（优化 TODO） |
 | Ignore 规则 | 以 source Git ignore 为主，turnrewind 临时文件额外排除 |
 | 非 Git workspace | 不支持，明确记录 `TURNREWIND_GIT_REQUIRED` |
 | 大 workspace | 不再做重复的全目录预算扫描；Git ignore 可减少范围，但快照容量和性能风险仍存在 |

@@ -119,12 +119,16 @@ async function ensureRepository(store) {
     await runGitText(repoDir, workspaceDir, ['config', 'core.longpaths', 'true'])
 
     // Reuse committed source objects, as OpenCode does, while new snapshot
-    // objects stay in this private repository.
-    const sourceObjects = join(sourceCommonDir, 'objects')
-    if (existsSync(sourceObjects)) {
-      const alternates = join(repoDir, 'objects', 'info', 'alternates')
-      mkdirSync(dirname(alternates), { recursive: true })
-      writeFileSync(alternates, `${sourceObjects}\n`)
+    // objects stay in this private repository. A healed store stays
+    // self-contained: alternates are never written again, so source-side
+    // gc/prune can no longer break snapshot chains for this workspace.
+    if (store.selfContained !== true) {
+      const sourceObjects = join(sourceCommonDir, 'objects')
+      if (existsSync(sourceObjects)) {
+        const alternates = join(repoDir, 'objects', 'info', 'alternates')
+        mkdirSync(dirname(alternates), { recursive: true })
+        writeFileSync(alternates, `${sourceObjects}\n`)
+      }
     }
   }
   if (sourceInfoExclude && existsSync(sourceInfoExclude)) {
@@ -225,11 +229,48 @@ export function probeWorkspace(workspaceDir) {
 }
 
 /**
- * Capture a complete allowed-path tree, incrementally reusing the parent tree.
- * A missing parent (wiped snapshot directory, moved DSH_HOME) degrades to a
- * fresh baseline instead of failing every future turn.
+ * Capture a snapshot, then verify every referenced object is still readable
+ * through the snapshot repository (including its alternates). The source
+ * repository can prune exactly the unreachable objects we borrowed —
+ * `git gc --prune=now` after an amend/rebase is the everyday case — so a
+ * capture that reuses a parent chain may silently reference deleted blobs.
+ * When that happens, rebuild the store as a self-contained repository (no
+ * alternates, no source-index seeding) and take a fresh baseline: old turns
+ * become dead snapshots the planner already skips, and future turns never
+ * borrow again.
  */
 export async function captureSnapshot(store, refName, message, parentRef) {
+  let snapshot = await captureInto(store, refName, message, parentRef)
+  if (await snapshotHasMissingObjects(store, snapshot.commit)) {
+    console.warn(`turnrewind: snapshot objects for ${store.workspaceDir} disappeared from the source repository (gc/prune); rebuilding a self-contained baseline`)
+    rmSync(store.repoDir, { recursive: true, force: true })
+    store.selfContained = true
+    snapshot = await captureInto(store, refName, message, undefined)
+    if (await snapshotHasMissingObjects(store, snapshot.commit))
+      throw new Error(`TURNREWIND_SNAPSHOT_INCOMPLETE: ${store.workspaceDir} baseline still misses objects after a self-contained rebuild`)
+  }
+  return snapshot
+}
+
+/**
+ * `git rev-list --objects --missing=print` walks every object reachable from
+ * the commit (through alternates) and prints missing ones as `?<oid>` lines
+ * while exiting 0, so detection stays non-fatal on healthy stores.
+ */
+async function snapshotHasMissingObjects(store, commit) {
+  try {
+    const output = await runGit(store.repoDir, store.workspaceDir, ['rev-list', '--objects', '--missing=print', commit])
+    return output.toString('utf8').split('\n').some(line => line.startsWith('?'))
+  }
+  catch (error) {
+    // Detection must never take healthy snapshots down: an unusable probe
+    // (very old git, transient failure) only skips the self-heal path.
+    console.warn(`turnrewind: snapshot connectivity check failed for ${store.workspaceDir}: ${error.message}`)
+    return false
+  }
+}
+
+async function captureInto(store, refName, message, parentRef) {
   const { repoDir, workspaceDir, sourceIndexPath } = store
   await ensureRepository(store)
   let parent
@@ -243,7 +284,7 @@ export async function captureSnapshot(store, refName, message, parentRef) {
     const env = { GIT_INDEX_FILE: indexPath }
     if (parent)
       await runGit(repoDir, workspaceDir, ['read-tree', parent], env)
-    else if (existsSync(sourceIndexPath))
+    else if (store.selfContained !== true && existsSync(sourceIndexPath))
       copyFileSync(sourceIndexPath, indexPath)
     // Git reads .gitignore and global excludes from the source worktree while
     // GIT_INDEX_FILE isolates the snapshot from the user's real index.
