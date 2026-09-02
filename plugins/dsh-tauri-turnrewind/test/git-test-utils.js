@@ -18,6 +18,29 @@ export function runGit(cwd, args) {
   })
 }
 
+export function gitOutput(cwd, args) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn('git', args, { cwd })
+    const chunks = []
+    const errors = []
+    child.stdout.on('data', chunk => chunks.push(chunk))
+    child.stderr.on('data', chunk => errors.push(chunk))
+    child.on('error', rejectPromise)
+    child.on('close', (code) => {
+      if (code !== 0) {
+        rejectPromise(new Error(`git ${args.join(' ')} failed: ${Buffer.concat(errors).toString('utf8').trim()}`))
+        return
+      }
+      resolvePromise(Buffer.concat(chunks).toString('utf8'))
+    })
+  })
+}
+
+export async function commitAll(workspace, message) {
+  await runGit(workspace, ['add', '--all'])
+  await runGit(workspace, ['commit', '--quiet', '-m', message])
+}
+
 export async function initGitWorkspace(workspace) {
   await mkdir(workspace, { recursive: true })
   await runGit(workspace, ['init', '--quiet'])

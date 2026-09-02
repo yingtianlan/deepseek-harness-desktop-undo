@@ -59,11 +59,15 @@ DSH_HOME
 - `security.test.js` 的敏感文件测试已改写为新语义：ignore 规则委托给源仓库（被 `.gitignore` 忽略的文件不进快照；未忽略的 secret 命名文件会被捕获，token.ts 等合法源码不再被误伤）；
 - `guard.test.js` 已重写为：Git-required（普通目录拒绝）、Git 根目录 canonicalization（子目录 session 归并到同一 worktree/snapshot repo）、系统目录拒绝；
 - 旧 `guard.js` 中已无调用方的全目录预算扫描（`scanWithinBudget`/`assessWorkspace`/`defaultBudget` 及 `TURNREWIND_MAX_FILES`/`TURNREWIND_MAX_BYTES` 覆盖）已随测试一并删除，`guard.js` 只保留 `isSystemSensitiveWorkspace`；
+- 新增 `test/git-state.test.js`：用户 Git 状态不变断言（必做项 1）——
+  - capture 前后 `HEAD`、当前 branch、`symbolic-ref`、`git status --porcelain`、`ls-files -s`（index 内容）、`git diff --cached`、`for-each-ref`、`git log --all`、`git stash list` 全部逐字节不变；
+  - restore 只改工作区文件，index/HEAD/refs/stash 不变，且快照捕获的是文件系统内容而非 index；
+  - 私有 snapshot repo 的 refs 仅含 `refs/turnrewind/`，用户 refs 命名空间无泄漏，工作区无 `.turnrewind-*` 临时文件残留；
 - 当前已执行的全量插件回归：
 
 ```text
-Test Files: 10 passed
-Tests:      59 passed
+Test Files: 11 passed
+Tests:      61 passed
 Failed:     0
 ```
 
@@ -73,13 +77,12 @@ Failed:     0
 
 ### 必须完成
 
-1. 增加用户 Git 状态不变断言：capture 前后 `HEAD`、当前 branch、index、`git status` 均不应被插件改变；
-2. 增加 `.gitignore`、`.git/info/exclude`、global ignore 和 `.gitattributes` 语义测试；
-3. 解决 source object alternates、source index 初始化和 snapshot 私有对象之间的兼容性问题；
-4. 给同一个 Git common-dir 下的 linked worktree 增加 snapshot 隔离测试；
-5. 更新 `maintenance.js`、`purge-workspace.js`、ledger workspace metadata 和 purge 测试，保证只清理 turnrewind 的 snapshot repo，不误删用户 `.git`；
-6. 更新插件 README、`docs/TURN_REWIND.md` 和生产审计报告，明确本模式是实验分支、Git-only workspace 和仍未解决的风险（README 中的预算守卫/`TURNREWIND_MAX_*` 章节已过时）；
-7. 运行完整插件回归、lint、Node import smoke，以及必要的真实 DSH Host 验证。
+1. 增加 `.gitignore`、`.git/info/exclude`、global ignore 和 `.gitattributes` 语义测试；
+2. 解决 source object alternates、source index 初始化和 snapshot 私有对象之间的兼容性问题；
+3. 给同一个 Git common-dir 下的 linked worktree 增加 snapshot 隔离测试；
+4. 更新 `maintenance.js`、`purge-workspace.js`、ledger workspace metadata 和 purge 测试，保证只清理 turnrewind 的 snapshot repo，不误删用户 `.git`；
+5. 更新插件 README、`docs/TURN_REWIND.md` 和生产审计报告，明确本模式是实验分支、Git-only workspace 和仍未解决的风险（README 中的预算守卫/`TURNREWIND_MAX_*` 章节已过时）；
+6. 运行完整插件回归、lint、Node import smoke，以及必要的真实 DSH Host 验证。
 
 ### 仍需保留的安全边界
 
