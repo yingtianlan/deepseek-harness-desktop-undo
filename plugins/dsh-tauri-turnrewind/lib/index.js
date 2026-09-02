@@ -4,7 +4,7 @@ import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import process from 'node:process'
 import { createDialogProjection } from './core/dialog-projection.js'
-import { captureSnapshot, classifyPathChange, createSnapshotStore, currentState, diffAgainstDisk, gitAvailable, gitRef, probeWorkspace, restorePath, snapshotDiff, snapshotFileDiff, stateAt, workspaceKey } from './core/git-snapshot.js'
+import { captureSnapshot, classifyPathChange, createSnapshotStore, currentState, diffAgainstDisk, gitAvailable, gitRef, MAX_FILE_BYTES, probeWorkspace, restorePath, snapshotDiff, snapshotFileDiff, stateAt, workspaceKey } from './core/git-snapshot.js'
 import { isSystemSensitiveWorkspace } from './core/guard.js'
 import { claimPendingPlan, claimRewindNotices, completeRedoWithNotice, completeUndoWithNotice, createOperation, createPendingPlan, failTurn, getLatestAppliedUndo, getLatestSnapshotRef, getLatestTurnSummary, getPendingPlanRow, getPendingPlanStatus, getTurn, insertTurn, listNeedsRecoveryWorkspaces, listReversibleTurns, markPendingPlanApplied, markPendingPlanCancelled, markTurnSnapshotMissing, openLedger, recordSkippedTurn, registerWorkspace, releasePendingPlanClaim, settleInterruptedTurn, settleNoopTurn, settleOperation, settleTurn, skipTurn } from './core/ledger.js'
 import { classifyUndo } from './core/planner.js'
@@ -186,15 +186,20 @@ async function diskMatchesSnapshot(runtime, workspaceDir, ref, path) {
 
 /**
  * Build the read-only undo plan: for every touched path, how the turn changed it
- * (modified/created/deleted) and whether the current on-disk state still matches
- * the turn's after snapshot.
+ * (modified/created/deleted), whether the current on-disk state still matches
+ * the turn's after snapshot, and whether the before-snapshot blob exceeds the
+ * restore limit (oversized entries restore as failures, never silently).
  */
 async function buildPlanEntries(runtime, workspaceDir, target, paths) {
-  return Promise.all(paths.map(async path => ({
-    path,
-    change: await classifyPathChange(runtime.store, target.before_ref, target.after_ref, path),
-    conflict: !await diskMatchesSnapshot(runtime, workspaceDir, target.after_ref, path),
-  })))
+  return Promise.all(paths.map(async (path) => {
+    const beforeState = await stateAt(runtime.store, target.before_ref, path)
+    return {
+      path,
+      change: await classifyPathChange(runtime.store, target.before_ref, target.after_ref, path),
+      conflict: !await diskMatchesSnapshot(runtime, workspaceDir, target.after_ref, path),
+      tooLarge: beforeState.kind === 'tooLarge',
+    }
+  }))
 }
 
 function summarizeChanges(entries) {
@@ -205,11 +210,19 @@ function summarizeChanges(entries) {
 
 async function formatPlan(runtime, target, entries, options) {
   const conflicts = entries.filter(entry => entry.conflict)
+  const oversized = entries.filter(entry => entry.tooLarge)
   const lines = []
   lines.push(`${options.preview ? 'Undo preview' : options.dryRun ? 'Undo plan' : 'Undo preflight'}: turn ${target.turn_id}; ${entries.length} file(s) (${summarizeChanges(entries)}); ${conflicts.length} conflict(s).`)
   for (const entry of entries) {
     const flag = entry.conflict ? ' [conflict]' : ''
-    lines.push(`  ${entry.change.padEnd(8)} ${entry.path}${flag}`)
+    const sizeFlag = entry.tooLarge ? ' [too large]' : ''
+    lines.push(`  ${entry.change.padEnd(8)} ${entry.path}${flag}${sizeFlag}`)
+  }
+  if (oversized.length > 0) {
+    lines.push('')
+    lines.push(`Oversized files (over the ${MAX_FILE_BYTES / (1024 * 1024)} MB restore limit) cannot be restored by this undo; they will be reported as not restored:`)
+    for (const entry of oversized)
+      lines.push(`  ${entry.path}`)
   }
   if (options.preview || options.withDiffs) {
     lines.push('')
@@ -474,9 +487,20 @@ async function executeUndoRestore(runtime, params) {
 
   try {
     const targets = skipConflicts ? entries.filter(entry => !entry.conflict) : entries
-    for (const entry of targets)
-      await restorePath(runtime.store, target.before_ref, entry.path)
-    const restoredPaths = targets.map(entry => entry.path)
+    const restoredPaths = []
+    const failedPaths = []
+    for (const entry of targets) {
+      try {
+        await restorePath(runtime.store, target.before_ref, entry.path)
+        restoredPaths.push(entry.path)
+      }
+      catch (error) {
+        // One unrestorable file (oversized blob, unsupported target) must not
+        // abort the whole undo: the other files still restore, and the failure
+        // is reported per path instead of triggering a full rollback.
+        failedPaths.push({ path: entry.path, error: String(error.message ?? error) })
+      }
+    }
     const skippedPaths = skipConflicts
       ? entries.filter(entry => entry.conflict).map(entry => entry.path)
       : []
@@ -493,6 +517,8 @@ async function executeUndoRestore(runtime, params) {
     let text = `Undid turn ${target.turn_id} and restored ${restoredPaths.length} file(s). The next model request will receive a rewind notice.`
     if (skippedPaths.length > 0)
       text += ` Skipped ${skippedPaths.length} conflicted file(s): ${skippedPaths.join(', ')}.`
+    if (failedPaths.length > 0)
+      text += ` Not restored (${failedPaths.length} file(s)): ${failedPaths.map(failure => `${failure.path} (${failure.error.includes('TURNREWIND_FILE_TOO_LARGE') ? 'over the size limit' : failure.error})`).join('; ')}.`
     return text
   }
   catch (error) {

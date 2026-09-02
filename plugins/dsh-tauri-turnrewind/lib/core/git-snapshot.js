@@ -354,7 +354,7 @@ export async function classifyPathChange(store, beforeCommit, afterCommit, path)
   const after = await stateAt(store, afterCommit, path)
   if (before.kind === 'absent' && after.kind === 'file')
     return 'created'
-  if (before.kind === 'file' && after.kind === 'absent')
+  if ((before.kind === 'file' || before.kind === 'tooLarge') && after.kind === 'absent')
     return 'deleted'
   return 'modified'
 }
@@ -422,6 +422,24 @@ async function commitEntry(store, commit, path) {
   return output.toString('utf8').split('\0').includes(path)
 }
 
+/**
+ * Blob size of one committed path, or undefined when absent or unknown.
+ * Reading only the size never materializes the blob, so an oversized entry can
+ * be surfaced without blowing the output limit.
+ */
+async function commitEntrySize(store, commit, path) {
+  const output = await runGit(store.repoDir, store.workspaceDir, ['ls-tree', '-r', '-l', '-z', commit, '--', path])
+  for (const line of output.toString('utf8').split('\0')) {
+    // mode SP type SP oid TAB size SP path (size is '-' for submodules).
+    const tab = line.lastIndexOf('\t')
+    if (tab !== -1 && line.slice(tab + 1) === path) {
+      const size = Number(line.slice(0, tab).split(' ').at(-1))
+      return Number.isFinite(size) ? size : undefined
+    }
+  }
+  return undefined
+}
+
 async function commitBytes(store, commit, path) {
   const output = await runGit(store.repoDir, store.workspaceDir, ['show', `${commit}:${path}`], {}, MAX_FILE_BYTES + 1)
   if (output.length > MAX_FILE_BYTES)
@@ -446,6 +464,10 @@ export async function stateAt(store, commit, path) {
   // never the filesystem, so a symlinked or odd path simply reads as absent.
   if (!await commitEntry(store, commit, path))
     return { kind: 'absent', digest: null }
+  // Oversized blobs are reported instead of thrown: the caller can mark the
+  // entry and continue, so one huge file never aborts a whole undo preview.
+  if (await commitEntrySize(store, commit, path) > MAX_FILE_BYTES)
+    return { kind: 'tooLarge', digest: null }
   const bytes = await commitBytes(store, commit, path)
   return { kind: 'file', digest: digest(bytes) }
 }
@@ -472,6 +494,11 @@ export async function restorePath(store, commit, path) {
     return { path, result: 'removed' }
   }
 
+  // Restoring an oversized blob would require materializing it through the
+  // same output-limited channel. Fail this one path with a stable code so the
+  // undo loop can report it as not restored instead of dying mid-plan.
+  if (await commitEntrySize(store, commit, path) > MAX_FILE_BYTES)
+    throw new Error(`TURNREWIND_FILE_TOO_LARGE: ${path} (${MAX_FILE_BYTES}-byte limit) cannot be restored; add it to .gitignore or restore it manually`)
   const bytes = await commitBytes(store, commit, path)
   mkdirSync(dirname(target), { recursive: true })
   const temp = `${target}.turnrewind-${randomUUID()}.tmp`

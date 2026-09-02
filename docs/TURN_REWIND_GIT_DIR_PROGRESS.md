@@ -69,6 +69,7 @@ DSH_HOME
 - `maintenance.test.js` 新增 purge 安全测试：purge 只删除该 workspace 的 snapshot repo 与账本行，用户 `.git` 目录、HEAD、porcelain status、工作区文件以及其他 workspace 的 snapshot repo 和账本行全部完好；
 - `test/git-test-utils.js` 为每个测试仓库显式设置 `core.autocrlf=false`：Git for Windows 系统级默认 `core.autocrlf=true` 会让 worktree checkout/add 发生行尾转换，导致 fixture 依赖机器配置（本机已实测踩到）；
 - 新增 `test/git-gc.test.js`：alternates 失效自愈——构造“文件已删除 + blob 从源仓库借用（`hash-object -w` 不可达对象）+ 源 `gc --prune=now`”的真实断裂场景，验证读取路径断（`stateAt` reject）、下一次 capture 检测到父链缺对象并自愈为自包含基线（alternates 消失、对象物理落本地、后续 capture 独立可读）；
+- 大文件（>64 MB）行为（2026-09-02 补）：超限 blob 仍会捕获进快照；stateAt 以 kind tooLarge 报告（不再抛异常炸整个预览），预览卡标注 [too large]，执行时 restorePath 对该单文件抛 TURNREWIND_FILE_TOO_LARGE、undo 循环将其计入「未恢复」清单，其余文件照常恢复、turn 照常记为 undone；大项目实测：6000 文件/94MB 已提交仓库首拍 1.6s、稳态 3.5s、快照 repo 82KB（alternates 借用），大量未 ignore 的未跟踪文件首拍可达分钟级——ignore 卫生决定体验；
 - 真机 DSH Host 验证已完成（dev 环境：`DSH_HOME=~/.dsh.dev-gitdir`，profile 以 `link:` 挂载本分支插件源码）：
   - 一次 turn 内新建/修改/删除文件 → `snapshots/<hash>.git` 生成、`ledger.sqlite` 有 turns 行；
   - 两阶段 `/undo`（预览红绿 diff → 卡内 ✓）→ 三个文件全部恢复至 turn 前状态；
