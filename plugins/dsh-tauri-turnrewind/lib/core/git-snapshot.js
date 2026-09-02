@@ -23,6 +23,13 @@ const SNAPSHOT_PATHSPECS = [
 const SNAPSHOT_REF_PREFIX = 'refs/turnrewind/'
 
 /**
+ * Hard wall-clock budget per git subprocess. A wedged git (hung remote fs,
+ * antivirus stall) would otherwise leave the async path pending forever and
+ * the sync paths frozen; 5 minutes is far above any legitimate capture.
+ */
+const GIT_SUBPROCESS_TIMEOUT_MS = 5 * 60 * 1000
+
+/**
  * Run one git command without blocking the host event loop. All snapshot I/O
  * used to be synchronous, which froze the whole host — every session, the web
  * UI and the health check — for the duration of `git add` on big workspaces.
@@ -37,14 +44,17 @@ function runGit(repoDir, workspaceDir, args, extraEnv = {}, maxBytes = MAX_OUTPU
     const errors = []
     let total = 0
     let settled = false
-
+    let timeout
     const fail = (error) => {
       if (settled)
         return
       settled = true
-      child.kill()
+      clearTimeout(timeout)
+      child.kill('SIGKILL')
       rejectPromise(error)
     }
+    // SIGKILL so a git stuck in uninterruptible I/O cannot outlive the budget.
+    timeout = setTimeout(() => fail(new Error(`TURNREWIND_GIT_TIMEOUT: git ${args.join(' ')} exceeded ${GIT_SUBPROCESS_TIMEOUT_MS / 1000}s`)), GIT_SUBPROCESS_TIMEOUT_MS)
     child.stdout.on('data', (chunk) => {
       if (settled)
         return
@@ -64,8 +74,11 @@ function runGit(repoDir, workspaceDir, args, extraEnv = {}, maxBytes = MAX_OUTPU
       if (settled)
         return
       settled = true
+      clearTimeout(timeout)
       const stdout = Buffer.concat(chunks)
-      if (code !== 0) {
+      // code null = killed by the timeout's SIGKILL; the timeout already
+      // rejected the promise, this only guards the normal exit path.
+      if (code !== null && code !== 0) {
         const detail = Buffer.concat(errors).toString('utf8').trim() || stdout.toString('utf8').trim() || `exit ${code}`
         rejectPromise(new Error(`TURNREWIND_GIT_FAILED: ${detail}`))
         return
@@ -81,15 +94,38 @@ async function runGitText(repoDir, workspaceDir, args, extraEnv = {}) {
 }
 
 let gitProbeResult
+let gitProbeFailedAt = 0
 
-/** Resolve once per host process: whether a git executable is usable at all. */
+/** Re-probe a failed availability check after this long (git may be installed while the host runs). */
+const GIT_PROBE_RETRY_MS = 5 * 60 * 1000
+
+/**
+ * Whether a usable git executable is on PATH. Successful probes are cached for
+ * the host process; failed probes expire after GIT_PROBE_RETRY_MS so a git
+ * installed (or PATH fixed) mid-session is picked up without a host restart.
+ */
 export function gitAvailable() {
+  const failedRecently = gitProbeResult !== undefined && gitProbeFailedAt > 0 && Date.now() - gitProbeFailedAt > GIT_PROBE_RETRY_MS
+  if (failedRecently) {
+    gitProbeResult = undefined
+    gitProbeFailedAt = 0
+  }
   gitProbeResult ??= new Promise((resolvePromise) => {
     const child = spawn('git', ['--version'])
     let settled = false
+    const markFailure = () => {
+      gitProbeFailedAt = Date.now()
+    }
     const settle = value => (settled ? undefined : (settled = true, resolvePromise(value)))
-    child.on('error', () => settle(false))
-    child.on('close', code => settle(code === 0))
+    child.on('error', () => {
+      markFailure()
+      settle(false)
+    })
+    child.on('close', (code) => {
+      if (code !== 0)
+        markFailure()
+      settle(code === 0)
+    })
   })
   return gitProbeResult
 }
@@ -104,9 +140,25 @@ async function ensureRepository(store) {
     await new Promise((resolvePromise, rejectPromise) => {
       const child = spawn('git', ['init', '--bare', repoDir])
       const errors = []
+      let settled = false
+      const timeout = setTimeout(() => {
+        settled = true
+        child.kill('SIGKILL')
+        rejectPromise(new Error(`TURNREWIND_GIT_TIMEOUT: git init exceeded ${GIT_SUBPROCESS_TIMEOUT_MS / 1000}s`))
+      }, GIT_SUBPROCESS_TIMEOUT_MS)
       child.stderr.on('data', chunk => errors.push(chunk))
-      child.on('error', error => rejectPromise(new Error(`TURNREWIND_GIT_INIT: ${error.message}`)))
+      child.on('error', (error) => {
+        if (settled)
+          return
+        settled = true
+        clearTimeout(timeout)
+        rejectPromise(new Error(`TURNREWIND_GIT_INIT: ${error.message}`))
+      })
       child.on('close', (code) => {
+        if (settled)
+          return
+        settled = true
+        clearTimeout(timeout)
         if (code !== 0) {
           rejectPromise(new Error(`TURNREWIND_GIT_INIT: ${Buffer.concat(errors).toString('utf8').trim() || 'git init failed'}`))
           return
@@ -332,12 +384,27 @@ function runGitStdin(repoDir, workspaceDir, args, input) {
     })
     const chunks = []
     const errors = []
+    let settled = false
+    let timeout
+    const fail = (error) => {
+      if (settled)
+        return
+      settled = true
+      clearTimeout(timeout)
+      child.kill('SIGKILL')
+      rejectPromise(error)
+    }
+    timeout = setTimeout(() => fail(new Error(`TURNREWIND_GIT_TIMEOUT: git ${args.join(' ')} exceeded ${GIT_SUBPROCESS_TIMEOUT_MS / 1000}s`)), GIT_SUBPROCESS_TIMEOUT_MS)
     child.stdout.on('data', chunk => chunks.push(chunk))
     child.stderr.on('data', chunk => errors.push(chunk))
-    child.on('error', error => rejectPromise(new Error(`TURNREWIND_GIT_EXEC: ${error.message}`)))
+    child.on('error', error => fail(new Error(`TURNREWIND_GIT_EXEC: ${error.message}`)))
     child.on('close', (code) => {
-      if (code !== 0) {
-        rejectPromise(new Error(`TURNREWIND_GIT_FAILED: ${Buffer.concat(errors).toString('utf8').trim() || `exit ${code}`}`))
+      if (settled)
+        return
+      settled = true
+      clearTimeout(timeout)
+      if (code !== null && code !== 0) {
+        fail(new Error(`TURNREWIND_GIT_FAILED: ${Buffer.concat(errors).toString('utf8').trim() || `exit ${code}`}`))
         return
       }
       resolvePromise(Buffer.concat(chunks))

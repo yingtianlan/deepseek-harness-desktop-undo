@@ -6,7 +6,7 @@ import process from 'node:process'
 import { createDialogProjection } from './core/dialog-projection.js'
 import { captureSnapshot, classifyPathChange, createSnapshotStore, currentState, diffAgainstDisk, gitAvailable, gitRef, MAX_FILE_BYTES, probeWorkspace, restorePath, snapshotDiff, snapshotFileDiff, stateAt, workspaceKey } from './core/git-snapshot.js'
 import { isSystemSensitiveWorkspace } from './core/guard.js'
-import { claimPendingPlan, claimRewindNotices, completeRedoWithNotice, completeUndoWithNotice, createOperation, createPendingPlan, failTurn, getLatestAppliedUndo, getLatestSnapshotRef, getLatestTurnSummary, getPendingPlanRow, getPendingPlanStatus, getTurn, insertTurn, listNeedsRecoveryWorkspaces, listReversibleTurns, markPendingPlanApplied, markPendingPlanCancelled, markTurnSnapshotMissing, openLedger, recordSkippedTurn, registerWorkspace, releasePendingPlanClaim, settleInterruptedTurn, settleNoopTurn, settleOperation, settleTurn, skipTurn } from './core/ledger.js'
+import { claimPendingPlan, claimRewindNotices, completeRedoWithNotice, completeUndoWithNotice, createOperation, createPendingPlan, failTurn, getLatestAppliedUndo, getLatestSnapshotRef, getLatestTurnSummary, getPendingPlanRow, getPendingPlanStatus, getTurn, insertTurn, listNeedsRecoveryWorkspaces, listReversibleTurns, markPendingPlanApplied, markPendingPlanCancelled, markTurnSnapshotMissing, openLedger, pruneConsumedNotices, recordSkippedTurn, registerWorkspace, releasePendingPlanClaim, settleInterruptedTurn, settleNoopTurn, settleOperation, settleTurn, skipTurn } from './core/ledger.js'
 import { classifyUndo } from './core/planner.js'
 
 const name = 'dsh-tauri-turnrewind'
@@ -725,6 +725,10 @@ function apply(ctx) {
   const dataRoot = rootDir()
   const ledger = openLedger(dataRoot)
   const recoveryWorkspaces = new Set(listNeedsRecoveryWorkspaces(ledger))
+  // One-shot at startup: consumed notices older than a week have no readers
+  // left (their dedup window is long gone) and would otherwise accumulate
+  // without bound on long-lived installs.
+  pruneConsumedNotices(ledger)
   const active = new Map()
   const untrackedTurns = new Set()
   const workspaceStores = new Map()

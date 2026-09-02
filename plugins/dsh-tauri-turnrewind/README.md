@@ -12,7 +12,7 @@
 
 - 为已领取的 Agent turn 建立私有 Git 快照；
 - 将快照映射记录到 `$DSH_HOME/ledger.sqlite`；
-- **git 全程异步执行**：快照、diff、恢复都不阻塞 Host 事件循环；同一会话的捕获/结算按 FIFO 串行；收到 turn 输入后，before snapshot 通过 `agent/pre-step` barrier 完成后才允许模型和工具执行；同一 workspace 被其他 session 占用时，新 turn 会正常运行但记为 `skipped`，避免共享 snapshot 链互相污染；
+- **git 子进程模型**：快照、diff、恢复走异步 spawn，不阻塞 Host 事件循环；同一会话的捕获/结算按 FIFO 串行；收到 turn 输入后，before snapshot 通过 `agent/pre-step` barrier 完成后才允许模型和工具执行；同一 workspace 被其他 session 占用时，新 turn 会正常运行但记为 `skipped`，避免共享 snapshot 链互相污染。**仍有两处同步路径**：工作区解析（git-workspace.js 的 rev-parse spawnSync，每次 turn 领取触发数次，单次 <100ms）与冲突检测的磁盘读取（currentState 同步读单个文件，上限 64MB）——超重工作区上可能短暂卡顿，异步化在待办中；
 - **git 可用性探测**：系统没有 git 时，turn 显式记为 `skipped`（原因 `TURNREWIND_GIT_UNAVAILABLE`），而不是静默失败；
 - **快照链自愈**：私有快照仓库被删/损坏后，下一次捕获自动降级重建基线（日志有一条 warning），后续 turn 照常可撤销；被清空前留下来的旧 turn 会在 `/undo` 选目标时自动识别为死快照并标记跳过（`snapshot ref missing`），不会甩出 git 原始报错；
 - **alternates 失效自愈**：私有 repo 通过 alternates 借用源仓库对象，而源仓库 `git gc --prune=now`（amend/rebase 的日常残留）可能删掉被借用且不可达的对象；每次 capture 后做连通性检查（`git rev-list --objects --missing=print`），发现缺对象即降级为自包含存储（不再借用、不再复制源 index）并重建基线，旧 turn 走死快照跳过路径；

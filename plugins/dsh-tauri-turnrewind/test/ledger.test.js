@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { it } from 'vitest'
-import { claimPendingPlan, claimRewindNotices, completeRedoWithNotice, completeUndoWithNotice, createOperation, createPendingPlan, getLatestAppliedUndo, getLatestSnapshotRef, getLatestTurn, getPendingPlanStatus, getTurn, insertTurn, listNeedsRecoveryWorkspaces, listReversibleTurns, markPendingPlanApplied, markPendingPlanCancelled, markTurnSnapshotMissing, openLedger, queueRewindNotice, recordSkippedTurn, releasePendingPlanClaim, settleInterruptedTurn, settleNoopTurn, settleOperation, settleTurn } from '../lib/core/ledger.js'
+import { claimPendingPlan, claimRewindNotices, completeRedoWithNotice, completeUndoWithNotice, createOperation, createPendingPlan, getLatestAppliedUndo, getLatestSnapshotRef, getLatestTurn, getPendingPlanStatus, getTurn, insertTurn, listNeedsRecoveryWorkspaces, listReversibleTurns, markPendingPlanApplied, markPendingPlanCancelled, markTurnSnapshotMissing, openLedger, pruneConsumedNotices, queueRewindNotice, recordSkippedTurn, releasePendingPlanClaim, settleInterruptedTurn, settleNoopTurn, settleOperation, settleTurn } from '../lib/core/ledger.js'
 
 it('persists turn lifecycle and resumes from the latest durable snapshot', async () => {
   const root = await mkdtemp(join(tmpdir(), 'turnrewind-ledger-test-'))
@@ -424,5 +424,33 @@ it('marks an interrupted active turn abandoned on reopen', async () => {
   finally {
     reopened.close()
     await rm(root, { recursive: true, force: true })
+  }
+})
+
+it('prunes only long-consumed notices and keeps the dedup rows', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'turnrewind-notice-prune-'))
+  try {
+    const db = openLedger(root)
+    db.exec('BEGIN')
+    // Old consumed row (past the cutoff) and a fresh consumed row.
+    db.prepare(`INSERT INTO rewind_notices(notice_id, session_id, workspace_key, target_turn_id, turns_json, paths_json, kind, status, created_at, claimed_at)
+      VALUES ('old', 's1', 'ws1', 't1', '[]', '[]', 'undo', 'consumed', ?, ?)`).run('2020-01-01T00:00:00.000Z', '2020-01-01T00:00:01.000Z')
+    db.prepare(`INSERT INTO rewind_notices(notice_id, session_id, workspace_key, target_turn_id, turns_json, paths_json, kind, status, created_at, claimed_at)
+      VALUES ('fresh', 's2', 'ws1', 't2', '[]', '[]', 'undo', 'consumed', ?, ?)`).run(new Date().toISOString(), new Date().toISOString())
+    // A pending row must survive regardless of age.
+    db.prepare(`INSERT INTO rewind_notices(notice_id, session_id, workspace_key, target_turn_id, turns_json, paths_json, kind, status, created_at)
+      VALUES ('pending', 's3', 'ws1', 't3', '[]', '[]', 'unsupported', 'pending', '2020-01-01T00:00:00.000Z')`).run()
+    db.exec('COMMIT')
+
+    db.exec('PRAGMA wal_checkpoint(TRUNCATE)')
+    const removed = pruneConsumedNotices(db)
+    assert.equal(removed, 1)
+    const survivors = db.prepare('SELECT notice_id FROM rewind_notices ORDER BY notice_id').all().map(row => row.notice_id)
+    assert.deepEqual(survivors, ['fresh', 'pending'])
+    db.exec('PRAGMA wal_checkpoint(TRUNCATE)')
+    db.close()
+  }
+  finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 })
   }
 })

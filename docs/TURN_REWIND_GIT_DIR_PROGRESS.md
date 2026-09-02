@@ -98,6 +98,13 @@ Failed:     0
 - P2 测试超时统一为 120s（package.json 与 vitest.config.js，Windows 实测有用例超 30s）；
 - P0 redo 无 operation/回滚/needs-recovery：**按决策暂缓**（功能冻结，README 标注「已知缺陷：redo」与启用条件）。
 
+### P3 清理（2026-09-02 第二批）
+
+- git 子进程超时：runGit / runGitStdin / git init 异步 spawn 增加 5 分钟墙钟预算（SIGKILL + TURNREWIND_GIT_TIMEOUT），git-workspace 的 spawnSync 增加 timeout+killSignal——卡死的 git 不再永久 pending / 冻结 Host；
+- gitAvailable() 失败缓存改为 5 分钟 TTL：进程运行期间装好 git（或修好 PATH）后无需重启 Host 即恢复；
+- rewind_notices 膨胀：新增 pruneConsumedNotices（consumed 且 claimed_at > 7 天删除，保留 pending 与近期行以维持 unsupported 弹窗去重语义），插件启动时执行一次；
+- 「git 全程异步」措辞修正为「git 子进程模型」，如实标注两处同步路径（工作区解析 spawnSync、冲突检测同步读盘）与异步化待办。
+
 ### 可选优化
 
 1. 连通性检查的性能优化：当前每次 capture 走全链 `rev-list`（O(链上对象总数)）。优化方向：常态走 `--not <parent>` 的增量检查 + 源对象库 mtime 变化时触发全链检查。大仓库上需先实测 capture 耗时；

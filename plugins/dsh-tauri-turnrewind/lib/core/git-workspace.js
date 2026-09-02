@@ -4,6 +4,9 @@ import { resolve } from 'node:path'
 import process from 'node:process'
 
 const MAX_OUTPUT_BYTES = 1024 * 1024
+// spawnSync blocks the event loop; a hard timeout keeps a wedged git from
+// freezing the host forever (same wall clock as the async spawn budget).
+const SYNC_GIT_TIMEOUT_MS = 5 * 60 * 1000
 
 function runGitSync(workspaceDir, args) {
   const result = spawnSync('git', ['-c', 'core.quotepath=false', ...args], {
@@ -11,6 +14,8 @@ function runGitSync(workspaceDir, args) {
     env: { ...process.env },
     encoding: 'utf8',
     maxBuffer: MAX_OUTPUT_BYTES,
+    timeout: SYNC_GIT_TIMEOUT_MS,
+    killSignal: 'SIGKILL',
   })
   if (result.error)
     return { ok: false, error: result.error }

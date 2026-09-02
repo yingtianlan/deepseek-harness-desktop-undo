@@ -499,3 +499,14 @@ export function completeRedoWithNotice(db, operationId, turnId, notice) {
     throw error
   }
 }
+
+/**
+ * Delete long-consumed notice rows. Consumed rows keep two jobs — the
+ * unsupported-heads-up dedup (one dialog per session+workspace) and audit —
+ * so they are pruned by age instead of on claim: 7 days is far beyond any
+ * session's lifetime while keeping the ledger from growing without bound.
+ */
+export function pruneConsumedNotices(db, maxAgeMs = 7 * 24 * 60 * 60 * 1000) {
+  const cutoff = new Date(Date.now() - maxAgeMs).toISOString()
+  return db.prepare(`DELETE FROM rewind_notices WHERE status = 'consumed' AND claimed_at < ?`).run(cutoff).changes
+}
