@@ -46,5 +46,9 @@ export async function initGitWorkspace(workspace) {
   await runGit(workspace, ['init', '--quiet'])
   await runGit(workspace, ['config', 'user.name', 'Turn Rewind Test'])
   await runGit(workspace, ['config', 'user.email', 'turnrewind-test@localhost'])
+  // Pin line-ending behavior so fixtures are deterministic on machines whose
+  // Git for Windows system config sets core.autocrlf=true: checkout and add
+  // then write and hash the exact bytes the test wrote.
+  await runGit(workspace, ['config', 'core.autocrlf', 'false'])
   return workspace
 }

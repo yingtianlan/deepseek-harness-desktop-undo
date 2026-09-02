@@ -63,11 +63,15 @@ DSH_HOME
   - capture 前后 `HEAD`、当前 branch、`symbolic-ref`、`git status --porcelain`、`ls-files -s`（index 内容）、`git diff --cached`、`for-each-ref`、`git log --all`、`git stash list` 全部逐字节不变；
   - restore 只改工作区文件，index/HEAD/refs/stash 不变，且快照捕获的是文件系统内容而非 index；
   - 私有 snapshot repo 的 refs 仅含 `refs/turnrewind/`，用户 refs 命名空间无泄漏，工作区无 `.turnrewind-*` 临时文件残留；
+- 新增 `test/git-ignore.test.js`：ignore/attributes 语义——嵌套 `.gitignore` 与 `!` 取反、`.git/info/exclude`（含源规则变更后逐次 capture 的重同步）、global excludes（`GIT_CONFIG_GLOBAL` + `core.excludesFile`）、`.gitattributes`（`text=auto` 入库 LF 归一化、`-text` 字节精确，blob 经 `cat-file` 直接断言）；
+- 新增 `test/git-worktree.test.js`：linked worktree 隔离——同一仓库两个 worktree 得到两个独立 snapshot repo 与 refs（互不泄漏、共享同一 common objects alternates）、源仓库 HEAD/branch/status/refs 逐字节不变、worktree 子目录 cwd 归并到该 worktree 的 store；以及打包对象（`git gc --prune=now`）经 alternates 的 capture/restore 读写路径；
+- `maintenance.test.js` 新增 purge 安全测试：purge 只删除该 workspace 的 snapshot repo 与账本行，用户 `.git` 目录、HEAD、porcelain status、工作区文件以及其他 workspace 的 snapshot repo 和账本行全部完好；
+- `test/git-test-utils.js` 为每个测试仓库显式设置 `core.autocrlf=false`：Git for Windows 系统级默认 `core.autocrlf=true` 会让 worktree checkout/add 发生行尾转换，导致 fixture 依赖机器配置（本机已实测踩到）；
 - 当前已执行的全量插件回归：
 
 ```text
-Test Files: 11 passed
-Tests:      61 passed
+Test Files: 13 passed
+Tests:      68 passed
 Failed:     0
 ```
 
@@ -77,12 +81,9 @@ Failed:     0
 
 ### 必须完成
 
-1. 增加 `.gitignore`、`.git/info/exclude`、global ignore 和 `.gitattributes` 语义测试；
-2. 解决 source object alternates、source index 初始化和 snapshot 私有对象之间的兼容性问题；
-3. 给同一个 Git common-dir 下的 linked worktree 增加 snapshot 隔离测试；
-4. 更新 `maintenance.js`、`purge-workspace.js`、ledger workspace metadata 和 purge 测试，保证只清理 turnrewind 的 snapshot repo，不误删用户 `.git`；
-5. 更新插件 README、`docs/TURN_REWIND.md` 和生产审计报告，明确本模式是实验分支、Git-only workspace 和仍未解决的风险（README 中的预算守卫/`TURNREWIND_MAX_*` 章节已过时）；
-6. 运行完整插件回归、lint、Node import smoke，以及必要的真实 DSH Host 验证。
+1. alternates 剩余风险：源仓库 `git gc`/`git prune` 可能删除仅被 snapshot 链引用（经 alternates 复用、源侧已不可达）的对象；需要失效检测或回退独立对象存储。常规路径（打包对象读写、source index 初始化、dirty 仓库）已有测试钉住；
+2. 更新插件 README、`docs/TURN_REWIND.md` 和生产审计报告，明确本模式是实验分支、Git-only workspace 和仍未解决的风险（README 中的预算守卫/`TURNREWIND_MAX_*` 章节已过时）；
+3. 完整插件回归、lint、Node import smoke 已全部通过（见上节），剩余必要的真实 DSH Host 真机验证。
 
 ### 仍需保留的安全边界
 
