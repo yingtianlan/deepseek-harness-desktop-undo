@@ -92,3 +92,41 @@ it('parseUndoOutput still extracts the pending plan id', () => {
   assert.equal(parsed.summary, 'Undo preflight: turn s:1; 1 file(s); 0 conflicts.')
   assert.equal(parsed.files.length, 1)
 })
+
+it('parseUndoOutput keeps paths with spaces and plan flags out of the conflict fallback', () => {
+  const bundle = loadBundle()
+  const parsed = bundle.parseUndoOutput([
+    'Undo preflight: turn s:1; 3 file(s) (modified 2, created 1, deleted 0); 1 conflict(s).',
+    '  modified my notes.txt',
+    '  created reports/q3 summary.md',
+    '  modified assets/logo.png  [conflict]',
+    '  modified assets/hero.png  [too large]',
+    '',
+    'Oversized files (over the 64 MB restore limit) cannot be restored by this undo; they will be reported as not restored:',
+    '  assets/hero.png',
+    '',
+    'Undo will apply (turn output → restored state):',
+    '--- my notes.txt',
+    '  -new',
+    '  +old',
+    'plan 0f1e2d3c',
+    'Send /undo --confirm 0f1e2d3c to apply, or /undo --cancel 0f1e2d3c to dismiss.',
+  ].join('\n'))
+
+  assert.equal(parsed.files.length, 4)
+  assert.deepEqual(
+    parsed.files.map(file => [file.path, file.change, file.conflict]),
+    [
+      ['my notes.txt', 'modified', false],
+      ['reports/q3 summary.md', 'created', false],
+      ['assets/logo.png', 'modified', true],
+      ['assets/hero.png', 'modified', false],
+    ],
+  )
+  // The diff section attaches to the spaced path instead of creating a
+  // duplicate "conflict" entry for it.
+  const spaced = parsed.files.find(file => file.path === 'my notes.txt')
+  assert.equal(spaced.diff.length, 2)
+  assert.equal(spaced.additions, 1)
+  assert.equal(spaced.deletions, 1)
+})

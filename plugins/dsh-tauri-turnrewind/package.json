@@ -28,7 +28,7 @@
     "node": ">=22.15.0"
   },
   "scripts": {
-    "test": "vitest run test --testTimeout=30000"
+    "test": "vitest run test --testTimeout=120000"
   },
   "devDependencies": {
     "vitest": "^4.1.11"

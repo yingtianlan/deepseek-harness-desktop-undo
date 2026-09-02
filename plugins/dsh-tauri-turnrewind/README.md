@@ -25,7 +25,7 @@
 - 注册人类命令 `/undo`；
 - `/undo` 默认处理当前会话最新的单个可恢复 turn，也可指定完整 turn ID；
 - 同一 workspace 的活动 turn 或 undo 操作互斥；
-- 插件重启时将未完成 turn 标记为 abandoned；未完成的 Undo/Redo operation 会标记为 `needs-recovery`，对应 workspace 在清理前拒绝新的 rewind 操作，避免未知磁盘状态被继续覆盖；当前只能先人工检查 workspace，再停止 Host 并使用 `purge-workspace.js` 清理该 workspace 的 turnrewind 数据后恢复使用；
+- 插件重启时将未完成 turn 标记为 abandoned；未完成的 **Undo** operation 会标记为 `needs-recovery`，对应 workspace 在清理前拒绝新的 rewind 操作，避免未知磁盘状态被继续覆盖；**redo 路径尚未接入该机制**（已知缺陷，功能冻结中，见「已知缺陷：redo」）；当前只能先人工检查 workspace，再停止 Host 并使用 `purge-workspace.js` 清理该 workspace 的 turnrewind 数据后恢复使用；
 - 每次 Undo/Redo 的回退提示独立持久化；下一次模型 step 一次性注入全部 pending notice；
 - 不修改用户项目的 HEAD、分支、index、stash 或提交历史。
 
@@ -295,42 +295,30 @@ stash
 commit history
 ```
 
-## 默认排除项
+## 快照范围与敏感文件（Git 目录模式）
 
-为降低敏感信息和无关产物进入私有 snapshot 的风险，默认排除：
+> ⚠️ **插件不提供敏感文件保护。** 旧版本的自定义排除清单（`.env`、`*.pem`、`credentials.*`、`*token*` 等）已随 Git 目录模式**全部移除**。当前快照范围完全委托给源仓库的 ignore 规则：**未写进 `.gitignore` / `.git/info/exclude` / global excludes 的文件——包括 `.env`、密钥、证书——都会被捕获进私有快照**，并可被 `/undo` 恢复。
+
+插件自身只额外排除（不属于项目内容的部分）：
 
 ```text
-.git/
-node_modules/
-dist/
-build/
-coverage/
-.turnrewind/
-.env
-.env.*
-*.pem
-*.key
-id_rsa*
-credentials.json   # 任意深度
-credentials.yaml
-credentials.yml
-credentials.toml
-credentials.ini
-credentials.cfg
-secrets.json       # 任意深度
-secrets.yaml
-secrets.yml
-secrets.toml
-secrets.ini
-secrets.cfg
+.git/                # Git 元数据
+.turnrewind/         # 插件临时目录
+**/*.turnrewind-*.tmp # 恢复过程中的临时文件
 ```
 
-注意两点边界：
+`node_modules/`、`dist/`、`build/` 等不再由插件排除——由你仓库自己的 `.gitignore` 决定（普通项目都会忽略它们，快照语义因此与源仓库一致）。
 
-- 工作区自己的 `.gitignore` 和用户全局 gitignore 同样生效（`git add` 语义），被忽略的文件不会进入快照，也不会被 undo 恢复；
+两点边界：
+
+- 被源仓库 ignore 的文件不会进入快照，也不会被 undo 恢复；ignore 规则每次 capture 重新读取（`.git/info/exclude` 还会同步进私有 repo）；
 - 曾经使用的 `*token*`、`*secret*` 等子串规则已移除——它们会静默排除 `token.ts`、`tokenizer.py` 这类正当源码，且被排除路径不出现在 dry-run 列表中，导致 undo 静默漏恢复。
 
-这些规则意味着：被排除文件的变化不会进入本 turn 的 Undo 范围。插件仍是实验原型，不应把它当作秘密信息保护工具。
+**如果不希望秘密文件进入快照**：把它们加进源仓库的 ignore 规则（对 git 和本插件同时生效）。也可以在 `/undo --dry-run` 的文件清单里核对实际被追踪的范围。插件仍是实验原型，不应把它当作秘密信息保护工具。
+
+### 已知缺陷：redo（暂缓）
+
+`/undo --redo` 的执行段**尚未**接入 operation 记录与失败回滚：执行中任一文件恢复失败（超大文件、目标路径变为 symlink/目录、rename 失败）会留下「部分 redo」状态，无回滚、无 `needs-recovery` 标记，重启后围栏不会拦截该 workspace。该功能目前按计划冻结、后续启用时与 undo 路径对齐（`createOperation` → 失败回滚 → `needs-recovery`）后再开放；在此之前请勿在含 >64 MB 文件或路径状态复杂的 turn 上使用 redo。
 
 ## Debug 安装
 

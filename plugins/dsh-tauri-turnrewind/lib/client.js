@@ -63,9 +63,23 @@ function createTurnrewindClient(require) {
         result.dividers.push(line)
         continue
       }
-      const listed = /^ {2,}(modified|created|deleted) (\S+)$/.exec(line)
+      // Paths may contain spaces ("my notes.txt"), and the plan also appends
+      // "  [conflict]" / "  [too large]" flags. Match the whole remainder and
+      // split the flags off so such files land in the file list with the right
+      // classification instead of falling through to the diff-separator
+      // branch (which would misclassify them as conflicts).
+      const listed = /^ {2,}(modified|created|deleted) (.*\S)\s*$/.exec(line)
       if (listed && !inDiffs) {
-        result.files.push({ path: listed[2], change: listed[1], additions: 0, deletions: 0, diff: [] })
+        let path = listed[2]
+        let conflict = false
+        if (/\s{2,}\[conflict\]$/.test(path)) {
+          conflict = true
+          path = path.replace(/\s{2,}\[conflict\]$/, '')
+        }
+        if (/\s{2,}\[too large\]$/.test(path)) {
+          path = path.replace(/\s{2,}\[too large\]$/, '')
+        }
+        result.files.push({ path, change: listed[1], additions: 0, deletions: 0, diff: [], conflict })
         continue
       }
       const separator = /^--- (?!a\/)(?!b\/)(.+)$/.exec(line)

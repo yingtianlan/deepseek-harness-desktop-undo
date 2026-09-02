@@ -70,3 +70,33 @@ it('canonicalizes a session cwd below the worktree root to the Git root', async 
     await rm(root, { recursive: true, force: true })
   }
 })
+
+it('reports the missing git executable instead of a misleading not-a-worktree reason', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'turnrewind-guard-nogit-'))
+  try {
+    await writeFile(join(root, 'plain.txt'), 'x')
+    const savedPath = process.env.PATH
+    // An empty PATH makes the synchronous spawn fail with ENOENT, exactly
+    // like a machine without git on PATH.
+    process.env.PATH = ''
+    try {
+      const probe = probeWorkspace(root)
+      assert.equal(probe.ok, false)
+      assert.match(probe.reason, /TURNREWIND_GIT_UNAVAILABLE/)
+      assert.throws(
+        () => createSnapshotStore(join(root, 'data'), root),
+        /TURNREWIND_GIT_UNAVAILABLE/,
+      )
+    }
+    finally {
+      process.env.PATH = savedPath
+    }
+    // With git back on PATH the same directory reports the ordinary reason.
+    const probe = probeWorkspace(root)
+    assert.equal(probe.ok, false)
+    assert.match(probe.reason, /TURNREWIND_GIT_REQUIRED/)
+  }
+  finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})

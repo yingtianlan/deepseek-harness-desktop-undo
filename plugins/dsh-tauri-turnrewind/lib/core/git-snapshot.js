@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import process from 'node:process'
 import { TextDecoder, TextEncoder } from 'node:util'
-import { gitWorkspace } from './git-workspace.js'
+import { gitUnavailableReason, gitWorkspace } from './git-workspace.js'
 
 const MAX_FILE_BYTES = 64 * 1024 * 1024
 const MAX_OUTPUT_BYTES = 64 * 1024 * 1024
@@ -203,7 +203,7 @@ export function workspaceHash(workspaceDir) {
 export function createSnapshotStore(rootDir, workspaceDir) {
   const source = gitWorkspace(workspaceDir)
   if (!source)
-    throw new Error(`TURNREWIND_GIT_REQUIRED: ${resolve(workspaceDir)} is not a Git worktree`)
+    throw new Error(gitUnavailableReason() ?? `TURNREWIND_GIT_REQUIRED: ${resolve(workspaceDir)} is not a Git worktree`)
   const normalizedWorkspace = source.workspaceDir
   const repoDir = join(rootDir, 'snapshots', `${workspaceHash(normalizedWorkspace)}.git`)
   return {
@@ -224,7 +224,7 @@ export function createSnapshotStore(rootDir, workspaceDir) {
 export function probeWorkspace(workspaceDir) {
   const source = gitWorkspace(workspaceDir)
   if (!source)
-    return { ok: false, reason: 'TURNREWIND_GIT_REQUIRED: workspace is not a Git worktree' }
+    return { ok: false, reason: gitUnavailableReason() ?? 'TURNREWIND_GIT_REQUIRED: workspace is not a Git worktree' }
   return { ok: true, workspaceDir: source.workspaceDir, commonDir: source.commonDir }
 }
 

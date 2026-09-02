@@ -23,10 +23,29 @@ function runGitSync(workspaceDir, args) {
  * Resolve the canonical Git worktree and its metadata without changing Git
  * state. The caller can use this to require a project Git boundary and to
  * reuse Git objects/ignore behavior without touching the user's index.
+ *
+ * Returns undefined when the directory is not a Git worktree. A missing git
+ * executable (ENOENT on spawn) is distinguished by the module-level
+ * `gitExecutableMissing` flag: `gitUnavailableReason()` exposes it so callers
+ * report TURNREWIND_GIT_UNAVAILABLE instead of the misleading "not a Git
+ * worktree" message.
  */
+let gitExecutableMissing = false
+
+export function gitUnavailableReason() {
+  return gitExecutableMissing
+    ? 'TURNREWIND_GIT_UNAVAILABLE: the git executable was not found on PATH; file undo is disabled'
+    : undefined
+}
+
 export function gitWorkspace(workspaceDir) {
   const requestedDir = resolve(workspaceDir)
+  gitExecutableMissing = false
   const inside = runGitSync(requestedDir, ['rev-parse', '--is-inside-work-tree'])
+  if (inside.error?.code === 'ENOENT') {
+    gitExecutableMissing = true
+    return undefined
+  }
   const top = runGitSync(requestedDir, ['rev-parse', '--show-toplevel'])
   const gitDir = runGitSync(requestedDir, ['rev-parse', '--git-dir'])
   const commonDir = runGitSync(requestedDir, ['rev-parse', '--git-common-dir'])

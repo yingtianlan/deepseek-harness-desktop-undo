@@ -90,6 +90,14 @@ Failed:     0
 
 本分支功能与真机验证已完成，可作为实验分支评审；合并前仍需上游评估取舍（Git-only workspace、ignore 委托、预算守卫移除）。
 
+### 已按外部审查修复（2026-09-02）
+
+- P1 README 矛盾：删除旧「默认排除项」清单，改为「快照范围与敏感文件」——明确插件不提供敏感文件保护、未 ignore 的 .env/密钥会被快照，与 Git 目录模式实现一致；
+- P1 TURNREWIND_GIT_UNAVAILABLE 死代码：gitWorkspace 区分 spawn ENOENT（git 不在 PATH）与非 worktree，probeWorkspace/createSnapshotStore 报告真实原因（guard.test.js 新增空 PATH 用例）；原先正常 worktree 但没装 git 的用户会看到误导性的 not a Git worktree；
+- P2 客户端空格路径：parseUndoOutput 的 (S+) 改为整行匹配并剥离 [conflict]/[too large] 标记，含空格路径正确进入文件清单（client-view.test.js 新增用例）；
+- P2 测试超时统一为 120s（package.json 与 vitest.config.js，Windows 实测有用例超 30s）；
+- P0 redo 无 operation/回滚/needs-recovery：**按决策暂缓**（功能冻结，README 标注「已知缺陷：redo」与启用条件）。
+
 ### 可选优化
 
 1. 连通性检查的性能优化：当前每次 capture 走全链 `rev-list`（O(链上对象总数)）。优化方向：常态走 `--not <parent>` 的增量检查 + 源对象库 mtime 变化时触发全链检查。大仓库上需先实测 capture 耗时；
