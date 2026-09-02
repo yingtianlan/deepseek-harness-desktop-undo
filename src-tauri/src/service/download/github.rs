@@ -203,8 +203,9 @@ async fn fetch_dsh_digest_from_expanded_assets(
 /// 修复前：api.github.com 一限流 `fetch_latest_dsh_pkg_info` 直接返回 Err，
 /// `check_dsh_update` 静默跳过，导致上游 rc.8 发布后桌面端迟迟不出现更新提示。
 ///
-/// 预览版（Pre-release label 或 tag 命名，见 [`is_preview_tag`]）不返回：
-/// 返回 Err 由调用方保持本地安装、不提示更新，避免把预览版推给用户自动更新。
+/// 预览版（Pre-release label 或 tag 命名，见 [`is_preview_tag`]）不直接返回：
+/// 上游 latest 指向预览版时回退到最新稳定版（[`fetch_latest_stable_dsh_pkg`]）；
+/// 回退不可用才返回 Err，由调用方保持本地安装、不提示更新。
 pub async fn fetch_latest_dsh_pkg_info() -> Result<LatestDshPkg, String> {
     let client = github_client()?;
     let expected_name = config::get_dsh_download_url()?
@@ -244,12 +245,19 @@ pub async fn fetch_latest_dsh_pkg_info() -> Result<LatestDshPkg, String> {
 
     // 2b. 预览版不参与更新判定：`/releases/latest` 已按 label 排除 Pre-release，
     //     这里按 tag 命名再兜底拦一道（发布时漏标 Pre-release label 的预览版
-    //     同样不会推给用户自动更新）。返回 Err 由调用方保持本地安装、不提示。
+    //     同样不会推给用户自动更新）。此时按 release 列表解析「最新稳定版」：
+    //     已安装场景等价于对照稳定版判定更新；首次安装场景（无本地核心可退）
+    //     不再因上游误标 latest 而永远无法完成安装。列表不可用或没有稳定版时
+    //     维持旧行为返回 Err（调用方保持本地安装 / 按 DSH_INTEGRITY_UNAVAILABLE
+    //     安全中止）。
     if is_preview_tag(&tag_name) {
         log::info!(
-            "DSH_SKIP_PREVIEW: latest release {} is a preview, ignoring for update",
+            "DSH_SKIP_PREVIEW: latest release {} is a preview, resolving the newest stable release instead",
             tag_name
         );
+        if let Ok(stable) = fetch_latest_stable_dsh_pkg().await {
+            return Ok(stable);
+        }
         return Err(format!(
             "DSH_PREVIEW_RELEASE: {tag_name} is a preview release, not an update"
         ));
@@ -328,6 +336,26 @@ pub async fn fetch_latest_dsh_pkg_info() -> Result<LatestDshPkg, String> {
         asset_url,
         digest,
     })
+}
+
+/// 上游把预览版发布成 latest（漏标 Pre-release label，`/releases/latest` 与
+/// atom 兜底都会返回 alpha）时的回退：按 release 列表跳过 label 预发布与
+/// [`is_preview_tag`] 命名预览版，取最新一条稳定版，并复用
+/// [`fetch_dsh_pkg_asset`] 的元数据兜底链（API tag 端点 → 确定性资产 URL +
+/// expanded_assets HTML 摘要；commit 用 tag 内嵌 build-id）。
+///
+/// 列表不可用（限流/网络）或没有稳定版时返回 Err：调用方维持既有语义——
+/// 已安装场景保持本地安装、不提示更新；首次安装场景按
+/// DSH_INTEGRITY_UNAVAILABLE 安全中止。
+async fn fetch_latest_stable_dsh_pkg() -> Result<LatestDshPkg, String> {
+    let releases = fetch_dsh_pkg_releases().await?;
+    let stable = releases
+        .iter()
+        .find(|meta| !meta.prerelease && !is_preview_tag(&meta.tag))
+        .ok_or_else(|| "no stable release available".to_string())?;
+    let tag = stable.tag.clone();
+    log::info!("DSH_PREVIEW_FALLBACK: resolving newest stable release {tag}");
+    fetch_dsh_pkg_asset(&tag).await
 }
 
 /// 拉取指定 tag 的发行版信息（资产 URL + 可信摘要），供核心面板按版本下载。
