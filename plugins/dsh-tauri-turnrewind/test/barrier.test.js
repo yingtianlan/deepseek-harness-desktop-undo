@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { it } from 'vitest'
 import { createSnapshotStore, gitRef } from '../lib/core/git-snapshot.js'
 import { apply, turnSnapshotRef } from '../lib/index.js'
+import { initGitWorkspace } from './git-test-utils.js'
 
 function createHarnessContext() {
   const events = new Map()
@@ -63,7 +64,7 @@ async function withHarness(test) {
   const root = await mkdtemp(join(tmpdir(), 'turnrewind-barrier-test-'))
   const workspace = join(root, 'workspace')
   const dshHome = join(root, 'dsh-home')
-  await mkdir(workspace, { recursive: true })
+  await initGitWorkspace(workspace)
   await writeFile(join(workspace, 'before.txt'), 'before\n')
 
   const previousHome = process.env.DSH_HOME

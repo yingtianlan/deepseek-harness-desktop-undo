@@ -4,16 +4,27 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { it } from 'vitest'
 import { captureSnapshot, createSnapshotStore, currentState, restorePath, stateAt } from '../lib/core/git-snapshot.js'
+import { initGitWorkspace } from './git-test-utils.js'
 
-it('does not capture common secret files into a snapshot', async () => {
+it('delegates secret-file exclusion to the source repository ignore rules', async () => {
   const root = await mkdtemp(join(tmpdir(), 'turnrewind-secret-test-'))
   const workspace = join(root, 'workspace')
   try {
-    await mkdir(workspace, { recursive: true })
+    await initGitWorkspace(workspace)
+    await writeFile(join(workspace, '.gitignore'), [
+      '.env',
+      'credentials.json',
+      'secrets.yaml',
+      'server.pem',
+      'config/credentials.json',
+      'nested/secrets.yaml',
+      '',
+    ].join('\n'))
     await writeFile(join(workspace, '.env'), 'TOKEN=do-not-store')
     await writeFile(join(workspace, 'credentials.json'), '{"token":"do-not-store"}')
     await writeFile(join(workspace, 'secrets.yaml'), 'key: do-not-store')
     await writeFile(join(workspace, 'server.pem'), '-----BEGIN')
+    await writeFile(join(workspace, 'unignored.pem'), '-----BEGIN UNIGNORED')
     await writeFile(join(workspace, 'safe.txt'), 'safe')
     await mkdir(join(workspace, 'config'), { recursive: true })
     await mkdir(join(workspace, 'nested'), { recursive: true })
@@ -22,12 +33,16 @@ it('does not capture common secret files into a snapshot', async () => {
     const store = createSnapshotStore(join(root, 'data'), workspace)
     const snapshot = await captureSnapshot(store, 'refs/turnrewind/security', 'security')
 
+    // Git mode dropped the hardcoded secret-name rules: the source repo's own
+    // ignore rules decide what a snapshot contains. An unignored secret-named
+    // file is deliberately captured — the project opted in by not ignoring it.
     assert.equal((await stateAt(store, snapshot.commit, '.env')).kind, 'absent')
     assert.equal((await stateAt(store, snapshot.commit, 'credentials.json')).kind, 'absent')
     assert.equal((await stateAt(store, snapshot.commit, 'secrets.yaml')).kind, 'absent')
     assert.equal((await stateAt(store, snapshot.commit, 'server.pem')).kind, 'absent')
     assert.equal((await stateAt(store, snapshot.commit, 'config/credentials.json')).kind, 'absent')
     assert.equal((await stateAt(store, snapshot.commit, 'nested/secrets.yaml')).kind, 'absent')
+    assert.equal((await stateAt(store, snapshot.commit, 'unignored.pem')).kind, 'file')
     assert.equal((await stateAt(store, snapshot.commit, 'safe.txt')).kind, 'file')
     const snapshotFiles = await readdir(join(root, 'data', 'snapshots'))
     assert.equal(snapshotFiles.length, 1)
@@ -41,6 +56,7 @@ it('keeps legitimate source files whose names resemble secrets', async () => {
   const root = await mkdtemp(join(tmpdir(), 'turnrewind-token-test-'))
   const workspace = join(root, 'workspace')
   try {
+    await initGitWorkspace(workspace)
     await mkdir(join(workspace, 'src'), { recursive: true })
     await mkdir(join(workspace, 'docs'), { recursive: true })
     await writeFile(join(workspace, 'src', 'token.ts'), 'export const token = 1')
@@ -66,6 +82,7 @@ it('excludes abandoned turnrewind temporary files from snapshots', async () => {
   const root = await mkdtemp(join(tmpdir(), 'turnrewind-temp-file-test-'))
   const workspace = join(root, 'workspace')
   try {
+    await initGitWorkspace(workspace)
     await mkdir(join(workspace, 'nested'), { recursive: true })
     await writeFile(join(workspace, 'file.turnrewind-01234567-89ab-cdef-0123-456789abcdef.tmp'), 'temporary')
     await writeFile(join(workspace, 'nested', 'file.turnrewind-01234567-89ab-cdef-0123-456789abcdef.tmp'), 'temporary')
@@ -85,7 +102,7 @@ it('refuses dangling symlink workspace paths during inspection and restore', asy
   const root = await mkdtemp(join(tmpdir(), 'turnrewind-dangling-link-test-'))
   const workspace = join(root, 'workspace')
   try {
-    await mkdir(workspace, { recursive: true })
+    await initGitWorkspace(workspace)
     try {
       await symlink(join(root, 'missing-target'), join(workspace, 'dangling'))
     }
@@ -111,7 +128,7 @@ it('refuses symlinked workspace paths during inspection and restore', async () =
   const workspace = join(root, 'workspace')
   const outside = join(root, 'outside')
   try {
-    await mkdir(workspace, { recursive: true })
+    await initGitWorkspace(workspace)
     await mkdir(outside, { recursive: true })
     await writeFile(join(outside, 'secret.txt'), 'outside')
     try {

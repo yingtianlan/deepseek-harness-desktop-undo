@@ -55,12 +55,15 @@ DSH_HOME
 ### 测试
 
 - 新增 `test/git-test-utils.js`，用于创建临时 Git workspace；
-- `git-snapshot.test.js` 的 fixture 已开始迁移到真实 Git workspace；
-- 当前已执行的 Git snapshot 目标测试：
+- `git-snapshot.test.js`、`lifecycle.test.js`、`barrier.test.js`、`security.test.js` 的 fixture 已全部迁移到真实临时 Git workspace；
+- `security.test.js` 的敏感文件测试已改写为新语义：ignore 规则委托给源仓库（被 `.gitignore` 忽略的文件不进快照；未忽略的 secret 命名文件会被捕获，token.ts 等合法源码不再被误伤）；
+- `guard.test.js` 已重写为：Git-required（普通目录拒绝）、Git 根目录 canonicalization（子目录 session 归并到同一 worktree/snapshot repo）、系统目录拒绝；
+- 旧 `guard.js` 中已无调用方的全目录预算扫描（`scanWithinBudget`/`assessWorkspace`/`defaultBudget` 及 `TURNREWIND_MAX_FILES`/`TURNREWIND_MAX_BYTES` 覆盖）已随测试一并删除，`guard.js` 只保留 `isSystemSensitiveWorkspace`；
+- 当前已执行的全量插件回归：
 
 ```text
-Test Files: 1 passed
-Tests:      10 passed
+Test Files: 10 passed
+Tests:      59 passed
 Failed:     0
 ```
 
@@ -70,15 +73,13 @@ Failed:     0
 
 ### 必须完成
 
-1. 把 `lifecycle.test.js`、`barrier.test.js`、`security.test.js` 和其他 snapshot fixture 全部迁移到真实临时 Git workspace；
-2. 重写 `guard.test.js`：从旧的文件数量/总大小/目录深度预算测试改为 Git-required、Git 根目录 canonicalization、普通目录拒绝和系统目录拒绝测试；
-3. 增加用户 Git 状态不变断言：capture 前后 `HEAD`、当前 branch、index、`git status` 均不应被插件改变；
-4. 增加 `.gitignore`、`.git/info/exclude`、global ignore 和 `.gitattributes` 语义测试；
-5. 解决 source object alternates、source index 初始化和 snapshot 私有对象之间的兼容性问题；
-6. 给同一个 Git common-dir 下的 linked worktree 增加 snapshot 隔离测试；
-7. 更新 `maintenance.js`、`purge-workspace.js`、ledger workspace metadata 和 purge 测试，保证只清理 turnrewind 的 snapshot repo，不误删用户 `.git`；
-8. 更新插件 README、`docs/TURN_REWIND.md` 和生产审计报告，明确本模式是实验分支、Git-only workspace 和仍未解决的风险；
-9. 运行完整插件回归、lint、Node import smoke，以及必要的真实 DSH Host 验证。
+1. 增加用户 Git 状态不变断言：capture 前后 `HEAD`、当前 branch、index、`git status` 均不应被插件改变；
+2. 增加 `.gitignore`、`.git/info/exclude`、global ignore 和 `.gitattributes` 语义测试；
+3. 解决 source object alternates、source index 初始化和 snapshot 私有对象之间的兼容性问题；
+4. 给同一个 Git common-dir 下的 linked worktree 增加 snapshot 隔离测试；
+5. 更新 `maintenance.js`、`purge-workspace.js`、ledger workspace metadata 和 purge 测试，保证只清理 turnrewind 的 snapshot repo，不误删用户 `.git`；
+6. 更新插件 README、`docs/TURN_REWIND.md` 和生产审计报告，明确本模式是实验分支、Git-only workspace 和仍未解决的风险（README 中的预算守卫/`TURNREWIND_MAX_*` 章节已过时）；
+7. 运行完整插件回归、lint、Node import smoke，以及必要的真实 DSH Host 验证。
 
 ### 仍需保留的安全边界
 
