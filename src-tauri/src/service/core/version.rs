@@ -92,6 +92,11 @@ pub async fn list(app_handle: &AppHandle) -> Vec<HarnessCore> {
         present: local.is_some(),
         active: source == CoreSource::Local,
         preview: false,
+        above_recommended: local
+            .as_ref()
+            .is_some_and(|c| config::is_dsh_version_above_recommended(app_handle, &c.version)),
+        orphaned: false,
+        recommended_version: config::recommended_dsh_version(app_handle),
         error: None,
     }];
 
@@ -109,27 +114,38 @@ pub async fn list(app_handle: &AppHandle) -> Vec<HarnessCore> {
     };
     // 已安装的预打包版本号（无论当前以哪种来源运行都存在）：用于保证预打包行
     // 始终如实呈现为"已安装"，即便本次以本地核心运行，也不会把它标成"未下载"。
-    let installed_version = config::get_dsh_version(app_handle);
+    // 旧记录可能没有版本号，稍后从激活目录 package.json 兜底读取。
+    let installed_version = config::get_dsh_version(app_handle).or_else(|| {
+        (source == CoreSource::App && active_present)
+            .then(|| read_manifest_dsh_version(&active_dir))
+            .flatten()
+    });
 
     // 版本行：GitHub releases（最新在前，含 Pre-release label）→ 按版本去重，
     // 同版本只保留最后一个 tag。releases 拉取失败（离线/限流）时回退 git tags，
     // 预览标记按 tag 命名兜底（见 `download::is_preview_tag`）。
-    let release_metas = match download::fetch_dsh_pkg_releases().await {
-        Ok(metas) => metas,
+    let (release_metas, remote_catalog_available) = match download::fetch_dsh_pkg_releases().await {
+        Ok(metas) => (metas, true),
         Err(e) => {
             log::warn!(
                 "Failed to fetch dsh pkg releases ({}), falling back to git tags",
                 e
             );
-            download::fetch_dsh_pkg_tags()
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .map(|(tag, _)| download::DshPkgReleaseMeta {
-                    tag,
-                    prerelease: false,
-                })
-                .collect()
+            match download::fetch_dsh_pkg_tags().await {
+                Ok(tags) => (
+                    tags.into_iter()
+                        .map(|(tag, _)| download::DshPkgReleaseMeta {
+                            tag,
+                            prerelease: false,
+                        })
+                        .collect(),
+                    true,
+                ),
+                Err(e) => {
+                    log::warn!("Failed to fetch dsh pkg tags: {}", e);
+                    (Vec::new(), false)
+                }
+            }
         }
     };
     let mut version_tags: Vec<(String, String, bool)> = Vec::new(); // (version, tag, preview)，保持首次出现顺序
@@ -148,6 +164,15 @@ pub async fn list(app_handle: &AppHandle) -> Vec<HarnessCore> {
             version_tags.push((version, meta.tag.clone(), preview));
         }
     }
+
+    // 按 SemVer 从新到旧排列；预发布版本也按主版本和预发布标识参与排序。
+    // 例如 0.1.2-alpha.1 应排在 0.1.1-rc.2 之前。
+    version_tags.sort_by(|(a, _, _), (b, _, _)| {
+        match (semver::Version::parse(a), semver::Version::parse(b)) {
+            (Ok(a), Ok(b)) => b.cmp(&a),
+            _ => b.cmp(a),
+        }
+    });
 
     // 激活行就地标记：按版本匹配激活核心（不置顶，作为普通版本行标 active）
     let mut active_rendered = false;
@@ -184,6 +209,9 @@ pub async fn list(app_handle: &AppHandle) -> Vec<HarnessCore> {
             present,
             active: is_active,
             preview: *preview,
+            above_recommended: config::is_dsh_version_above_recommended(app_handle, version),
+            orphaned: false,
+            recommended_version: config::recommended_dsh_version(app_handle),
             error: None,
         });
     }
@@ -204,8 +232,13 @@ pub async fn list(app_handle: &AppHandle) -> Vec<HarnessCore> {
             dir: active_dir.to_string_lossy().into_owned(),
             present: true,
             active: source == CoreSource::App,
+            orphaned: false,
             // 无远程元数据（离线/限流）：预览标记按 tag 命名兜底
             preview: active_tag.as_deref().is_some_and(download::is_preview_tag),
+            above_recommended: installed_version
+                .as_deref()
+                .is_some_and(|v| config::is_dsh_version_above_recommended(app_handle, v)),
+            recommended_version: config::recommended_dsh_version(app_handle),
             error: None,
         });
     }
@@ -215,6 +248,8 @@ pub async fn list(app_handle: &AppHandle) -> Vec<HarnessCore> {
     // 激活版本已由版本行（或底部激活行）呈现，先放入 seen 避免扫描再补一条重复行。
     let mut seen_versions: HashSet<String> =
         version_tags.iter().map(|(v, _, _)| v.clone()).collect();
+    let known_tags: HashSet<String> = version_tags.iter().map(|(_, tag, _)| tag.clone()).collect();
+    let mut seen_tags = known_tags.clone();
     if let Some(v) = &active_version {
         seen_versions.insert(v.clone());
     }
@@ -228,12 +263,8 @@ pub async fn list(app_handle: &AppHandle) -> Vec<HarnessCore> {
             // `dsh-dsh-...` 剥一层 `dsh-` 还原 tag。`dsh` 为激活目录，跳过。
             let tag = if let Some(rest) = name.strip_prefix("dsh-dsh-") {
                 Some(format!("dsh-{rest}"))
-            } else if let Some(rest) = name.strip_prefix("dsh-") {
-                if rest.is_empty() {
-                    None
-                } else {
-                    Some(name.clone())
-                }
+            } else if name.starts_with("dsh-") || name.starts_with("src-") {
+                Some(name.clone())
             } else {
                 None
             };
@@ -244,14 +275,18 @@ pub async fn list(app_handle: &AppHandle) -> Vec<HarnessCore> {
             let version = read_manifest_dsh_version(&entry.path())
                 .or_else(|| download::parse_version_from_tag(&tag))
                 .unwrap_or_default();
-            if version.is_empty() || !seen_versions.insert(version.clone()) {
+            if version.is_empty() || !seen_tags.insert(tag.clone()) {
+                continue;
+            }
+            let orphaned = remote_catalog_available && !known_tags.contains(&tag);
+            if !orphaned && !seen_versions.insert(version.clone()) {
                 continue;
             }
             let dir = entry.path();
             rows.push(HarnessCore {
                 id: format!("app-{tag}"),
                 source: CoreSource::App,
-                version,
+                version: version.clone(),
                 tag: tag.clone(),
                 path: dir.to_string_lossy().into_owned(),
                 dir: dir.to_string_lossy().into_owned(),
@@ -259,6 +294,9 @@ pub async fn list(app_handle: &AppHandle) -> Vec<HarnessCore> {
                 active: false,
                 // 无远程元数据（离线/限流）：预览标记按 tag 命名兜底
                 preview: download::is_preview_tag(&tag),
+                above_recommended: config::is_dsh_version_above_recommended(app_handle, &version),
+                orphaned,
+                recommended_version: config::recommended_dsh_version(app_handle),
                 error: None,
             });
         }
@@ -267,14 +305,34 @@ pub async fn list(app_handle: &AppHandle) -> Vec<HarnessCore> {
     rows
 }
 
+/// 停止并清扫旧核心进程，确保核心来源变更时不会继续使用旧入口。
+async fn stop_harness_for_core_switch(app_handle: &AppHandle) -> Result<(), String> {
+    if workflow::has_owned_process() {
+        workflow::stop(app_handle.clone()).await?;
+    }
+    let handle = app_handle.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        workflow::terminate_stale_harness_processes(&handle);
+    })
+    .await
+    .map_err(|e| format!("CORE_SWITCH_STOP_FAILED: {e}"))?;
+    Ok(())
+}
+
 /// 切换活动核心（持久化 + 预打包版本目录互换；服务重启由前端负责）。
 ///
 /// `id` 取值：`local` | `app`（无 tag 记录的旧激活行）| `app-<tag>`。
 pub async fn set_active(app_handle: &AppHandle, id: &str) -> Result<HarnessCore, String> {
+    let transition_guard = if id == "app" || id == "local" {
+        Some(workflow::acquire_core_transition().await?)
+    } else {
+        None
+    };
     if id == "local" {
         if local_core(app_handle).is_none() {
             return Err("CORE_LOCAL_NOT_FOUND: no local core detected".to_string());
         }
+        stop_harness_for_core_switch(app_handle).await?;
         let mut setting = config::get_store_dat_setting(app_handle);
         setting.active_core = Some(CoreSource::Local.as_str().to_string());
         config::set_store_dat_setting(app_handle, setting);
@@ -282,6 +340,7 @@ pub async fn set_active(app_handle: &AppHandle, id: &str) -> Result<HarnessCore,
         if !config::get_dsh_binary_path(app_handle).exists() {
             return Err("CORE_APP_NOT_FOUND: bundled core is not installed".to_string());
         }
+        stop_harness_for_core_switch(app_handle).await?;
         let mut setting = config::get_store_dat_setting(app_handle);
         setting.active_core = Some(CoreSource::App.as_str().to_string());
         config::set_store_dat_setting(app_handle, setting);
@@ -290,6 +349,9 @@ pub async fn set_active(app_handle: &AppHandle, id: &str) -> Result<HarnessCore,
     } else {
         return Err(format!("CORE_INVALID_ID: {id}"));
     }
+    // 查询核心列表可能联网；不要让慢查询继续占用切换锁，重启流程会在
+    // set_active 返回后通过同一把锁与启动串行化。
+    drop(transition_guard);
 
     Ok(list(app_handle)
         .await
@@ -327,12 +389,12 @@ async fn switch_app_version(app_handle: &AppHandle, tag: &str) -> Result<(), Str
 
     // 切换前停止运行中的服务，避免目录被进程句柄锁定
     if workflow::has_owned_process() {
-        if let Err(e) = workflow::stop(app_handle.clone()).await {
-            log::warn!(
-                "failed to stop harness before core switch at {}: {e}",
+        workflow::stop(app_handle.clone()).await.map_err(|e| {
+            format!(
+                "CORE_SWITCH_STOP_FAILED: failed to stop harness before core switch at {}: {e}",
                 active_dir.display()
-            );
-        }
+            )
+        })?;
     }
     // 只停本应用持有的进程还不够：崩溃/强杀残留的孤儿 Harness 实例（不在
     // .harness.pid 标记中）同样从 dependencies/dsh 启动、占用目录文件句柄，
@@ -513,6 +575,10 @@ fn row_for_tag(app_handle: &AppHandle, tag: &str, dir: &Path) -> HarnessCore {
         present: true,
         active,
         preview: download::is_preview_tag(tag),
+        above_recommended: download::parse_version_from_tag(tag)
+            .is_some_and(|version| config::is_dsh_version_above_recommended(app_handle, &version)),
+        orphaned: false,
+        recommended_version: config::recommended_dsh_version(app_handle),
         error: None,
     }
 }

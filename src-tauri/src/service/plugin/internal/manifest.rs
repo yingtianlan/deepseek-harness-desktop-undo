@@ -14,6 +14,78 @@ pub(super) fn internal_plugin_entry_is_ready(entry: &Path) -> bool {
     serde_json::from_slice::<serde_json::Value>(&raw).is_ok_and(|manifest| manifest.is_object())
 }
 
+/// 清理 profile bundle 列表中的重复引用，保留首次出现的顺序。
+///
+/// 旧工作目录切换期间，重复执行安装/迁移可能把同一个 bundle 追加多次；
+/// Cordis 会把每个引用都展开，最终报 duplicate loader entry。只修改 bundle
+/// 列表，不删除任何依赖或用户插件。
+pub(super) fn dedupe_profile_bundles(manifest: &mut serde_json::Value) -> bool {
+    let Some(bundles) = manifest
+        .get_mut("dsh")
+        .and_then(|dsh| dsh.get_mut("profile"))
+        .and_then(|profile| profile.get_mut("bundles"))
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return false;
+    };
+
+    let before = bundles.len();
+    let mut seen = HashSet::new();
+    bundles.retain(|bundle| {
+        bundle
+            .as_str()
+            .is_none_or(|name| seen.insert(name.to_string()))
+    });
+    bundles.len() != before
+}
+
+/// 从 profile 自身的 patch 层移除已经由 bundle 提供的重复 loader entry。
+///
+/// 旧版本从另一个桌面目录启动时，可能把插件的 `cordis.patch.yml` 内容复制到
+/// profile patch；当前 bundle 又会再次提供同一 id。只移除顶层 `insert` 中与
+/// bundle id 相同的条目，保留 win-terminal-inspector 等用户插件。
+pub(super) fn remove_duplicate_bundle_entries_from_patch(
+    patch: &mut serde_yaml::Value,
+    bundle_ids: &HashSet<&str>,
+) -> bool {
+    let mut modified = false;
+    remove_duplicate_inserted_entries(patch, bundle_ids, &mut modified);
+    modified
+}
+
+/// 递归清理 patch 中的 insert，兼容旧版本写入的 group 嵌套结构。
+fn remove_duplicate_inserted_entries(
+    value: &mut serde_yaml::Value,
+    bundle_ids: &HashSet<&str>,
+    modified: &mut bool,
+) {
+    match value {
+        serde_yaml::Value::Sequence(items) => {
+            for item in items {
+                remove_duplicate_inserted_entries(item, bundle_ids, modified);
+            }
+        }
+        serde_yaml::Value::Mapping(mapping) => {
+            if let Some(insert) = mapping
+                .get_mut(serde_yaml::Value::String("insert".to_string()))
+                .and_then(serde_yaml::Value::as_sequence_mut)
+            {
+                let before = insert.len();
+                insert.retain(|item| {
+                    item.get("id")
+                        .and_then(serde_yaml::Value::as_str)
+                        .is_none_or(|id| !bundle_ids.contains(id))
+                });
+                *modified |= insert.len() != before;
+            }
+            for child in mapping.values_mut() {
+                remove_duplicate_inserted_entries(child, bundle_ids, modified);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// 从 profile 清单精准移除待重装 internal 包的依赖与 bundle 引用。
 pub(super) fn remove_internal_plugins_from_manifest(
     manifest: &mut serde_json::Value,
@@ -117,6 +189,17 @@ pub(super) fn remove_stale_plugin_entry(entry: &Path) -> std::io::Result<()> {
     std::fs::remove_file(entry)
 }
 
+/// 判断某依赖值是否为「本地目录链接」形式（`link:` / `file:`）。
+///
+/// 内置插件统一以 `link:<捆绑目录绝对路径>` 安装；`file:` 是协议切换前的历史遗留
+/// 同义形式。用于启动自愈：当捆绑目录已不存在（如 debug 下切换 git 分支、某内置
+/// 插件源码目录消失）时，只有 `link:`/`file:` 依赖才意味着「这是我们装的本地链接」，
+/// 可以把悬空引用卸载；registry/git 引用（如 `dsh-tauri@0.2.0`、`github:x/y`）是用户
+/// 独立安装，绝不能误卸。路径值不做存在性判断，只判前缀。
+pub(super) fn is_local_link_dep(spec: &str) -> bool {
+    spec.starts_with("link:") || spec.starts_with("file:")
+}
+
 /// 判断 pnpm 写入 profile 的依赖值与期望的 `link:` 捆绑路径是否一致。
 ///
 /// 容忍：`link:`/`file:` 前缀缺失或两者混写（历史遗留 `file:` 安装值）；Windows
@@ -178,6 +261,20 @@ mod tests {
         assert!(!internal_plugin_entry_is_ready(&root));
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn duplicate_profile_bundles_are_removed_without_reordering() {
+        let mut manifest = serde_json::json!({
+            "dsh": { "profile": { "bundles": ["dsh-tauri", "dshmarket", "dsh-tauri", "dshmarket"] } }
+        });
+
+        assert!(dedupe_profile_bundles(&mut manifest));
+        assert_eq!(
+            manifest["dsh"]["profile"]["bundles"],
+            serde_json::json!(["dsh-tauri", "dshmarket"])
+        );
+        assert!(!dedupe_profile_bundles(&mut manifest));
     }
 
     #[test]
@@ -287,6 +384,18 @@ mod tests {
 
         assert!(std::fs::symlink_metadata(&entry).is_err());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn local_link_dep_detects_only_directory_specs() {
+        // link:/file: 前缀 → 本地目录链接（含历史遗留 file: 形式）
+        assert!(is_local_link_dep("link:C:/Apps/dsh/resources/internal-plugins/dsh-tauri"));
+        assert!(is_local_link_dep("file:/Applications/.../dsh-tauri-ui"));
+        // 无前缀的裸路径、registry 版本、git 引用都不是本地链接，绝不能误卸
+        assert!(!is_local_link_dep("dsh-tauri@0.2.0"));
+        assert!(!is_local_link_dep("github:dsh-market/dshmarket"));
+        assert!(!is_local_link_dep("workspace:*"));
+        assert!(!is_local_link_dep(""));
     }
 
     #[test]

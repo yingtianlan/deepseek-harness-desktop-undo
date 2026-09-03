@@ -28,6 +28,8 @@ export interface DshPlugin {
   repo_url: string
   /** 是否在 dsh.profile.bundles 中（启动时自动加载） */
   bundled: boolean
+  /** 是否在禁用清单（disabled-plugins.json）中，独立于 bundled */
+  disabled: boolean
   /** 预设清单中的「推荐」标记 */
   recommended: boolean
   /** 预设清单中的「修复」标记 */
@@ -38,6 +40,8 @@ export interface DshPlugin {
   updateAvailable: boolean
   /** 判定得到的「最新版本」（registry latest / git HEAD SHA）；未判定时缺省 */
   latestVersion?: string
+  /** 是否有单插件快照（$DSH_HOME/.plugin-backups/<id>.tgz），决定还原/删除快照入口 */
+  hasSnapshot: boolean
   /** 异常信息（安装/升级/卸载失败或页面运行期上报）；undefined = 正常 */
   error?: PluginErrorInfo | null
 }
@@ -48,6 +52,10 @@ export interface UseDshPluginsResult {
   error: string
   /** 手动重新拉取（Rust 侧也会在插件文件变化时实时推送） */
   refresh: () => Promise<void>
+  /** 禁用指定插件（从 dsh.profile.bundles 移除，保留包体） */
+  disablePlugin: (id: string) => Promise<void>
+  /** 启用指定插件（加回 dsh.profile.bundles） */
+  enablePlugin: (id: string) => Promise<void>
 }
 
 /**
@@ -111,12 +119,23 @@ export function useDshPlugins(): UseDshPluginsResult {
     }
   }, [queryClient])
 
+  function disablePlugin(id: string) {
+    return invoke<void>('disable_dsh_plugin', { id })
+  }
+  function enablePlugin(id: string) {
+    return invoke<void>('enable_dsh_plugin', { id })
+  }
+
+  async function refresh() {
+    await refetch()
+  }
+
   return {
     plugins: data ?? [],
     loading: isLoading,
     error: error ? String(error) : '',
-    refresh: async () => {
-      await refetch()
-    },
+    refresh,
+    disablePlugin,
+    enablePlugin,
   }
 }

@@ -1,14 +1,19 @@
+import type { AppConfig } from '@/hooks/use-app-config'
 import { ArrowRotateRight, ArrowUpRightFromSquare, ChevronRight, Copy, Folder, Power, TrashBin } from '@gravity-ui/icons'
 import { Button, Chip, Description, Input, Link, ListBox, Select, Spinner, Surface, Switch } from '@heroui/react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { invoke } from '@tauri-apps/api/core'
-import { useState } from 'react'
+import { listen } from '@tauri-apps/api/event'
+import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { If } from 'react-if-lite'
 import { useStore } from 'valtio-define'
+import { useAppConfig } from '@/hooks/use-app-config'
+import { useCoreBreakingConfirm } from '@/hooks/use-core-breaking-confirm'
 import { store } from '@/store'
 import { writeClipboardText } from '@/utils/clipboard'
 import { toast } from '@/utils/toast'
+import { ConfigCloseAction } from './config-close-action'
 import { ConfigLaunchOnLogin } from './config-launch-on-login'
 import { Info } from './info'
 
@@ -33,32 +38,41 @@ export interface CliLinkStatus {
   bin_dir: string
   shim_path: string
 }
-export interface AppConfig {
-  port: number
-  auto_start: boolean
-  cli_link_enabled: boolean
-  zoom_factor: number
-}
 
 export function ConfigDebug() {
   const { t, i18n } = useTranslation()
   const { serviceRunning, busyAction } = useStore(store.harness)
   const { updateInfo } = useStore(store.harnessUpdater)
+  const { holder: coreBreakingHolder, confirmCoreBreaking } = useCoreBreakingConfirm()
 
   // 端口编辑态：用户尚未输入时为 undefined，由 `data?.port ?? 3080` 提供初值。
   // 初值不写入 state（避免 queryFn 副作用 / effect 同步），渲染与保存时统一
   // 读取 config 数据；用户一旦输入即以输入值为准。
   const [portInput, setPortInput] = useState<number>()
 
-  const { data: info } = useQuery({
+  const { data: info, refetch: refreshInfo } = useQuery({
     queryKey: ['info'],
     queryFn: () => invoke<RuntimeInfo>('get_runtime_info'),
   })
 
-  const { data: config, refetch: refreshConfig } = useQuery({
-    queryKey: ['config'],
-    queryFn: () => invoke<AppConfig>('get_app_config'),
-  })
+  useEffect(() => {
+    let disposed = false
+    let unlisten: (() => void) | undefined
+    listen('setting_updated', () => {
+      void refreshInfo()
+    }).then((fn) => {
+      if (disposed)
+        fn()
+      else
+        unlisten = fn
+    }).catch(() => {})
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+  }, [refreshInfo])
+
+  const { data: config, refetch: refreshConfig } = useAppConfig()
   const port = portInput ?? config?.port ?? 3080
 
   const { data: cliStatus, refetch: refreshCliStatus } = useQuery({
@@ -81,6 +95,13 @@ export function ConfigDebug() {
       console.error('[ConfigDebug] copy logs failed:', err)
       toast(t('messages.logs_copy_failed'), { variant: 'danger' })
     }
+  }
+
+  /** 「存在新版本」：先按 rc.2 破坏性更改确认（高于 rc.2 则先拦截），再展示更新提示 */
+  async function handleShowNewVersion() {
+    if (updateInfo && !(await confirmCoreBreaking(updateInfo.tag)))
+      return
+    store.harnessUpdater.showToast()
   }
 
   const { mutate: onClearLogs } = useMutation({
@@ -170,6 +191,7 @@ export function ConfigDebug() {
 
   return (
     <div className="space-y-3">
+      {coreBreakingHolder}
       <div className="space-y-1.5">
         <div className="flex items-center justify-between">
           <span className="text-xs font-semibold uppercase tracking-wider text-muted">
@@ -249,7 +271,7 @@ export function ConfigDebug() {
           <Info term={t('ui.dsh_version')}>
             <span>{info?.dsh_version ?? '-'}</span>
             <If cond={updateInfo}>
-              <Link className="ml-2 text-[10px] text-accent" onClick={store.harnessUpdater.showToast}>
+              <Link className="ml-2 text-[10px] text-accent" onClick={handleShowNewVersion}>
                 {t('menu.new_version')}
                 <ChevronRight className="scale-75" />
               </Link>
@@ -283,6 +305,7 @@ export function ConfigDebug() {
       <div className="border-t border-line/30" />
       <div className="space-y-1.5">
         <ConfigLaunchOnLogin />
+        <ConfigCloseAction />
         <div>
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-ink">{t('ui.cli_link_enabled')}</span>

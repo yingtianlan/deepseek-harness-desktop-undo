@@ -1,6 +1,6 @@
 [package]
 name = "deepseek-harness-desktop"
-version = "0.9.5-beta.1"
+version = "0.10.2"
 description = "Desktop application for DeepSeek Harness (dsh)"
 authors = [ "deepseek-harness-desktop contributors" ]
 edition = "2021"
@@ -58,6 +58,8 @@ zip = "0.6"
 futures-util = "0.3"
 flate2 = "1"
 tar = "0.4"
+rayon = "1.10"
+zstd = { version = "0.13", features = [ "zstdmt" ] }
 async-trait = "0.1"
 tokio = { version = "1", features = [ "full" ] }
 semver = "1"

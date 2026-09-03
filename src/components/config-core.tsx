@@ -3,10 +3,12 @@ import { ArrowRotateRight, CircleArrowDown as DownloadIcon, FolderOpen } from '@
 import { Button, Checkbox, Chip, Description, Label, Spinner } from '@heroui/react'
 import { useOverlay } from '@overlastic/react'
 import { invoke } from '@tauri-apps/api/core'
-import { useState } from 'react'
+import { Fragment, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { If } from 'react-if-lite'
+import { useCoreBreakingConfirm } from '@/hooks/use-core-breaking-confirm'
 import { store } from '@/store'
+import { compareVersions } from '@/utils/core-version'
 import { toast } from '@/utils/toast'
 import { useDshCores } from '../hooks/use-dsh-cores'
 import { DownloadCoreDialog } from './download-core-dialog'
@@ -31,9 +33,11 @@ import { PanelState } from './panel-state'
  * - 本地核心更新：通过用户包管理器 CLI（npm install -g @latest / pnpm add -g @latest）。
  * - 每行展示核心入口（cli path，超长省略号 + 限制宽度）。
  */
+
 export function ConfigCore() {
   const [dialogHolder, openDialog] = useOverlay(Modal, { type: 'holder' })
   const [downloadDialogHolder, openDownloadDialog] = useOverlay(DownloadCoreDialog, { type: 'holder' })
+  const { holder: coreBreakingHolder, confirmCoreBreaking } = useCoreBreakingConfirm()
 
   const { t } = useTranslation()
   const { cores, loading, error, setActiveCore, updateLocalCore, downloadCore, removeCore, refreshCores, busy } = useDshCores()
@@ -43,15 +47,30 @@ export function ConfigCore() {
   const [refreshing, setRefreshing] = useState(false)
 
   // 本地核心未检测到时不渲染 local 行（保留 local_missing_hint 提示）
-  const rows = cores.filter(core => !(core.source === 'local' && !core.present))
+  // 后端列表在部分缓存/旧版本返回路径中可能仍保持远程顺序，前端统一按版本从高到低排序。
+  // 本地核心固定放在版本列表前，预打包核心按 SemVer 排序。
+  const rows = cores
+    .filter(core => !(core.source === 'local' && !core.present))
+    .sort((a, b) => {
+      if (a.source !== b.source)
+        return a.source === 'local' ? -1 : 1
+      if (a.source === 'local')
+        return 0
+      // 后端可能从历史 package.json 得到带 src-/dsh-src- 前缀的版本，
+      // 排序时使用 tag 作为兜底，避免当前激活版本被排到末尾。
+      return -compareVersions(a.version || a.tag, b.version || b.tag)
+    })
   const localCore = cores.find(c => c.source === 'local')
+  const currentRows = rows.filter(core => !core.orphaned)
+  const orphanRows = rows.filter(core => core.orphaned)
+  const displayRows = [...currentRows, ...orphanRows]
 
   // 本地核心是否有新版可更新：仅当存在更新的预打包发布时才显示「更新本地核心」。
   // 版本行按 releases 最新在前，取第一个**非预览版** app 版本作为"当前最新可用
   // 版本"（预览版不参与更新判定；本地版本已是最新时不再展示更新入口，避免
   // "已最新仍提示更新"）。
   const localVersion = localCore?.version ?? ''
-  const latestVersion = cores.find(c => c.source === 'app' && !c.preview)?.version ?? ''
+  const latestVersion = cores.find(c => c.source === 'app' && !c.preview && !c.aboveRecommended)?.version ?? ''
   const hasLocalUpdate = !!(localCore?.present && localVersion && latestVersion && compareVersions(localVersion, latestVersion) < 0)
 
   /** 包裹行内操作：全局单例守卫 + 该行 busy 标记 */
@@ -71,12 +90,18 @@ export function ConfigCore() {
     if (core.active || busy || !core.present)
       return
     try {
+      const isRiskyVersion = core.recommendedVersion !== null
+        && (core.aboveRecommended || compareVersions(core.version, core.recommendedVersion) > 0)
       await openDialog({
-        status: 'warning',
-        title: t('core.switch_confirm_title'),
+        status: isRiskyVersion ? 'danger' : 'warning',
+        title: isRiskyVersion ? t('core.recommended_warning_title') : t('core.switch_confirm_title'),
         description: (
           <p>
-            {t('core.switch_confirm_desc', { version: displayVersion(core) })}
+            <If
+              cond={isRiskyVersion}
+              then={t('core.recommended_warning_desc', { version: core.recommendedVersion ?? '' })}
+              else={t('core.switch_confirm_desc', { version: displayVersion(core) })}
+            />
           </p>
         ),
       })
@@ -91,11 +116,15 @@ export function ConfigCore() {
         description: t('core.switch_restart_hint'),
         timeout: 10_000,
       })
-      // 需求 5：切换核心后自动重启服务；重启结束后收起提示 toast。
-      // 重启失败已由应用错误态呈现，这里静默吞掉以免重复弹错。
-      void store.harness.restart()
-        .then(() => toast.close(key))
-        .catch(() => {})
+      // 需求 5：切换核心后自动重启服务；等待重启完成后再收起提示 toast，
+      // 避免切换请求返回后旧 iframe 与新核心启动流程并发运行。
+      try {
+        await store.harness.restart()
+        toast.close(key)
+      }
+      catch {
+        // 重启失败已由应用错误态呈现，这里静默吞掉以免重复弹错。
+      }
     }
     catch (err) {
       console.error('[ConfigCore] switch failed:', err)
@@ -105,6 +134,10 @@ export function ConfigCore() {
 
   async function onDownload(core: HarnessCore) {
     if (busy)
+      return
+    // rc.2 以上版本引入破坏性更改，可能影响第三方插件 → 下载前先弹出确认。
+    // 取消则中止，确认后继续；该提示与推荐版本逻辑无关，仅告知用户可随时切回 rc.2。
+    if (!(await confirmCoreBreaking(core.version)))
       return
     // 下载过程在对话框内展示进度 + 日志（复用 install-progress 事件流）；
     // 对话框 confirm（下载成功）或 cancel（失败后点关闭）都会结束本次等待。
@@ -220,122 +253,133 @@ export function ConfigCore() {
       {/* 加载 / 失败 / 列表 */}
       <PanelState loading={loading} error={error}>
         <div className="flex flex-col gap-4">
-          {rows.map(core => (
-            <Item
-              key={core.id}
-              onClick={core.present && !core.active ? () => onActivate(core) : undefined}
-              left={(
-                <>
-                  <Label className="min-w-0 truncate font-mono text-sm font-medium text-ink">
-                    {displayVersion(core)}
-                  </Label>
-                  <If cond={core.source === 'local'}>
-                    <Chip size="sm" variant="soft" color="accent" className="shrink-0 font-medium">
-                      {t('core.local')}
-                    </Chip>
-                  </If>
-                  <If cond={core.source === 'app'}>
-                    <Chip size="sm" variant="soft" color="default" className="shrink-0 font-medium">
-                      {t('core.app')}
-                    </Chip>
-                  </If>
-                  {/* 预览版标记：Pre-release label 或 tag 命名判定的预览版，可下载安装但不参与更新提示 */}
-                  <If cond={core.preview}>
-                    <Chip size="sm" variant="soft" color="warning" className="shrink-0 font-medium">
-                      {t('core.preview')}
-                    </Chip>
-                  </If>
-                  {/* 已下载：Chip 右侧的文件夹图标，点击打开所在目录 */}
-                  <If cond={core.present}>
-                    <Button
-                      size="sm"
-                      variant="tertiary"
-                      className="h-6 w-6 shrink-0 rounded-md p-0"
-                      isDisabled={busy}
-                      aria-label={t('core.open_dir')}
-                      onClick={(event) => {
-                        event.stopPropagation()
-                        openCoreDir(core)
-                      }}
-                    >
-                      <FolderOpen className="size-3.5" />
-                    </Button>
-                  </If>
-                  <If cond={!core.present}>
-                    <Description className="min-w-0 text-xs text-muted">
-                      {t('core.not_downloaded')}
-                    </Description>
-                  </If>
-                </>
-              )}
-              right={(
-                <>
-                  {/* 已下载：切换（选中当前使用版本） */}
-                  <If cond={core.present}>
-                    <Checkbox
-                      isSelected={core.active}
-                      isDisabled={busy}
-                      aria-label={core.version || core.id}
-                      className="shrink-0"
-                    >
-                      <Checkbox.Content>
-                        <Checkbox.Control>
-                          <Checkbox.Indicator />
-                        </Checkbox.Control>
-                      </Checkbox.Content>
-                    </Checkbox>
-                  </If>
-                  {/* 未下载（app 版本）：下载入口（进度与日志在下载对话框内展示） */}
-                  <If cond={!core.present && core.source === 'app'}>
-                    <Button
-                      size="sm"
-                      variant="tertiary"
-                      className="h-7 rounded-md text-xs"
-                      isDisabled={busy}
-                      onClick={(event) => {
-                        event.stopPropagation()
-                        onDownload(core)
-                      }}
-                    >
-                      <DownloadIcon className="size-3.5" />
-                      {t('core.download')}
-                    </Button>
-                  </If>
-                  {/* 已下载且非激活（app 版本）：卸载入口 */}
-                  <If cond={core.present && !core.active && core.source === 'app'}>
-                    <Button
-                      size="sm"
-                      variant="tertiary"
-                      className="h-7 rounded-md text-xs"
-                      isDisabled={busy}
-                      onClick={(event) => {
-                        event.stopPropagation()
-                        onRemove(core)
-                      }}
-                    >
-                      <If cond={busyId === core.id && busy} then={<Spinner size="sm" color="current" />} />
-                      {t('core.uninstall')}
-                    </Button>
-                  </If>
-                  {/* 本地核心：已是最新时不显示；有新版时提供更新入口（与预打包行同栏，统一布局） */}
-                  <If cond={core.source === 'local' && core.present && hasLocalUpdate}>
-                    <Button
-                      size="sm"
-                      variant="tertiary"
-                      className="h-7 rounded-md text-xs"
-                      isDisabled={busy}
-                      onClick={(event) => {
-                        event.stopPropagation()
-                        onUpdateLocal()
-                      }}
-                    >
-                      <If cond={busyId === core.id && busy} then={<Spinner size="sm" color="current" />} else={<ArrowRotateRight className="size-3.5" />} />
-                      {t('core.update_local')}
-                    </Button>
-                  </If>
-                </>
-              )}
-            />
+          {displayRows.map(core => (
+            <Fragment key={core.id}>
+              <If cond={core.orphaned && (core === orphanRows[0])}>
+                <div className="px-1 pt-2 text-xs font-medium text-muted">
+                  {t('core.orphaned_title')}
+                </div>
+              </If>
+              <Item
+                onClick={core.present && !core.active ? () => onActivate(core) : undefined}
+                left={(
+                  <>
+                    <Label className="min-w-0 truncate font-mono text-sm font-medium text-ink">
+                      {displayVersion(core)}
+                    </Label>
+                    <If cond={core.source === 'local'}>
+                      <Chip size="sm" variant="soft" color="accent" className="shrink-0 font-medium">
+                        {t('core.local')}
+                      </Chip>
+                    </If>
+                    <If cond={core.source === 'app'}>
+                      <Chip size="sm" variant="soft" color="default" className="shrink-0 font-medium">
+                        {t('core.app')}
+                      </Chip>
+                    </If>
+                    <If cond={core.orphaned}>
+                      <Chip size="sm" variant="soft" color="warning" className="shrink-0 font-medium">
+                        {t('core.orphaned')}
+                      </Chip>
+                    </If>
+                    {/* 预览版标记：Pre-release label 或 tag 命名判定的预览版，可下载安装但不参与更新提示 */}
+                    <If cond={core.preview}>
+                      <Chip size="sm" variant="soft" color="warning" className="shrink-0 font-medium">
+                        {t('core.preview')}
+                      </Chip>
+                    </If>
+                    {/* 已下载：Chip 右侧的文件夹图标，点击打开所在目录 */}
+                    <If cond={core.present}>
+                      <Button
+                        size="sm"
+                        variant="tertiary"
+                        className="h-6 w-6 shrink-0 rounded-md p-0"
+                        isDisabled={busy}
+                        aria-label={t('core.open_dir')}
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          openCoreDir(core)
+                        }}
+                      >
+                        <FolderOpen className="size-3.5" />
+                      </Button>
+                    </If>
+                    <If cond={!core.present}>
+                      <Description className="min-w-0 text-xs text-muted">
+                        {t('core.not_downloaded')}
+                      </Description>
+                    </If>
+                  </>
+                )}
+                right={(
+                  <>
+                    {/* 已下载：切换（选中当前使用版本） */}
+                    <If cond={core.present}>
+                      <Checkbox
+                        isSelected={core.active}
+                        isDisabled={busy}
+                        aria-label={core.version || core.id}
+                        className="shrink-0"
+                      >
+                        <Checkbox.Content>
+                          <Checkbox.Control>
+                            <Checkbox.Indicator />
+                          </Checkbox.Control>
+                        </Checkbox.Content>
+                      </Checkbox>
+                    </If>
+                    {/* 未下载（app 版本）：下载入口（进度与日志在下载对话框内展示） */}
+                    <If cond={!core.present && core.source === 'app'}>
+                      <Button
+                        size="sm"
+                        variant="tertiary"
+                        className="h-7 rounded-md text-xs"
+                        isDisabled={busy}
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          onDownload(core)
+                        }}
+                      >
+                        <DownloadIcon className="size-3.5" />
+                        {t('core.download')}
+                      </Button>
+                    </If>
+                    {/* 已下载且非激活（app 版本）：卸载入口 */}
+                    <If cond={core.present && !core.active && core.source === 'app'}>
+                      <Button
+                        size="sm"
+                        variant="tertiary"
+                        className="h-7 rounded-md text-xs"
+                        isDisabled={busy}
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          onRemove(core)
+                        }}
+                      >
+                        <If cond={busyId === core.id && busy} then={<Spinner size="sm" color="current" />} />
+                        {t('core.uninstall')}
+                      </Button>
+                    </If>
+                    {/* 本地核心：已是最新时不显示；有新版时提供更新入口（与预打包行同栏，统一布局） */}
+                    <If cond={core.source === 'local' && core.present && hasLocalUpdate}>
+                      <Button
+                        size="sm"
+                        variant="tertiary"
+                        className="h-7 rounded-md text-xs"
+                        isDisabled={busy}
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          onUpdateLocal()
+                        }}
+                      >
+                        <If cond={busyId === core.id && busy} then={<Spinner size="sm" color="current" />} else={<ArrowRotateRight className="size-3.5" />} />
+                        {t('core.update_local')}
+                      </Button>
+                    </If>
+                  </>
+                )}
+              />
+            </Fragment>
           ))}
           {/* 本地核心提示：未检测到时说明如何安装 */}
           <If cond={!localCore?.present}>
@@ -346,6 +390,7 @@ export function ConfigCore() {
 
       {dialogHolder}
       {downloadDialogHolder}
+      {coreBreakingHolder}
     </div>
   )
 }
@@ -353,53 +398,4 @@ export function ConfigCore() {
 /** 版本展示：优先版本号，缺失回落来源 id */
 function displayVersion(version: HarnessCore): string {
   return version.version || (version.source === 'local' ? 'local' : 'app')
-}
-
-/**
- * 简化 semver 比较（不引入额外依赖），可处理 `0.1.1-rc.2` / `0.1.1` 格式。
- * 返回值：负数 a < b，0 相等，正数 a > b。
- */
-function compareVersions(a: string, b: string): number {
-  const parse = (v: string) => {
-    const [core, pre = ''] = v.split('-', 2)
-    const nums = core.split('.').map(n => parseInt(n, 10) || 0)
-    return { nums, pre }
-  }
-  const pa = parse(a)
-  const pb = parse(b)
-  for (let i = 0; i < 3; i++) {
-    const x = pa.nums[i] ?? 0
-    const y = pb.nums[i] ?? 0
-    if (x !== y)
-      return x < y ? -1 : 1
-  }
-  // 无预发布号 > 有预发布号
-  if (!pa.pre && !pb.pre)
-    return 0
-  if (!pa.pre)
-    return 1
-  if (!pb.pre)
-    return -1
-  // 预发布号按点分段比较：数字按数值、非数字按字典序
-  const paParts = pa.pre.split('.').map(p => (Number.isNaN(Number(p)) ? p : Number(p)))
-  const pbParts = pb.pre.split('.').map(p => (Number.isNaN(Number(p)) ? p : Number(p)))
-  const len = Math.max(paParts.length, pbParts.length)
-  for (let i = 0; i < len; i++) {
-    const x = paParts[i]
-    const y = pbParts[i]
-    if (x === undefined)
-      return -1
-    if (y === undefined)
-      return 1
-    if (x === y)
-      continue
-    if (typeof x === 'number' && typeof y === 'number')
-      return x < y ? -1 : 1
-    if (typeof x === 'number')
-      return -1
-    if (typeof y === 'number')
-      return 1
-    return x < y ? -1 : 1
-  }
-  return 0
 }

@@ -60,12 +60,22 @@ pub async fn get_app_config(app_handle: AppHandle) -> Result<config::Setting, St
 }
 
 /// 更新桌面端配置
+///
+/// `close_action` 对应前端的 camelCase `closeAction`，命中关闭按钮时的行为
+/// （`tray` = 隐藏到托盘，`quit` = 退出应用）；取值收敛由 `update_store_dat_setting`
+/// 内的 `normalize_close_action` 统一负责，此处不做二次校验以免白名单漂移。
+///
+/// 备份字段（backup_retention_count / backup_include_credentials）由前端
+/// 设置页写入，归一化由 `normalize_backup_fields` 统一负责。
 #[tauri::command]
 pub async fn update_app_config(
     app_handle: AppHandle,
     port: Option<u16>,
     auto_start: Option<bool>,
     cli_link_enabled: Option<bool>,
+    close_action: Option<String>,
+    backup_retention_count: Option<u32>,
+    backup_include_credentials: Option<bool>,
 ) -> Result<config::Setting, String> {
     if let Some(port) = port {
         if port == 0 {
@@ -93,6 +103,15 @@ pub async fn update_app_config(
         }
         if let Some(enabled) = cli_link_enabled {
             setting.cli_link_enabled = enabled;
+        }
+        if let Some(action) = close_action {
+            setting.close_action = action;
+        }
+        if let Some(count) = backup_retention_count {
+            setting.backup_retention_count = count;
+        }
+        if let Some(include) = backup_include_credentials {
+            setting.backup_include_credentials = include;
         }
     });
     Ok(setting)

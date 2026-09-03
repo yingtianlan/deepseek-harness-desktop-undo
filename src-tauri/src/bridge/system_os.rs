@@ -6,6 +6,7 @@
 
 use crate::config;
 use crate::logger;
+use crate::service::core;
 use tauri::AppHandle;
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_opener::OpenerExt;
@@ -21,7 +22,9 @@ pub async fn proxy_health_check(app_handle: AppHandle) -> Result<String, String>
 #[tauri::command]
 pub async fn get_runtime_info(app_handle: AppHandle) -> Result<config::RuntimeInfo, String> {
     let port = config::get_store_dat_setting(&app_handle).port;
-    Ok(config::runtime_info(&app_handle, port))
+    let mut info = config::runtime_info(&app_handle, port);
+    info.dsh_version = core::active_version(&app_handle).or(info.dsh_version);
+    Ok(info)
 }
 
 /// 在系统浏览器中打开 Harness 界面
@@ -193,7 +196,8 @@ pub async fn read_run_logs(app_handle: AppHandle) -> Result<String, String> {
     };
 
     // 环境信息：桌面端应用版本、dsh 发行版本、Node 版本与系统平台/架构，便于报障时快速定位环境差异
-    let dsh_version = config::get_dsh_version(&app_handle)
+    let dsh_version = core::active_version(&app_handle)
+        .or_else(|| config::get_dsh_version(&app_handle))
         .map(|v| format!("dsh: {v}\n"))
         .unwrap_or_default();
     let env_text = format!(

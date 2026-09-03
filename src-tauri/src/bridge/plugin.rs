@@ -19,12 +19,45 @@ pub async fn get_preinstall_plugins(
 
 /// 安装选中的预装插件（`dsh plugin --profile web add <ids...>`），
 /// 进程输出实时通过 `preinstall-log` 事件推送；成功后标记引导完成并记录预设指纹。
+///
+/// 同时支持卸载用户取消勾选的已安装插件（`uninstall_ids`）：走
+/// `dsh plugin remove`（与安装对称的命令行卸载），失败时自动回退离线精准卸载
+/// （`plugin::uninstall_recovery`，直接改 profile 清单），不依赖网络兜底。
 #[tauri::command]
 pub async fn install_preinstall_plugins(
     app_handle: AppHandle,
-    ids: Vec<String>,
+    install_ids: Vec<String>,
+    uninstall_ids: Vec<String>,
 ) -> Result<(), String> {
-    plugin::install(&app_handle, &ids).await?;
+    // 安装与卸载均为空：无需操作，直接标记完成
+    if install_ids.is_empty() && uninstall_ids.is_empty() {
+        let mut setting = config::get_store_dat_setting(&app_handle);
+        setting.preinstall_done = true;
+        if let Some(hash) = plugin::current_preset_hash(&app_handle) {
+            setting.preset_hash = Some(hash);
+        }
+        config::set_store_dat_setting(&app_handle, setting);
+        return Ok(());
+    }
+
+    // 先卸载取消勾选的已安装插件（走 dsh plugin remove，与安装对称）
+    // 卸载在前：避免新装插件与待卸载插件冲突；remove 内部会先停服务再执行
+    log::info!("[preinstall] uninstall_ids={uninstall_ids:?}, install_ids={install_ids:?}");
+    for id in &uninstall_ids {
+        log::info!("[preinstall] removing plugin {id} via dsh plugin remove");
+        if let Err(e) = plugin::remove(&app_handle, id).await {
+            log::error!("[preinstall] failed to remove plugin {id}: {e}");
+            return Err(e);
+        }
+        log::info!("[preinstall] successfully removed plugin {id}");
+    }
+
+    // 再安装新勾选的插件（会走 dsh plugin add）
+    if !install_ids.is_empty() {
+        log::info!("[preinstall] installing plugins {install_ids:?}");
+        plugin::install(&app_handle, &install_ids).await?;
+    }
+
     let mut setting = config::get_store_dat_setting(&app_handle);
     setting.preinstall_done = true;
     if let Some(hash) = plugin::current_preset_hash(&app_handle) {
@@ -175,4 +208,61 @@ pub fn recover_plugin(app_handle: AppHandle, id: String) -> Result<(), String> {
     plugin::uninstall_recovery(&app_handle, &id)?;
     plugin::watch::force_emit(&app_handle);
     Ok(())
+}
+
+/// 禁用单个已安装插件：从 profile 的 `dsh.profile.bundles` 移除（代码完全不加载），
+/// 并写入 profile 的独立禁用清单。与卸载不同，禁用保留 node_modules 内的包体，
+/// 启用时无需重新下载。
+#[tauri::command]
+pub fn disable_dsh_plugin(app_handle: AppHandle, id: String) -> Result<(), String> {
+    plugin::disable(&app_handle, &id)?;
+    plugin::watch::force_emit(&app_handle);
+    Ok(())
+}
+
+/// 启用单个已禁用的插件：加回 `dsh.profile.bundles` 并从独立禁用清单移除。
+#[tauri::command]
+pub fn enable_dsh_plugin(app_handle: AppHandle, id: String) -> Result<(), String> {
+    plugin::enable(&app_handle, &id)?;
+    plugin::watch::force_emit(&app_handle);
+    Ok(())
+}
+
+/// 创建单个插件的快照（覆盖式：已存在则整体替换），存档于
+/// `$DSH_HOME/.plugin-backups/<id>.tgz`。
+#[tauri::command]
+pub fn snapshot_plugin(app_handle: AppHandle, id: String) -> Result<plugin::snapshot::SnapshotInfo, String> {
+    plugin::snapshot::create(&app_handle, &id)
+}
+
+/// 批量创建插件快照（升级前置自动快照）：单项失败只记录在结果里，不阻断其它项。
+#[tauri::command]
+pub fn snapshot_plugins(
+    app_handle: AppHandle,
+    ids: Vec<String>,
+) -> Result<Vec<plugin::snapshot::SnapshotResult>, String> {
+    Ok(plugin::snapshot::create_many(&app_handle, &ids))
+}
+
+/// 查询单个插件的快照信息（存在性 + 时间 + 大小 + 是否含配置段）。
+#[tauri::command]
+pub fn get_plugin_backup(
+    app_handle: AppHandle,
+    id: String,
+) -> plugin::snapshot::PluginBackupInfo {
+    plugin::snapshot::get(&app_handle, &id)
+}
+
+/// 还原单个插件的快照（覆盖式，内部停服务；仅第三方可行动插件允许）。
+#[tauri::command]
+pub async fn restore_plugin(app_handle: AppHandle, id: String) -> Result<(), String> {
+    plugin::snapshot::restore(&app_handle, &id).await?;
+    plugin::watch::force_emit(&app_handle);
+    Ok(())
+}
+
+/// 删除单个插件的快照（卸载级联清理 / 手动删除）：幂等，无快照视为成功。
+#[tauri::command]
+pub fn delete_plugin_backup(app_handle: AppHandle, id: String) -> Result<(), String> {
+    plugin::snapshot::delete(&app_handle, &id)
 }

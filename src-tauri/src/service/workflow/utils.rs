@@ -60,17 +60,18 @@ pub(super) fn client_urls_from_boot_html(port: u16, html: &str) -> Option<Vec<St
         let Some(src_end) = rest.find('\"') else {
             continue;
         };
-        let src = &rest[..src_end];
-        if is_client_bundle_path(src) {
-            paths.push(src.to_string());
+        let src = decode_html_attribute(&rest[..src_end]);
+        if is_client_bundle_path(&src) {
+            paths.push(src);
         }
     }
     for entry in entries {
         let Some(url) = entry.get("url").and_then(|v| v.as_str()) else {
             continue;
         };
-        if is_client_bundle_path(url) {
-            paths.push(url.to_string());
+        let url = decode_html_attribute(url);
+        if is_client_bundle_path(&url) {
+            paths.push(url);
         }
     }
     paths.sort();
@@ -86,8 +87,24 @@ pub(super) fn client_urls_from_boot_html(port: u16, html: &str) -> Option<Vec<St
     )
 }
 
+/// 还原 boot HTML 属性/JSON 中的有限命名实体。
+///
+/// alpha 核心的 combo URL 使用 `&rev=...`，HTML 注入后会变成 `&amp;rev=...`；
+/// 解析前还原它，否则 reqwest 会把实体名当成真实查询参数的一部分。
+fn decode_html_attribute(value: &str) -> String {
+    value
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+}
+
 fn is_client_bundle_path(path: &str) -> bool {
-    path.starts_with("/plugins/") && path.contains("/client.js") && !path.starts_with("//")
+    // alpha combo 路由合法地使用 `/plugins/??<package>/client.js&rev=...`：
+    // 第一个 `?` 是路由约定，第二个是 combo payload 的起始标记，不能把它拼成
+    // `/plugins/??` 再交给 URL 解析器时丢掉一个问号。
+    path.starts_with("/plugins/") && path.contains("client.js") && !path.starts_with("//")
 }
 
 /// 判断健康检查响应是不是可用的插件 bundle。
@@ -411,6 +428,15 @@ mod tests {
         assert!(client_urls_from_boot_html(3099, "<html></html>").is_none());
         let html = r#"<script>globalThis[\"__DSH_BOOT__\"] = {\"entries\":[{\"url\":\"https://example.test/client.js\"}]}</script>"#;
         assert!(client_urls_from_boot_html(3099, html).is_none());
+    }
+
+    /// alpha combo bundle 的 script src 位于 HTML 属性时，`&rev=` 会编码为
+    /// `&amp;rev=`；探测 URL 必须先还原实体，否则服务端收到错误资源地址并返回 404。
+    #[test]
+    fn boot_html_decodes_combo_bundle_attribute_url() {
+        let html = r#"<script src="/plugins/??@deepseek-ai/dsh-client-modules/client.js&amp;rev=cddf5581d5d5"></script><script>globalThis["__DSH_BOOT__"] = {"entries":[]}</script>"#;
+        let urls = client_urls_from_boot_html(3081, html).expect("boot graph");
+        assert_eq!(urls, vec!["http://127.0.0.1:3081/plugins/??@deepseek-ai/dsh-client-modules/client.js&rev=cddf5581d5d5"]);
     }
 
     #[test]

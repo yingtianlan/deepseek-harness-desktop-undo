@@ -27,15 +27,6 @@
     "recommended": true
   },
   {
-    "id": "dsh-notification",
-    "spec": "github:omdsh-dev/dsh-notification",
-    "name": "DSH Notification",
-    "description": "Desktop notifications when a turn finishes — per-outcome toggles plus include/exclude keyword rules, delivered via the browser Notification API. ",
-    "repoUrl": "https://github.com/omdsh-dev/dsh-notification",
-    "recommended": false,
-    "defaultChecked": true
-  },
-  {
     "id": "dsh-session-context-menu",
     "spec": "github:baihejiangnan/dsh-session-context-menu",
     "package": "@baihejiangnan/dsh-session-context-menu",
