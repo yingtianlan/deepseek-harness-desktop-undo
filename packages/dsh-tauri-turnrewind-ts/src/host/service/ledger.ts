@@ -9,7 +9,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import { dirname, join } from 'pathe'
-import { PENDING_PLAN_RESULT_TTL_MS, PENDING_PLAN_TTL_MS } from '../constants'
+import { PENDING_PLAN_TTL_MS } from '../constants'
 
 const SCHEMA = `
   PRAGMA journal_mode = WAL;
@@ -157,12 +157,16 @@ export function openLedger(rootDir: string): Ledger {
   return db
 }
 
-/** 失效 plan 清扫：过期 pending 删除；已结束结果行超过保留期删除。 */
+/**
+ * 失效 plan 清扫：只删过期的 pending 行。
+ *
+ * settled 行（applied/cancelled）**永远保留**：undo 的执行结果必须可追溯
+ * （刷新页面、跨天查看、审计），结果行就是持久记录——删了它卡片就变成
+ * "gone"，用户看不到已经执行了什么。
+ */
 export function prunePendingPlans(db: Ledger): void {
-  const now = new Date().toISOString()
-  db.prepare('DELETE FROM pending_plans WHERE status = \'pending\' AND expires_at < ?').run(now)
-  db.prepare('DELETE FROM pending_plans WHERE status <> \'pending\' AND created_at < ?')
-    .run(new Date(Date.now() - PENDING_PLAN_RESULT_TTL_MS).toISOString())
+  db.prepare('DELETE FROM pending_plans WHERE status = \'pending\' AND expires_at < ?')
+    .run(new Date().toISOString())
 }
 
 export function registerWorkspace(db: Ledger, workspaceKey: string, workspacePath: string, snapshotRepo: string): void {

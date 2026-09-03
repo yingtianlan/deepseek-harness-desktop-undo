@@ -1,10 +1,10 @@
 # dsh-tauri-turnrewind
 
-本地开发中的 DSH turn 回滚插件。
+本地开发中的 DSH turn 回滚插件（**TypeScript 重写版**，位于 `packages/`，遵循 workspace 插件规范；旧 JS 版已移除）。
 
 > 当前 `cordis.patch.yml` 已为本地 debug profile 的实验启用而挂载插件。它仍是原型：恢复路径直接使用 Node/Git，尚未接入受控的宿主 sandbox/Tauri bridge；仅可在可丢弃的测试工作区中启用，不能作为生产功能使用。
 >
-> **Git 目录模式（实验分支）**：本分支把快照模型切换为「工作区必须是 Git worktree」（OpenCode 风格）：非 Git 目录显式记为不可追踪（`TURNREWIND_GIT_REQUIRED`）；ignore 规则（`.gitignore` / `.git/info/exclude` / global excludes / `.gitattributes`）委托给源仓库；私有 snapshot repo 通过 alternates 借用源对象。设计与进度见 `docs/TURN_REWIND_GIT_DIR_PROGRESS.md`——该文档明确本模式是独立实验分支，尚未合并回主功能分支。
+> **Git 目录模式（当前形态）**：工作区**必须**位于 Git worktree（OpenCode 风格）。非 Git 目录显式禁用——turn 记为 `skipped`（`TURNREWIND_GIT_REQUIRED`），`/undo` 说明原因，不再为普通目录建快照。ignore 规则（`.gitignore` / `.git/info/exclude` / global excludes / `.gitattributes`）委托给源仓库；私有 snapshot repo 通过 alternates 借用源对象。设计与进度见 `docs/TURN_REWIND_GIT_DIR_PROGRESS.md`。
 
 ## 当前状态
 
@@ -17,7 +17,7 @@
 - **快照链自愈**：私有快照仓库被删/损坏后，下一次捕获自动降级重建基线（日志有一条 warning），后续 turn 照常可撤销；被清空前留下来的旧 turn 会在 `/undo` 选目标时自动识别为死快照并标记跳过（`snapshot ref missing`），不会甩出 git 原始报错；
 - **alternates 失效自愈**：私有 repo 通过 alternates 借用源仓库对象，而源仓库 `git gc --prune=now`（amend/rebase 的日常残留）可能删掉被借用且不可达的对象；每次 capture 后做连通性检查（`git rev-list --objects --missing=print`），发现缺对象即降级为自包含存储（不再借用、不再复制源 index）并重建基线，旧 turn 走死快照跳过路径；
 - **工作区资格守卫（Git 目录模式）**：会话 cwd 必须位于 Git worktree（子目录自动归并到 worktree 根，共享同一快照域）；家目录、家目录祖先、盘根等系统目录直接拒绝；非 Git 目录记为 `TURNREWIND_GIT_REQUIRED`，不再做全目录预算扫描（见「工作区资格」）；
-- **不可用弹窗**：客户端半（`lib/client.js`）通过 `turnrewind` 会话投影检测到不可用提示时，在 Web UI 内弹出模态对话框（中英双语、跟随应用主题、每个浏览器只弹一次）；
+- **不可用弹窗**：客户端半（`src/client/`）通过 `turnrewind` 会话投影检测到不可用提示时，在 Web UI 内弹出模态对话框（中英双语、跟随应用主题、每个浏览器只弹一次）；
 - **两阶段 `/undo`**：先出预览卡（红绿 diff + `+x -y` 徽标 + 文件清单），卡内 ✓/✗ 按钮确认执行或取消——不看预览就不会误执行；计划 5 分钟过期，确认时二次校验磁盘；
 - 恢复前比较当前文件与 turn 完成时的快照，发现变化则拒绝覆盖，并给出「turn 产物 → 当前磁盘」的冲突 diff；
 - 冲突可用 `--skip-conflicts`（只恢复无冲突文件）或 `--force`（强制覆盖）直接执行；
@@ -25,7 +25,7 @@
 - 注册人类命令 `/undo`；
 - `/undo` 默认处理当前会话最新的单个可恢复 turn，也可指定完整 turn ID；
 - 同一 workspace 的活动 turn 或 undo 操作互斥；
-- 插件重启时将未完成 turn 标记为 abandoned；未完成的 **Undo** operation 会标记为 `needs-recovery`，对应 workspace 在清理前拒绝新的 rewind 操作，避免未知磁盘状态被继续覆盖；**redo 路径尚未接入该机制**（已知缺陷，功能冻结中，见「已知缺陷：redo」）；当前只能先人工检查 workspace，再停止 Host 并使用 `purge-workspace.js` 清理该 workspace 的 turnrewind 数据后恢复使用；
+- 插件重启时将未完成 turn 标记为 abandoned；未完成的 **Undo** operation 会标记为 `needs-recovery`，对应 workspace 在清理前拒绝新的 rewind 操作，避免未知磁盘状态被继续覆盖；**redo 路径尚未接入该机制**（已知缺陷，功能冻结中，见「已知缺陷：redo」）；当前只能先人工检查 workspace，再停止 Host 并使用 purge 工具（见下文「清理已膨胀的快照数据」）清理该 workspace 的 turnrewind 数据后恢复使用；
 - 每次 Undo/Redo 的回退提示独立持久化；下一次模型 step 一次性注入全部 pending notice；
 - 不修改用户项目的 HEAD、分支、index、stash 或提交历史。
 
@@ -72,9 +72,9 @@
 
 父对话递归撤销、消息旁 Undo 按钮和设置页模式切换尚未实现。
 
-## 工作区资格（Git 目录模式）
+## 工作区资格（Git-only）
 
-快照的第一版实现会对任意工作区做全量基线，曾有用户在 QQ 机器人会话（默认工作目录是家目录、约 250 GB 内容）上触发 `git add --all` 级别的灾难。本分支（Git 目录模式）改为以**源仓库的 Git worktree 为快照边界**，不再做全目录预算扫描。turn 开始前的资格检查：
+曾有用户在 QQ 机器人会话（默认工作目录是家目录、约 250 GB 内容）上触发 `git add --all` 级别的灾难，早期版本因此引入了全目录预算扫描。当前实现以**源仓库的 Git worktree 为快照边界**：**非 Git 目录禁用**（不再做预算扫描，也不再为普通目录建快照）。turn 开始前的资格检查：
 
 1. **系统目录直接拒绝**：家目录本身、家目录的祖先目录（如 `C:\Users`、`C:\`）、以及任何盘符根目录。这类目录无论多小都不做快照。
 2. **必须是 Git worktree**：会话 cwd 不在 Git worktree 内的 turn 记为 `skipped`（原因 `TURNREWIND_GIT_REQUIRED`）。子目录会话自动归并到 worktree 根（`git rev-parse --show-toplevel`），共享同一快照域；同一仓库的 linked worktree 各自成域。
@@ -83,7 +83,7 @@
 被拒绝的 turn 仍正常执行，只是不提供 undo。同时该会话会收到一条一次性提示（`[Turn rewind unavailable]`），说明工作区被拒绝的原因；每个会话只提示一次，后续 turn 不再重复打扰。提示会以两种形态呈现：
 
 1. **会话内消息**：插件来源的上下文注入消息，模型和用户都可见、可审计；
-2. **Web UI 弹窗**：宿主端 `turnrewind` 会话投影（`lib/core/dialog-projection.js`）把提示折叠进会话列表快照，客户端半（`lib/client.js`）从 `sessions.list` 的 `projectionValues.turnrewind` 读到后弹出模态对话框，按提示 id 在 `localStorage` 去重——同一浏览器每条提示只弹一次，重装/换浏览器会重弹一次。
+2. **Web UI 弹窗**：宿主端 `turnrewind` 会话投影（`src/host/service/dialog-projection.ts`）把提示折叠进会话列表快照，客户端半（`src/client/register/dialog.ts`）从 `sessions.list` 的 `projectionValues.turnrewind` 读到后弹出模态对话框，按提示 id 在 `localStorage` 去重——同一浏览器每条提示只弹一次，重装/换浏览器会重弹一次。
 
 大工作区的取舍：不再做预算预扫描，快照耗时与磁盘占用随仓库规模增长（Git ignore 能排除 `node_modules` 等，但容量/性能风险仍由使用者自行承担）；单文件快照/恢复上限为 64 MB——超限文件仍会被捕获进快照，`/undo` 预览会以 `[too large]` 标注并在执行后单文件报告为「未恢复」，**不会**导致整次 undo 失败，其余文件照常恢复。若项目里有此类大文件且不希望被追踪，请把它们加进源仓库的 ignore 规则。
 
@@ -92,9 +92,11 @@
 如果某个工作区在旧版本下已经生成过巨大快照，先停止 DSH Host 进程，再执行：
 
 ```powershell
-node plugins\dsh-tauri-turnrewind\lib\purge-workspace.js "C:\Users\<user>"          # release 数据目录 ~/.dsh
-node plugins\dsh-tauri-turnrewind\lib\purge-workspace.js "C:\Users\<user>" --home "$env:USERPROFILE\.dsh.dev"  # debug
+node packages\dsh-tauri-turnrewind-ts\dist\purge-workspace.js "C:\Users\<user>"          # release 数据目录 ~/.dsh
+node packages\dsh-tauri-turnrewind-ts\dist\purge-workspace.js "C:\Users\<user>" --home "$env:USERPROFILE\.dsh.dev"  # debug
 ```
+
+（需先 `pnpm --filter dsh-tauri-turnrewind build` 产出 `dist/`。）
 
 该命令删除该工作区对应的私有快照仓库（`$DSH_HOME/snapshots/<hash>.git`）及其全部账本记录（turns / operations / notices / workspaces），其他工作区的数据不受影响。
 
@@ -322,26 +324,27 @@ commit history
 
 ## Debug 安装
 
-在当前 checkout 中执行：
+TS 版插件位于 `packages/dsh-tauri-turnrewind-ts`，构建产物在 `dist/`。在当前 checkout 中执行：
 
 ```powershell
-pnpm exec vitest run plugins/dsh-tauri-turnrewind/test --testTimeout=30000
-$env:DSH_HOME = "$env:USERPROFILE\.dsh.dev"
-node "$env:APPDATA\io.github.hairyf.deepseek-harness-desktop\dependencies\dsh\node_modules\@deepseek-ai\dsh\lib\bin.js" plugin --profile web add "$(Resolve-Path plugins/dsh-tauri-turnrewind)"
+pnpm install
+pnpm --filter dsh-tauri-turnrewind build
+pnpm --filter dsh-tauri-turnrewind test
 ```
 
-插件包必须先通过 `pnpm add` / `dsh plugin add` 安装，不能仅把源码目录放在项目里就期待 DSH 加载。修改 Host 代码后需要重启对应的 DSH debug Host 进程。
+插件通过 `pnpm add` / `dsh plugin add` 安装（debug 桌面端启动时会自动以 `link:` 方式安装全部内部插件）。修改 Host 代码后需要重新 `pnpm --filter dsh-tauri-turnrewind build` 并重启 DSH debug Host 进程；修改 Client 代码后同理（client bundle 在 Host 启动时发现）。
 
 ## 测试
 
-运行插件测试：
+运行插件 lint 与测试：
 
 ```powershell
-pnpm exec eslint plugins/dsh-tauri-turnrewind
-pnpm exec vitest run plugins/dsh-tauri-turnrewind/test --testTimeout=30000
+pnpm --filter dsh-tauri-turnrewind exec eslint src
+pnpm --filter dsh-tauri-turnrewind typecheck
+pnpm --filter dsh-tauri-turnrewind test
 ```
 
-当前测试覆盖 Git 快照、增删改恢复、中文路径、CRLF、路径逃逸、符号链接、敏感文件排除、账本生命周期、interrupted turn 和多次 notice。
+当前 17 个测试文件、82 个测试，覆盖：Git 快照（增删改恢复、中文路径、CRLF、路径逃逸、符号链接、ignore 委托、alternates 复用与自愈）、原子 bak-swap 恢复与崩溃清扫、Git 状态零污染（HEAD/branch/index/status/refs/stash 不变）、linked worktree 隔离、oversized blob 单文件报告、账本生命周期、pending plan 原子 claim、interrupted turn、barrier 时序、undo/redo 往返、client 纯函数（输出解析/plan 状态判定/会话归属）。
 
 ## 当前限制
 
@@ -350,8 +353,8 @@ pnpm exec vitest run plugins/dsh-tauri-turnrewind/test --testTimeout=30000
 - 接入受控的宿主 sandbox/Tauri bridge；
 - 完成真实 DSH lifecycle integration tests；
 - 快照容量治理：按 turn 数/容量/保留期清理旧 snapshot ref（当前只做断链自愈，不清理历史）；
-- 完善 Git 仓库工作区的增量基线（参考 OpenCode：共享用户对象库 + 仅 stage 变更路径）；
 - 完善多 workspace 并发锁；
 - 实现父对话递归 undo；
 - 实现消息旁 Undo 按钮；
-- 明确二进制、重命名、权限位和特殊文件策略。
+- 明确二进制、重命名、权限位和特殊文件策略；
+- redo 执行段接入 operation 记录与失败回滚（见「已知缺陷：redo」）。

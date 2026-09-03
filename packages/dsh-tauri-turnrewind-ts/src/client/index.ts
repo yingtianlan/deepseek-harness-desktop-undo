@@ -2,14 +2,18 @@
  * dsh-tauri-turnrewind 客户端插件体（browser half）：两阶段 undo 卡片与不可用弹窗。
  *
  * 目录规划：constants/ types/ utils/（纯函数）locales/（双语）register/
- * （卡片/弹窗注册）；与 node half（host/）经 /api/turnrewind/* 通信。
+ * （卡片/弹窗注册）/ components/（React 组件）；与 node half（host/）经
+ * /api/turnrewind/* 通信。
  */
 
 import type { ClientContext } from 'dsh-tauri/client'
 import type { LocaleKey } from './locales'
 import { compat } from 'dsh-tauri/client'
-import { TURNREWIND_POLL_INTERVAL_MS, TURNREWIND_POLL_STOP_MS } from './constants'
+import { setSubmitLine } from './components/command-view'
+import { TURNREWIND_HTTP_BASE, TURNREWIND_LOCALE_NS } from './constants'
 import { LOCALES } from './locales'
+import { registerCommandView } from './register/command-view'
+import { disposeDialog, pickFreshNotices, showDialog } from './register/dialog'
 import { parseUndoOutput, resolvePlanStatus } from './utils/parse'
 import { resolveOwnerSessionId } from './utils/session'
 
@@ -37,8 +41,84 @@ export function apply(ctx: ClientContext): void {
     return dict[key]
   }
 
-  void t
-  void TURNREWIND_POLL_INTERVAL_MS
-  void TURNREWIND_POLL_STOP_MS
-  void parseUndoOutput
+  // ————————————————— 命令卡片 slot 注册 —————————————————
+  ctx.effect(() => registerCommandView(ctx), 'turnrewind command view')
+
+  // ————————————————— locale 安装 —————————————————
+  ctx.effect(() => {
+    const disposer = locale.register(TURNREWIND_LOCALE_NS, 'zh', Object.fromEntries(Object.entries(LOCALES.zh)))
+    return disposer
+  }, 'turnrewind locale')
+  ctx.effect(() => {
+    const disposer = locale.register(TURNREWIND_LOCALE_NS, 'en', Object.fromEntries(Object.entries(LOCALES.en)))
+    return disposer
+  }, 'turnrewind locale en')
+
+  // ————————————————— ✓/✗ 提交通道 —————————————————
+  // 直接 POST 到插件的同源 HTTP 路由（宿主页面本身由同一 Host 服务，无需额外
+  // auth wiring）。返回错误字符串让卡片可以显示真实失败原因。
+  ctx.effect(() => {
+    setSubmitLine(async (line, ownerSessionId) => {
+      try {
+        if (typeof ownerSessionId !== 'string' || ownerSessionId.length === 0)
+          return '无法确定该卡片所属的会话，请刷新页面后重试'
+        const kind = line.includes('--confirm') ? 'confirm' : 'cancel'
+        const planId = line.split(' ').at(-1)!
+        const res = await fetch(`${TURNREWIND_HTTP_BASE}/${kind}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ planId, sessionId: ownerSessionId }),
+        })
+        const payload = await res.json().catch(() => ({}) as Record<string, unknown>)
+        if (!res.ok)
+          return (payload as { error?: string }).error ?? `HTTP ${res.status}`
+        return null
+      }
+      catch (error) {
+        console.error('[turnrewind] failed to submit undo confirmation:', error)
+        return String((error as Error)?.message ?? error)
+      }
+    })
+    return () => {
+      setSubmitLine(null)
+    }
+  }, 'turnrewind submit line')
+
+  // ————————————————— 不可用工作区弹窗 runner —————————————————
+  // 通过 sessions.list 的投影值读取 Host 注入的 unsupported 提示，
+  // 每条提示在 localStorage 去重——同一浏览器只弹一次。
+  const sessions = (ctx as unknown as { get?: (name: string) => unknown }).get?.('sessions') as
+    | { list: { getSnapshot: () => unknown, subscribe: (fn: () => void) => () => void } }
+    | undefined
+
+  function checkOnce(): void {
+    if (!sessions)
+      return
+    const state = sessions.list.getSnapshot() as {
+      current?: string
+      byId?: Record<string, { projectionValues?: { turnrewind?: unknown } }>
+    }
+    const summary = state.current !== undefined ? state.byId?.[state.current] : undefined
+    const value = summary?.projectionValues?.turnrewind
+    const fresh = pickFreshNotices(value)
+    if (fresh.length === 0)
+      return
+    console.warn(`[turnrewind] unsupported heads-up visible: ${fresh.map(notice => notice.id).join(', ')}`)
+    showDialog(t, fresh)
+  }
+
+  ctx.effect(() => {
+    if (!sessions)
+      return () => {}
+    const unsubscribe = sessions.list.subscribe(checkOnce)
+    // 页面加载时投影帧可能在订阅建立前到达；短暂轮询保证时序不会吞掉提示。
+    const poll = setInterval(checkOnce, 2000)
+    const stopPolling = setTimeout(clearInterval, 120000, poll)
+    return () => {
+      unsubscribe()
+      clearInterval(poll)
+      clearTimeout(stopPolling)
+      disposeDialog()
+    }
+  }, 'turnrewind dialog runner')
 }

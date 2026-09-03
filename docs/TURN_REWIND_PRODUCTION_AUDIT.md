@@ -1,12 +1,12 @@
 # dsh-tauri-turnrewind 生产环境审查报告
 
-> 审查对象：`dsh-tauri-turnrewind` 当前 `feature/turn-rewind` 分支代码
+> 审查对象：`dsh-tauri-turnrewind` 主功能分支 `feature/turn-rewind` 的 **JS 版历史代码**（`plugins/dsh-tauri-turnrewind`，已删除）
 >
 > 审查基线：远端个人 fork 最新提交 `82e84bbe99802c5e3df9b9292ca9e8cbca18f500`
 >
 > 审查性质：生产安全与稳定性审查及修复后复审；报告区分已修复、部分缓解和仍未解决的问题。
 >
-> **范围说明**：本报告针对主功能分支。实验分支 `dsh/turnrewind-git-dir-undo`（Git 目录快照模式）删除了预算预扫描与自定义敏感文件名单、把 ignore 语义委托给源仓库、并新增 alternates 失效自愈——本报告中涉及 `guard.js` 预算扫描与排除规则的部分**不适用于该实验分支**；其余安全边界（路径检查、冲突二次校验、barrier/FIFO、needs-recovery、pending plan 原子 claim）在该分支同样保留并有测试钉住。实验分支的专项状态见 `TURN_REWIND_GIT_DIR_PROGRESS.md`。
+> **范围说明（2026-09-03 更新）**：本报告是针对 **JS 版**的历史审查存档。当前活跃实现是 `packages/dsh-tauri-turnrewind-ts`（**TypeScript 重写**），快照模型为 **Git 目录模式**（工作区必须是 Git worktree，非 Git 目录禁用；ignore 语义委托源仓库；无预算预扫描与自定义敏感文件名单）——本报告中涉及 `guard.js` 预算扫描与排除规则的部分**不适用于当前实现**。其余安全边界（路径检查、冲突二次校验、原子 bak-swap 恢复、barrier/FIFO、needs-recovery、pending plan 原子 claim）在 TS 版同样保留并有测试钉住。TS 版的专项状态见 `TURN_REWIND_GIT_DIR_PROGRESS.md`，审查对照记录见 `TURN_REWIND_REVIEW_2026-09-03.md`。
 
 ## 1. 执行摘要
 

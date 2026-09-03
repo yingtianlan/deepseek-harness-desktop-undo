@@ -150,25 +150,18 @@ Failed:     0
 
 ## 5. 验证命令
 
-在本分支根目录执行：
+在本分支根目录执行（TS 包，Git 目录模式已是 `dsh/turnrewind-ts` 的当前形态）：
 
 ```powershell
 pnpm install
-pnpm exec vitest run plugins/dsh-tauri-turnrewind/test --testTimeout=120000 --maxWorkers=1
-pnpm exec eslint plugins/dsh-tauri-turnrewind
-node --input-type=module -e "await import('./plugins/dsh-tauri-turnrewind/lib/index.js')"
+pnpm --filter dsh-tauri-turnrewind build
+pnpm --filter dsh-tauri-turnrewind test
+pnpm --filter dsh-tauri-turnrewind typecheck
+node --input-type=module -e "await import('./packages/dsh-tauri-turnrewind-ts/dist/index.js')"
 ```
 
-完整回归达到全绿前，不能把本分支描述为生产就绪。
+当前 17 个测试文件、82 个测试全绿。
 
 ## 6. 分支说明
 
-本实验位于独立桌面项目目录，使用独立 Git worktree 分支：
-
-```text
-branch: dsh/turnrewind-git-dir-undo
-base:   6808c65
-status: WIP
-```
-
-本分支用于把 Git 目录模式实验和主 `feature/turn-rewind` 隔离，后续可以单独评审、继续修复或整体丢弃。
+Git 目录模式已完成 TS 重写并合入 `dsh/turnrewind-ts`（旧 JS 版目录 `plugins/dsh-tauri-turnrewind` 已删除）。历史实验分支 `dsh/turnrewind-git-dir-undo` 保留为存档。

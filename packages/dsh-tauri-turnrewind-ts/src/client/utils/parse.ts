@@ -67,14 +67,16 @@ export function parseUndoOutput(raw: string | undefined): ParsedUndoOutput {
   return result
 }
 
-/** plan 状态轮询的结局判定（gone 即停；applied/error 带 resultText）。 */
-export function resolvePlanStatus(res: { ok: boolean, status: number }, payload: { status?: string, resultText?: string | null } | null): { status: 'pending' | 'applied' | 'gone' | 'error', stop: boolean, resultText: string | null } {
+/** plan 状态轮询的结局判定（gone 即停；applied/cancelled/error 带 resultText）。 */
+export function resolvePlanStatus(res: { ok: boolean, status: number }, payload: { status?: string, resultText?: string | null } | null): { status: 'pending' | 'applied' | 'cancelled' | 'gone' | 'error' | null, stop: boolean, resultText: string | null } {
+  // Non-404 failures must not settle the card: the plan may still land on a
+  // later poll, so keep polling without flipping to a terminal state.
   if (!res.ok)
-    return { status: res.status === 404 ? 'gone' : 'error', stop: res.status === 404, resultText: null }
+    return { status: res.status === 404 ? 'gone' : 'pending', stop: res.status === 404, resultText: null }
   const status = payload?.status
   if (status === 'gone')
     return { status: 'gone', stop: true, resultText: null }
   if (status === 'applied' || status === 'cancelled' || status === 'error')
-    return { status: status === 'error' ? 'error' : 'applied', stop: true, resultText: payload?.resultText ?? null }
+    return { status, stop: true, resultText: payload?.resultText ?? null }
   return { status: 'pending', stop: false, resultText: null }
 }

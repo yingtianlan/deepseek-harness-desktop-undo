@@ -43,7 +43,11 @@
       "platform": "web",
       "inject": [
         "@deepseek-ai/dsh-client-runtime",
-        "@deepseek-ai/dsh-client-locale"
+        "@deepseek-ai/dsh-client-locale",
+        "dsh-tauri"
+      ],
+      "external": [
+        "dsh-tauri/client"
       ]
     }
   },

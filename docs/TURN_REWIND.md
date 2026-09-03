@@ -482,20 +482,31 @@ SQLite 账本负责：
 ## 11. 组件与接口
 
 ```text
-plugins/dsh-tauri-turnrewind/
-├─ package.json
+packages/dsh-tauri-turnrewind-ts/
+├─ package.json               # 包名 dsh-tauri-turnrewind；exports 指向 dist/
 ├─ cordis.patch.yml
-├─ lib/
-│  ├─ index.js                 # 当前 Host composition 原型
-│  └─ core/
-│     ├─ git-snapshot.js       # 私有 Git 快照与受限恢复
-│     ├─ ledger.js             # SQLite turn/operation 账本
-│     └─ planner.js            # 计划与冲突分类纯函数
-├─ test/
-│  ├─ planner.test.js        # 已有：子树顺序、路径聚合、冲突分类
-│  ├─ git-snapshot.test.js   # 已有：Git 快照、增删改恢复、路径逃逸
-│  ├─ ledger.test.js         # 已有：账本持久化与 active 恢复
-│  └─ lifecycle.test.js      # 待补：真实 DSH 事件与命令集成
+├─ tsdown.config.ts           # tsdown 构建（host ESM + client CJS bundle）
+├─ src/
+│  ├─ index.ts                # public barrel（Host 导出面）
+│  ├─ shared/constants.ts     # 跨 half 协议常量（插件名 / API 前缀 / storage 基名）
+│  ├─ host/
+│  │  ├─ apply.ts             # Host composition（turn 生命周期 / 路由 / 命令 / 投影）
+│  │  ├─ routes/              # 同源 HTTP 路由（POST-only、loopback、body 上限）
+│  │  └─ service/
+│  │     ├─ git-snapshot.ts   # 私有 Git 快照与受限恢复（bak-swap 原子替换）
+│  │     ├─ git-workspace.ts  # Git worktree 元数据解析（Git-only 资格）
+│  │     ├─ guard.ts          # 系统目录拒绝（家目录/祖先/盘根）
+│  │     ├─ ledger.ts         # SQLite turn/operation/plan 账本
+│  │     ├─ planner.ts        # 计划与冲突分类纯函数
+│  │     ├─ undo.ts           # undo/redo 执行核心
+│  │     ├─ maintenance.ts    # purge 工作区数据
+│  │     └─ dialog-projection.ts
+│  └─ client/
+│     ├─ index.ts             # client bundle 入口（apply / inject）
+│     ├─ components/          # undo 命令卡片（React）
+│     ├─ register/            # slot 注册 + 不可用弹窗
+│     ├─ utils/ locales/ constants/ types/
+├─ test/                      # 17 个测试文件 / 82 个测试
 └─ README.md
 ```
 

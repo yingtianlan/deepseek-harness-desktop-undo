@@ -24,7 +24,7 @@ export interface ParsedUndoOutput {
 
 /** plan 状态轮询结果。 */
 export interface PlanStatusResolution {
-  status: 'pending' | 'applied' | 'gone' | 'error'
+  status: 'pending' | 'applied' | 'cancelled' | 'gone' | 'error' | null
   stop: boolean
   resultText: string | null
 }

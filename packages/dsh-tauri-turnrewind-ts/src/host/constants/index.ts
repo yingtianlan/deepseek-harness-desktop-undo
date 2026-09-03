@@ -36,11 +36,8 @@ export const SNAPSHOT_PATHSPECS: string[] = [
   ':(exclude,glob)**/*.turnrewind-restore.bak',
 ]
 
-/** pending plan 存活时长。 */
+/** pending plan 存活时长（只影响未执行的预览；settled 结果行永久保留可追溯）。 */
 export const PENDING_PLAN_TTL_MS = 5 * 60 * 1000
-
-/** pending plan 结果行的保留时长。 */
-export const PENDING_PLAN_RESULT_TTL_MS = 24 * 60 * 60 * 1000
 
 /** endedTurns 内存上界。 */
 export const MAX_ENDED_TURNS = 500
