@@ -525,8 +525,11 @@ async function executeUndoRestore(runtime, params) {
     let rollbackError = null
     try {
       // `beforeRef` is the state immediately before this operation. Restore every
-      // touched path from it so a mid-operation error does not leave a partial undo.
-      for (const path of paths) await restorePath(runtime.store, beforeRef, path)
+      // path this operation actually touched - with --skip-conflicts the skipped
+      // conflicted files were never written, so rolling them back here would
+      // overwrite the human edits the user explicitly chose to keep.
+      const rollbackPaths = skipConflicts ? entries.filter(entry => !entry.conflict).map(entry => entry.path) : paths
+      for (const path of rollbackPaths) await restorePath(runtime.store, beforeRef, path)
       settleOperation(runtime.db, operationId, 'rolled_back', error)
     }
     catch (rollbackFailure) {

@@ -29,12 +29,14 @@ export function purgeWorkspace(rootDir, workspaceDir) {
       db.exec('BEGIN')
       const operations = db.prepare('DELETE FROM operations WHERE target_turn_id IN (SELECT turn_id FROM turns WHERE workspace_key = ?)').run(workspaceIdentity)
       const notices = db.prepare('DELETE FROM rewind_notices WHERE workspace_key = ?').run(workspaceIdentity)
+      const plans = db.prepare('DELETE FROM pending_plans WHERE workspace_key = ?').run(workspaceIdentity)
       const turns = db.prepare('DELETE FROM turns WHERE workspace_key = ?').run(workspaceIdentity)
       const workspaces = db.prepare('DELETE FROM workspaces WHERE workspace_key = ?').run(workspaceIdentity)
       db.exec('COMMIT')
       summary.ledger = {
         operations: operations.changes,
         notices: notices.changes,
+        plans: plans.changes,
         turns: turns.changes,
         workspaces: workspaces.changes,
       }

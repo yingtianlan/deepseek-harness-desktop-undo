@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { it } from 'vitest'
 import { captureSnapshot, createSnapshotStore, workspaceHash, workspaceKey } from '../lib/core/git-snapshot.js'
-import { createOperation, getTurn, insertTurn, openLedger, queueRewindNotice, registerWorkspace, settleTurn } from '../lib/core/ledger.js'
+import { createOperation, createPendingPlan, getTurn, insertTurn, openLedger, queueRewindNotice, registerWorkspace, settleTurn } from '../lib/core/ledger.js'
 import { purgeWorkspace } from '../lib/core/maintenance.js'
 import { commitAll, gitOutput, initGitWorkspace } from './git-test-utils.js'
 
@@ -46,7 +46,7 @@ it('purges ledger rows and the snapshot repository for one workspace', async () 
 
     const summary = purgeWorkspace(root, workspace)
     assert.equal(summary.repoExisted, true)
-    assert.deepEqual(summary.ledger, { operations: 1, notices: 1, turns: 1, workspaces: 1 })
+    assert.deepEqual(summary.ledger, { operations: 1, notices: 1, plans: 0, turns: 1, workspaces: 1 })
     assert.equal(existsSync(repoDir), false)
 
     const verify = openLedger(root)
@@ -62,7 +62,7 @@ it('purges ledger rows and the snapshot repository for one workspace', async () 
 
     const repeat = purgeWorkspace(root, workspace)
     assert.equal(repeat.repoExisted, false)
-    assert.deepEqual(repeat.ledger, { operations: 0, notices: 0, turns: 0, workspaces: 0 })
+    assert.deepEqual(repeat.ledger, { operations: 0, notices: 0, plans: 0, turns: 0, workspaces: 0 })
   }
   finally {
     await rm(root, { recursive: true, force: true })
@@ -101,7 +101,7 @@ it('purges only turnrewind data; the user repository and other workspaces stay i
 
     const summary = purgeWorkspace(dataRoot, userProject)
     assert.equal(summary.repoExisted, true)
-    assert.deepEqual(summary.ledger, { operations: 0, notices: 0, turns: 1, workspaces: 1 })
+    assert.deepEqual(summary.ledger, { operations: 0, notices: 0, plans: 0, turns: 1, workspaces: 1 })
     assert.equal(existsSync(userStore.repoDir), false)
 
     // The user's repository is completely untouched: .git directory, HEAD,
@@ -125,5 +125,43 @@ it('purges only turnrewind data; the user repository and other workspaces stay i
   }
   finally {
     await rm(root, { recursive: true, force: true })
+  }
+})
+
+it('purges pending plans bound to the workspace', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'turnrewind-purge-plans-'))
+  const workspace = join(root, 'ws')
+  try {
+    await initGitWorkspace(workspace)
+    await writeFile(join(workspace, 'a.txt'), 'a')
+    const db = openLedger(root)
+    createPendingPlan(db, {
+      sessionId: 'session',
+      workspaceKey: workspaceKey(workspace),
+      turnId: 'session:1',
+      paths: ['a.txt'],
+    })
+    createPendingPlan(db, {
+      sessionId: 'session',
+      workspaceKey: workspaceKey(join(root, 'other')),
+      turnId: 'session:2',
+      paths: ['b.txt'],
+    })
+    db.close()
+
+    const summary = purgeWorkspace(root, workspace)
+    assert.deepEqual(summary.ledger, { operations: 0, notices: 0, plans: 1, turns: 0, workspaces: 0 })
+
+    const verify = openLedger(root)
+    try {
+      const remaining = verify.prepare('SELECT workspace_key FROM pending_plans').all().map(row => row.workspace_key)
+      assert.deepEqual(remaining, [workspaceKey(join(root, 'other'))])
+    }
+    finally {
+      verify.close()
+    }
+  }
+  finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 })
   }
 })

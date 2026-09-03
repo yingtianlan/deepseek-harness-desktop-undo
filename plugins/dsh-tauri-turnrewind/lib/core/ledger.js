@@ -149,20 +149,6 @@ export function createPendingPlan(db, plan) {
   }
 }
 
-export function getPendingPlan(db, planId, sessionId, workspaceKey) {
-  const row = db.prepare(`
-    SELECT * FROM pending_plans
-    WHERE plan_id = ? AND session_id = ? AND workspace_key = ? AND status = 'pending'
-  `).get(planId, sessionId, workspaceKey)
-  if (row === undefined)
-    return undefined
-  if (row.expires_at < new Date().toISOString()) {
-    db.prepare('DELETE FROM pending_plans WHERE plan_id = ? AND status = \'pending\'').run(planId)
-    return undefined
-  }
-  return { turnId: row.turn_id, paths: JSON.parse(row.paths_json), createdAt: row.created_at }
-}
-
 /**
  * Atomically move one pending plan to `applying` so concurrent confirm/cancel
  * calls cannot interleave: the conditional UPDATE is serialized by SQLite, so
@@ -212,13 +198,6 @@ export function getPendingPlanRow(db, planId) {
     return undefined
   }
   return { ...row, paths: JSON.parse(row.paths_json) }
-}
-
-export function deletePendingPlan(db, planId, sessionId, workspaceKey) {
-  const result = db.prepare(`
-    DELETE FROM pending_plans WHERE plan_id = ? AND session_id = ? AND workspace_key = ?
-  `).run(planId, sessionId, workspaceKey)
-  return result.changes > 0
 }
 
 /** Dismissal from the ✕ button: workspace key is unknown client-side. */

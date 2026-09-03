@@ -73,17 +73,17 @@ export function runGit(repoDir, workspaceDir, args, extraEnv = {}, maxBytes = MA
     child.on('close', (code, signal) => {
       if (settled)
         return
-      settled = true
-      clearTimeout(timeout)
       const stdout = Buffer.concat(chunks)
       // A clean exit is the only path that resolves (see gitExitIsClean).
       // Our own timeout kill already settled above, so anything unclean
       // here is an external kill with truncated output.
       if (!gitExitIsClean(code, signal)) {
         const detail = Buffer.concat(errors).toString('utf8').trim() || stdout.toString('utf8').trim() || (signal ? `killed by ${signal}` : `exit ${code}`)
-        rejectPromise(new Error(`TURNREWIND_GIT_FAILED: ${detail}`))
+        fail(new Error(`TURNREWIND_GIT_FAILED: ${detail}`))
         return
       }
+      settled = true
+      clearTimeout(timeout)
       resolvePromise(stdout)
     })
   })
@@ -194,7 +194,8 @@ async function ensureRepository(store) {
         clearTimeout(timeout)
         if (!gitExitIsClean(code, signal)) {
           const detail = Buffer.concat(errors).toString('utf8').trim() || (signal ? `killed by ${signal}` : `exit ${code}`)
-          rejectPromise(new Error(`TURNREWIND_GIT_FAILED: ${detail}`))
+          const code1 = signal ? 'TURNREWIND_GIT_FAILED' : 'TURNREWIND_GIT_INIT'
+          rejectPromise(new Error(`${code1}: ${detail}`))
           return
         }
         resolvePromise()
