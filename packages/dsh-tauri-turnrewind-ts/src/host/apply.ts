@@ -1,0 +1,625 @@
+/**
+ * host/apply.ts — 插件装配（turn 生命周期 / 路由 / 命令 / 投影）。
+ *
+ * 装配顺序与 reasons：
+ *   1. 投影先注册——会话列表帧到达前弹窗链路已就绪；
+ *   2. HTTP 路由注册在 effect 内，卸载统一释放；
+ *   3. pre-step waterfall 是执行 barrier：before 快照（或明确 skip/失败）
+ *      settle 之前，任何模型请求与工具调用不得运行；
+ *   4. turn/end 落 FIFO 会话链结算 after 快照；
+ *   5. 重启清扫挂在 runtime 首建（原子替换 crash 窗口的复活点）。
+ */
+
+import type { Ledger } from './service/ledger'
+import type { WorkspaceRuntime } from './service/undo'
+import { createHash } from 'node:crypto'
+import { homedir } from 'node:os'
+import process from 'node:process'
+import { join, resolve } from 'pathe'
+import { MAX_ENDED_TURNS } from './constants'
+import { jsonRoute } from './routes'
+import { createDialogProjection } from './service/dialog-projection'
+import {
+  captureSnapshot,
+  createSnapshotStore,
+  gitAvailable,
+  restoreCrashedSwaps,
+  snapshotDiff,
+} from './service/git-snapshot'
+import {
+  claimPendingPlan,
+  claimRewindNotices,
+  failTurn,
+  getLatestSnapshotRef,
+  getPendingPlanRow,
+  getPendingPlanStatus,
+  getTurn,
+  insertTurn,
+  listNeedsRecoveryWorkspaces,
+  markPendingPlanApplied,
+  markPendingPlanCancelled,
+  openLedger,
+  pruneConsumedNotices,
+  recordSkippedTurn,
+  registerWorkspace,
+  releasePendingPlanClaim,
+  settleInterruptedTurn,
+  settleNoopTurn,
+  settleTurn,
+  skipTurn,
+} from './service/ledger'
+import { applyUndo, buildPlanEntries, executeUndoRestore, turnRefsExist, workspaceForAgent, workspaceHasActiveTurn, workspaceIssue, workspaceKeyFor } from './service/undo'
+
+/** 插件名（诊断元数据，与 shared/constants 的 TURNREWIND_PLUGIN_NAME 一致）。 */
+export const name = 'dsh-tauri-turnrewind'
+
+/**
+ * 需要的宿主服务：
+ *   commands             /undo 人类命令
+ *   sessionProjections   不可用弹窗的会话投影
+ *   webServer            /api/turnrewind/*（卡内 ✓/✗ 与状态轮询）
+ */
+export const inject = ['commands', 'sessionProjections', 'webServer'] as const
+
+function rootDir(): string {
+  return process.env.DSH_HOME ? resolve(process.env.DSH_HOME) : join(homedir(), '.dsh')
+}
+
+export interface HostApplyContext {
+  commands: { register: (command: unknown) => () => void }
+  sessionProjections: { register: (projection: unknown) => () => void }
+  webServer: { register: (route: unknown) => () => void }
+  on: (event: string, listener: (...args: any[]) => void) => void
+  effect: (factory: () => (() => void) | void, label?: string) => () => void
+  logger?: { warn?: (message: string) => void }
+}
+
+interface ActiveEntry {
+  runtime: WorkspaceRuntime
+  sessionId: string
+  workspaceKey: string
+  turnId: string
+  beforeRef: string
+  baseline: Deferred
+  baselineReady: boolean
+  startedAt: string
+  turn: number
+}
+
+interface Deferred {
+  promise: Promise<{ ok: boolean, reason?: string }>
+  resolve: (value: { ok: boolean, reason?: string }) => void
+}
+
+function createDeferred(): Deferred {
+  let resolve!: (value: { ok: boolean, reason?: string }) => void
+  const promise = new Promise<{ ok: boolean, reason?: string }>((resolvePromise) => {
+    resolve = resolvePromise
+  })
+  return { promise, resolve }
+}
+
+function settleDeferred(deferred: Deferred, value: { ok: boolean, reason?: string }): void {
+  deferred.resolve(value)
+}
+
+/** turn 前后快照 ref：turnId 的 sha256 前 32 位 + 阶段后缀，稳定且不进用户 refs 命名空间。 */
+export function turnSnapshotRef(turnId: string, phase: string): string {
+  const digest = createHash('sha256').update(turnId).digest('hex').slice(0, 32)
+  return `refs/turnrewind/turn-${digest}-${phase}`
+}
+
+function activeKey(sessionId: string, turn: number): string {
+  return `${sessionId}:${turn}`
+}
+
+export function waitForTurnBaseline(activeTurns: Map<string, ActiveEntry>, sessionId: string, turn: number, signal?: AbortSignal): Promise<{ ok: boolean, reason?: string } | undefined> {
+  const entry = activeTurns.get(activeKey(sessionId, turn))
+  if (!entry?.baseline)
+    return Promise.resolve(undefined)
+  if (!signal)
+    return entry.baseline.promise
+  signal.throwIfAborted()
+  return new Promise((resolvePromise, rejectPromise) => {
+    const onAbort = (): void => {
+      // Propagate the abort reason exactly like the JS version: the pre-step
+      // waterfall relies on the rejection to short-circuit the model step.
+      // (reject directly - throwing inside an event listener would not
+      // settle this promise, leaving the barrier awaiting forever.)
+      rejectPromise(signal.reason ?? new Error('aborted'))
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    entry.baseline.promise.then((value) => {
+      signal.removeEventListener('abort', onAbort)
+      resolvePromise(value)
+    })
+  })
+}
+
+// ————————————————— 会话 FIFO / 结算 —————————————————
+
+async function settleActiveTurn(ledger: Ledger, active: Map<string, ActiveEntry>, key: string, reason?: string): Promise<void> {
+  const current = active.get(key)
+  if (!current || current.runtime.disposed)
+    return
+  try {
+    const afterRef = turnSnapshotRef(current.turnId, 'after')
+    await captureSnapshot(current.runtime.store, afterRef, `turnrewind after ${current.turnId}`, current.runtime.parentRef)
+    if (current.runtime.disposed)
+      return
+    const changed = await snapshotDiff(current.runtime.store, current.beforeRef, afterRef)
+    if (current.runtime.disposed)
+      return
+    if (changed.length === 0)
+      settleNoopTurn(ledger, current.turnId, afterRef)
+    else if (reason)
+      settleInterruptedTurn(ledger, current.turnId, afterRef, reason)
+    else
+      settleTurn(ledger, current.turnId, afterRef)
+    current.runtime.parentRef = afterRef
+  }
+  catch (error) {
+    if (!current.runtime.disposed)
+      failTurn(ledger, current.turnId, error)
+  }
+  finally {
+    active.delete(key)
+  }
+}
+
+async function settleSessionTurns(ledger: Ledger, active: Map<string, ActiveEntry>, sessionId: string, exceptKey: string, reason?: string): Promise<void> {
+  for (const [key, entry] of [...active.entries()]) {
+    if (key === exceptKey || !key.startsWith(`${sessionId}:`) || !entry.baselineReady)
+      continue
+    await settleActiveTurn(ledger, active, key, reason)
+  }
+}
+
+// ————————————————— apply 主体 —————————————————
+
+export function apply(ctx: HostApplyContext): void {
+  // Git mode uses the project's Git worktree as the snapshot boundary. Its
+  // ignore rules replace the old full-directory eligibility scan, while path
+  // validation, conflict checks and the private snapshot repository remain.
+  const dataRoot = rootDir()
+  const ledger = openLedger(dataRoot)
+  const recoveryWorkspaces = new Set(listNeedsRecoveryWorkspaces(ledger))
+  // One-shot at startup: consumed notices older than a week have no readers
+  // left (their dedup window is long gone) and would otherwise accumulate
+  // without bound on long-lived installs.
+  pruneConsumedNotices(ledger)
+  const active = new Map<string, ActiveEntry>()
+  const untrackedTurns = new Set<string>()
+  const workspaceStores = new Map<string, WorkspaceRuntime>()
+  let disposed = false
+  const commands = ctx.commands
+  // Client-visible projection: lets the web UI raise the unavailable-dialog
+  // from the session list it already receives, no conversation API needed.
+  ctx.effect(() => ctx.sessionProjections.register(createDialogProjection()), 'turnrewind projection')
+
+  // Per-session FIFO chain: baseline capture, settle and undo bookkeeping for
+  // one session never interleave. Git runs asynchronously, so ordering is
+  // enforced here instead of by the event loop blocking.
+  const sessionChains = new Map<string, Promise<void>>()
+  const endedTurns = new Map<string, boolean>()
+
+  function enqueueTurnTask(sessionId: string, task: () => Promise<void>): Promise<void> {
+    const previous = sessionChains.get(sessionId) ?? Promise.resolve()
+    const next = previous.then(task)
+    const settled = next.catch(() => {})
+    sessionChains.set(sessionId, settled)
+    void settled.then(() => {
+      if (sessionChains.get(sessionId) === settled)
+        sessionChains.delete(sessionId)
+    })
+    return next
+  }
+
+  function rememberEndedTurn(key: string): boolean {
+    const alreadyEnded = endedTurns.has(key)
+    endedTurns.set(key, true)
+    while (endedTurns.size > MAX_ENDED_TURNS)
+      endedTurns.delete(endedTurns.keys().next().value!)
+    return alreadyEnded
+  }
+
+  function ensureRuntime(agent: { session?: { header?: { cwd?: string } } }): WorkspaceRuntime | undefined {
+    const workspaceDir = workspaceForAgent(agent)
+    if (!workspaceDir)
+      return undefined
+    const workspaceKey = workspaceKeyFor(workspaceDir)
+    let runtime = workspaceStores.get(workspaceKey)
+    if (!runtime) {
+      const store = createSnapshotStore(dataRoot, workspaceDir)
+      const latest = getLatestSnapshotRef(ledger, workspaceKey)
+      registerWorkspace(ledger, workspaceKey, workspaceDir, store.repoDir)
+      // First touch since plugin start: resurrect files left mid-swap by a
+      // crash in a previous host process (target missing + .bak present)
+      // and clear debris (target present + .bak present) - both shapes only
+      // exist inside the atomic-restore crash window.
+      const resurrected = restoreCrashedSwaps(workspaceDir)
+      for (const path of resurrected)
+        console.warn(`turnrewind: resurrected ${path} in ${workspaceDir} from a crashed restore swap`)
+      runtime = {
+        db: ledger,
+        store,
+        workspaceKey,
+        workspaceDir,
+        parentRef: latest,
+        undoing: false,
+        disposed: false,
+      }
+      workspaceStores.set(workspaceKey, runtime)
+    }
+    return runtime
+  }
+
+  function recordSkipped(turnId: string, sessionId: string, workspaceKey: string, startedAt: string, reason: string, notify = true): void {
+    untrackedTurns.add(turnId)
+    try {
+      if (notify) {
+        recordSkippedTurn(ledger, { turnId, sessionId, workspaceKey, startedAt }, reason)
+      }
+      else {
+        skipTurn(ledger, { turnId, sessionId, workspaceKey, startedAt }, reason)
+      }
+    }
+    catch (error) {
+      console.error(`turnrewind: failed to record skipped turn ${turnId}: ${String(error)}`)
+    }
+    console.error(`turnrewind: skipped turn ${turnId}: ${reason}`)
+  }
+
+  function reserveTurnBaseline(agent: { session: { id: string, header?: { cwd?: string } } }, turn: number): ActiveEntry | undefined {
+    if (disposed)
+      return undefined
+    const sessionId = agent.session.id
+    const key = activeKey(sessionId, turn)
+    const existing = active.get(key)
+    if (existing)
+      return existing
+    if (untrackedTurns.has(key) || endedTurns.has(key))
+      return undefined
+    const existingTurn = getTurn(ledger, key)
+    if (existingTurn)
+      return undefined
+    const startedAt = new Date().toISOString()
+    const workspaceDir = workspaceForAgent(agent)
+    if (!workspaceDir) {
+      // Git-only mode rejects system directories and non-Git workspaces. Keep a
+      // durable skipped record so /undo explains why the turn was not tracked.
+      const cwd = agent?.session?.header?.cwd
+      if (typeof cwd === 'string' && cwd.length > 0) {
+        const issue = workspaceIssue(resolve(cwd))
+        if (issue)
+          recordSkipped(key, sessionId, workspaceKeyFor(resolve(cwd)), startedAt, issue)
+      }
+      return undefined
+    }
+
+    const workspaceKey = workspaceKeyFor(workspaceDir)
+    if (recoveryWorkspaces.has(workspaceKey)) {
+      recordSkipped(key, sessionId, workspaceKey, startedAt, 'TURNREWIND_RECOVERY_REQUIRED: a previous undo or redo was interrupted; inspect the workspace and clear its recovery state before using rewind again')
+      return undefined
+    }
+    const issue = workspaceIssue(workspaceDir)
+    if (issue) {
+      recordSkipped(key, sessionId, workspaceKey, startedAt, issue)
+      return undefined
+    }
+
+    const runtime = ensureRuntime(agent)
+    if (!runtime)
+      return undefined
+
+    if (runtime.undoing) {
+      recordSkipped(key, sessionId, workspaceKey, startedAt, 'TURNREWIND_WORKSPACE_BUSY: an undo operation is running')
+      return undefined
+    }
+    for (const entry of active.values()) {
+      if (entry.workspaceKey === workspaceKey && entry.sessionId !== sessionId) {
+        recordSkipped(key, sessionId, workspaceKey, startedAt, 'TURNREWIND_WORKSPACE_BUSY: another session is using this workspace')
+        return undefined
+      }
+    }
+
+    // `agent/inbox/claimed` is a fire-and-forget notification. Create the
+    // deferred synchronously so the awaited pre-step waterfall can always find
+    // the reservation after Inbox.claim() returns.
+    const beforeRef = turnSnapshotRef(key, 'before')
+    const baseline = createDeferred()
+    const entry: ActiveEntry = {
+      runtime,
+      sessionId,
+      workspaceKey: runtime.workspaceKey,
+      turnId: key,
+      beforeRef,
+      baseline,
+      baselineReady: false,
+      startedAt,
+      turn,
+    }
+    active.set(key, entry)
+
+    const baselineTask = async (): Promise<void> => {
+      if (disposed || active.get(key) !== entry) {
+        settleDeferred(baseline, { ok: false, reason: 'turn was replaced before baseline capture' })
+        return
+      }
+      try {
+        const available = await gitAvailable()
+        if (disposed || runtime.disposed) {
+          settleDeferred(baseline, { ok: false, reason: 'turnrewind plugin disposed during baseline capture' })
+          return
+        }
+        if (!available) {
+          active.delete(key)
+          const reason = 'TURNREWIND_GIT_UNAVAILABLE: the git executable was not found on PATH; file undo is disabled'
+          recordSkipped(key, sessionId, runtime.workspaceKey, startedAt, reason)
+          settleDeferred(baseline, { ok: false, reason })
+          return
+        }
+        // A model switch can open B immediately after A is interrupted. Finalize A
+        // before capturing B's baseline so B does not absorb A's partial files.
+        await settleSessionTurns(ledger, active, sessionId, key, 'interrupted by a newer turn in the same session')
+        if (disposed || runtime.disposed) {
+          settleDeferred(baseline, { ok: false, reason: 'turnrewind plugin disposed during baseline capture' })
+          return
+        }
+        await captureSnapshot(runtime.store, beforeRef, `turnrewind before ${key}`, runtime.parentRef)
+        if (disposed || runtime.disposed) {
+          settleDeferred(baseline, { ok: false, reason: 'turnrewind plugin disposed during baseline capture' })
+          return
+        }
+        insertTurn(ledger, {
+          turnId: key,
+          sessionId,
+          workspaceKey: runtime.workspaceKey,
+          startedAt,
+          beforeRef,
+        })
+        entry.baselineReady = true
+        settleDeferred(baseline, { ok: true })
+      }
+      catch (error) {
+        active.delete(key)
+        const reason = `TURNREWIND_CAPTURE_FAILED: ${String(error)}`
+        // Transient capture failure (disk full, permissions): record the skip
+        // before releasing the barrier, so the turn is explicitly untracked.
+        if (!disposed && !runtime.disposed)
+          recordSkipped(key, sessionId, runtime.workspaceKey, startedAt, reason, false)
+        settleDeferred(baseline, { ok: false, reason })
+        if (!disposed && !runtime.disposed)
+          console.error(`turnrewind: failed to start turn ${key}: ${String(error)}`)
+      }
+    }
+    void enqueueTurnTask(sessionId, baselineTask).catch((error: unknown) => {
+      // Keep the barrier finite even if future changes add an exception outside
+      // baselineTask's guarded body.
+      if (active.get(key) === entry)
+        active.delete(key)
+      const reason = `TURNREWIND_CAPTURE_FAILED: ${String(error)}`
+      if (!disposed && !runtime.disposed)
+        recordSkipped(key, sessionId, runtime.workspaceKey, startedAt, reason, false)
+      settleDeferred(baseline, { ok: false, reason })
+      if (!disposed && !runtime.disposed)
+        console.error(`turnrewind: baseline queue failed for ${key}: ${String(error)}`)
+    })
+    return entry
+  }
+
+  // Same-origin HTTP routes powering the ✓/✗ buttons on the undo card: the
+  // harness page itself is served from this host, so these need no extra
+  // auth wiring (and mutations are loopback-only on top).
+  ctx.effect(() => {
+    function confirmRoute(body: Record<string, unknown>): Promise<[number, unknown]> | [number, unknown] {
+      const planId = String(body.planId ?? '')
+      const sessionId = String(body.sessionId ?? '')
+      if (planId === '' || sessionId === '')
+        return [400, { error: 'planId and sessionId are required' }]
+      const previewRow = getPendingPlanRow(ledger, planId)
+      if (previewRow === undefined)
+        return [404, { error: 'plan expired or already applied — run /undo again' }]
+      if (previewRow.session_id !== sessionId)
+        return [403, { error: 'the plan belongs to another session' }]
+      if (previewRow.status !== 'pending')
+        return [409, { error: 'this plan was already applied or cancelled — run /undo again' }]
+      const planRuntime = workspaceStores.get(previewRow.workspace_key)
+      if (planRuntime === undefined)
+        return [409, { error: 'the host restarted since this preview; run /undo again' }]
+      if (planRuntime.undoing || workspaceHasActiveTurn(active, previewRow.workspace_key))
+        return [409, { error: 'the workspace is busy — wait for the current turn to finish' }]
+      const claim = claimPendingPlan(ledger, planId, sessionId)
+      if (!claim.ok)
+        return [claim.code, { error: claim.error }]
+      const row = claim.row
+      planRuntime.undoing = true
+      let committed = false
+      return (async (): Promise<[number, unknown]> => {
+        try {
+          const target = getTurn(ledger, row.turn_id)
+          if (target === undefined || target.reversible !== 1 || !target.before_ref || !target.after_ref || !await turnRefsExist(planRuntime.store, target))
+            return [409, { error: 'the planned turn\'s snapshot data no longer exists — run /undo again' }]
+          const paths = await snapshotDiff(planRuntime.store, target.before_ref, target.after_ref)
+          if (paths.length === 0) {
+            markPendingPlanApplied(ledger, planId, sessionId, 'No file changes were recorded for this turn.')
+            committed = true
+            return [200, { ok: true, message: 'No file changes were recorded for this turn.' }]
+          }
+          const entries = await buildPlanEntries(planRuntime, planRuntime.workspaceDir, target, paths)
+          const conflicts = entries.filter(entry => entry.conflict)
+          if (conflicts.length > 0)
+            return [409, { error: `the workspace changed since the preview (${conflicts.length} conflicted file(s)) — run /undo again to refresh the plan` }]
+          const message = await executeUndoRestore(planRuntime, {
+            sessionId,
+            workspaceKey: row.workspace_key,
+            target,
+            paths,
+            entries,
+            skipConflicts: false,
+          })
+          markPendingPlanApplied(ledger, planId, sessionId, message)
+          committed = true
+          return [200, { ok: true, message }]
+        }
+        finally {
+          if (!committed)
+            releasePendingPlanClaim(ledger, planId)
+          planRuntime.undoing = false
+        }
+      })()
+    }
+
+    function cancelRoute(body: Record<string, unknown>): [number, unknown] {
+      const planId = String(body.planId ?? '')
+      const sessionId = String(body.sessionId ?? '')
+      if (planId === '' || sessionId === '')
+        return [400, { error: 'planId and sessionId are required' }]
+      const removed = markPendingPlanCancelled(ledger, planId, sessionId)
+      return [200, { ok: true, message: removed ? 'Pending undo cancelled.' : 'No pending plan matched (it may have expired).' }]
+    }
+
+    function statusRoute(_body: Record<string, unknown>, req: { url?: string }): [number, unknown] {
+      const url = new URL(req.url ?? '/', 'http://localhost')
+      const planId = String(url.searchParams.get('planId') ?? '')
+      const sessionId = String(url.searchParams.get('sessionId') ?? '')
+      if (planId === '' || sessionId === '')
+        return [400, { error: 'planId and sessionId are required' }]
+      const status = getPendingPlanStatus(ledger, planId, sessionId)
+      if (status === undefined)
+        return [404, { error: 'plan expired, unavailable, or owned by another session — run /undo again' }]
+      return [200, status]
+    }
+
+    const routes = [
+      jsonRoute('/api/turnrewind/confirm', confirmRoute, { mutate: true }),
+      jsonRoute('/api/turnrewind/cancel', cancelRoute, { mutate: true }),
+      jsonRoute('/api/turnrewind/status', statusRoute),
+    ]
+    const disposers = routes.map(route => ctx.webServer.register(route))
+    return () => disposers.map(dispose => dispose())
+  }, 'turnrewind routes')
+
+  ctx.on('agent/pre-step', async ({ agent, turn, signal }: { agent: { session: { id: string, header?: { cwd?: string } } }, turn: number, signal: AbortSignal }, next: () => Promise<{ kind: string, messages?: unknown[] }>) => {
+    // `agent/inbox/claimed` is an emit notification: Cordis deliberately does
+    // not await listener promises. It synchronously reserves the active entry
+    // and starts the baseline task, while this awaited waterfall is the actual
+    // execution barrier. No downstream pre-step listener, model request, or
+    // tool call may run until the before snapshot (or an explicit skip/failure)
+    // has settled. The fallback creates the reservation here as well, so a
+    // missed notification cannot silently allow an unprotected turn through.
+    const key = activeKey(agent.session.id, turn)
+    const entry = active.get(key) ?? (untrackedTurns.has(key) || endedTurns.has(key) ? undefined : reserveTurnBaseline(agent, turn))
+    await waitForTurnBaseline(active, agent.session.id, turn, signal)
+    signal.throwIfAborted()
+    if (disposed)
+      return { kind: 'reject' }
+    if (!entry && workspaceForAgent(agent) && !untrackedTurns.has(key) && !endedTurns.has(key))
+      console.error(`turnrewind: no baseline reservation for ${key}; turn is explicitly untracked`)
+    const decision = await next()
+    if (decision.kind === 'reject' || signal.aborted || disposed)
+      return decision
+    // Claiming must work even when workspaceForAgent refuses the cwd (home
+    // dir): that is exactly the session kind the unsupported heads-up is
+    // queued for. Fall back to the raw cwd as the workspace key.
+    const cwd = agent?.session?.header?.cwd
+    const workspaceDir = workspaceForAgent(agent)
+      ?? (typeof cwd === 'string' && cwd.length > 0 ? resolve(cwd) : undefined)
+    if (!workspaceDir)
+      return decision
+    const notices = claimRewindNotices(ledger, agent.session.id, workspaceKeyFor(workspaceDir))
+    if (notices.length === 0)
+      return decision
+    const { createNoticeMessage } = await import('./service/undo')
+    return {
+      ...decision,
+      messages: [...(decision.messages ?? []), ...notices.map(notice => createNoticeMessage(notice))],
+    }
+  })
+
+  ctx.on('agent/inbox/claimed', (payload: { agent: { session: { id: string, header?: { cwd?: string } } }, turn: number }) => {
+    if (!disposed)
+      reserveTurnBaseline(payload.agent, payload.turn)
+  })
+
+  ctx.on('session/event', (session: { id: string }, event: { type?: string, data?: { turn?: number, reason?: { kind?: string } } }) => {
+    if (disposed || event.type !== 'turn/end' || typeof event.data?.turn !== 'number')
+      return
+    const key = activeKey(session.id, event.data.turn)
+    rememberEndedTurn(key)
+    if (untrackedTurns.delete(key))
+      return
+    if (!active.has(key))
+      return
+    const reason = event.data.reason?.kind
+    const interrupted = reason === 'aborted' || reason === 'error' || reason === 'cancelled'
+    void enqueueTurnTask(session.id, () => settleActiveTurn(ledger, active, key, interrupted ? `turn ended with ${reason}` : undefined))
+  })
+  ctx.on('agent/turn-stopping', () => {
+    // A normal turn reaches the durable turn/end event immediately after this
+    // listener. Wait for that authoritative boundary so interrupted writes are
+    // included in the after snapshot.
+  })
+  ctx.on('agent/error', (payload: { agent: { session: { id: string } }, turn: number, error: unknown }) => {
+    // Keep the active record until turn/end or the idle fallback. In particular,
+    // model switching can emit an error before the final partial writes finish.
+    console.error(`turnrewind: observed agent error for ${activeKey(payload.agent.session.id, payload.turn)}: ${String(payload.error)}`)
+  })
+  ctx.on('agent/status', ({ agent, status }: { agent: { session: { id: string } }, status: string }) => {
+    if (disposed || status !== 'idle')
+      return
+    const sessionId = agent.session.id
+    for (const key of [...active.keys()]) {
+      if (key.startsWith(`${sessionId}:`))
+        void enqueueTurnTask(sessionId, () => settleActiveTurn(ledger, active, key, 'agent became idle after interruption'))
+    }
+  })
+  ctx.effect(() => () => {
+    // A plugin stop/HMR can happen while pre-step is awaiting a baseline. Mark
+    // every runtime first, release waiters, then wait for FIFO tasks before
+    // closing SQLite.
+    disposed = true
+    for (const runtime of workspaceStores.values())
+      runtime.disposed = true
+    for (const entry of active.values())
+      settleDeferred(entry.baseline, { ok: false, reason: 'turnrewind plugin disposed during baseline capture' })
+    active.clear()
+    untrackedTurns.clear()
+    endedTurns.clear()
+    workspaceStores.clear()
+    return (async () => {
+      await Promise.allSettled([...sessionChains.values()])
+      ledger.close()
+    })()
+  }, 'turnrewind runtime')
+  ctx.effect(() => commands.register({
+    name: 'undo',
+    description: 'Plan or undo file changes made by the latest Agent turn',
+    input: { hint: '[turn-id] [--dry-run|--preview] [--skip-conflicts|--force] | --redo' },
+    handler: (invocation: { rawInput: string, agent: { session: { id: string, header?: { cwd?: string } } } }) => {
+      const workspaceDir = workspaceForAgent(invocation.agent)
+      if (!workspaceDir) {
+        // The hard guard refused the cwd; report the actual reason when there is one.
+        const cwd = invocation.agent?.session?.header?.cwd
+        const issue = typeof cwd === 'string' && cwd.length > 0 ? workspaceIssue(resolve(cwd)) : undefined
+        if (issue)
+          return { kind: 'error', text: `Undo is unavailable for this workspace. ${issue}` }
+        return { kind: 'error', text: 'Undo is unavailable because this session has no workspace.' }
+      }
+      const workspaceIdentity = workspaceKeyFor(workspaceDir)
+      if (recoveryWorkspaces.has(workspaceIdentity))
+        return { kind: 'error', text: 'Undo is unavailable because a previous undo or redo was interrupted. Inspect the workspace, then purge its turnrewind data before retrying.' }
+      const issue = workspaceIssue(workspaceDir)
+      if (issue)
+        return { kind: 'error', text: `Undo is unavailable for this workspace. ${issue}` }
+      const runtime = ensureRuntime(invocation.agent)
+      if (!runtime)
+        return { kind: 'error', text: 'Undo is unavailable because the Git workspace could not be initialized.' }
+      return applyUndo(runtime, active, { rawInput: invocation.rawInput, agent: invocation.agent }, {
+        workspaceForAgent,
+        workspaceIssue,
+        workspaceKeyFor,
+      })
+    },
+  }), 'turnrewind command')
+}

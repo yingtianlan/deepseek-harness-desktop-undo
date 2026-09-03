@@ -1,0 +1,70 @@
+{
+  "name": "dsh-tauri-turnrewind",
+  "type": "module",
+  "version": "0.2.0-beta.1",
+  "description": "Local turn-aware workspace undo for DeepSeek Harness",
+  "author": "yingtianlan",
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "plugin",
+    "dsh-plugin",
+    "tauri",
+    "deepseek-harness",
+    "undo",
+    "snapshot"
+  ],
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./client": {
+      "default": "./dist/client.cjs"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "README.md",
+    "cordis.patch.yml",
+    "dist"
+  ],
+  "dsh": {
+    "runtime": "host",
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  },
+  "engines": {
+    "node": ">=22.15.0"
+  },
+  "scripts": {
+    "build": "tsdown",
+    "dev": "tsdown --watch",
+    "prepublishOnly": "nr build",
+    "start": "tsx src/index.ts",
+    "test": "vitest run test --testTimeout=120000",
+    "typecheck": "tsc"
+  },
+  "dependencies": {
+    "dsh-tauri": "workspace:*",
+    "pathe": "catalog:utils"
+  },
+  "devDependencies": {
+    "dsh-tauri-tsdown": "workspace:*",
+    "tsdown": "catalog:cli",
+    "vitest": "catalog:testing"
+  }
+}
