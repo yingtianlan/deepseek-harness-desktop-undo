@@ -4,7 +4,7 @@ import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import process from 'node:process'
 import { createDialogProjection } from './core/dialog-projection.js'
-import { captureSnapshot, classifyPathChange, createSnapshotStore, currentState, diffAgainstDisk, gitAvailable, gitRef, MAX_FILE_BYTES, probeWorkspace, restorePath, snapshotDiff, snapshotFileDiff, stateAt, workspaceKey } from './core/git-snapshot.js'
+import { captureSnapshot, classifyPathChange, createSnapshotStore, currentState, diffAgainstDisk, gitAvailable, gitRef, MAX_FILE_BYTES, probeWorkspace, restoreCrashedSwaps, restorePath, snapshotDiff, snapshotFileDiff, stateAt, workspaceKey } from './core/git-snapshot.js'
 import { isSystemSensitiveWorkspace } from './core/guard.js'
 import { claimPendingPlan, claimRewindNotices, completeRedoWithNotice, completeUndoWithNotice, createOperation, createPendingPlan, failTurn, getLatestAppliedUndo, getLatestSnapshotRef, getLatestTurnSummary, getPendingPlanRow, getPendingPlanStatus, getTurn, insertTurn, listNeedsRecoveryWorkspaces, listReversibleTurns, markPendingPlanApplied, markPendingPlanCancelled, markTurnSnapshotMissing, openLedger, pruneConsumedNotices, recordSkippedTurn, registerWorkspace, releasePendingPlanClaim, settleInterruptedTurn, settleNoopTurn, settleOperation, settleTurn, skipTurn } from './core/ledger.js'
 import { classifyUndo } from './core/planner.js'
@@ -870,6 +870,13 @@ function apply(ctx) {
       const store = createSnapshotStore(dataRoot, workspaceDir)
       const latest = getLatestSnapshotRef(ledger, workspaceKey)
       registerWorkspace(ledger, workspaceKey, workspaceDir, store.repoDir)
+      // First touch since plugin start: resurrect files left mid-swap by a
+      // crash in a previous host process (target missing + .bak present)
+      // and clear debris (target present + .bak present) - both shapes only
+      // exist inside the atomic-restore crash window.
+      const resurrected = restoreCrashedSwaps(workspaceDir)
+      for (const path of resurrected)
+        console.warn(`turnrewind: resurrected ${path} in ${workspaceDir} from a crashed restore swap`)
       runtime = {
         db: ledger,
         store,

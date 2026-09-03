@@ -1,7 +1,7 @@
 import { Buffer } from 'node:buffer'
 import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import process from 'node:process'
@@ -19,6 +19,7 @@ const SNAPSHOT_PATHSPECS = [
   ':(exclude,glob).turnrewind/**',
   ':(exclude,glob)**/.turnrewind/**',
   ':(exclude,glob)**/*.turnrewind-*.tmp',
+  ':(exclude,glob)**/*.turnrewind-restore.bak',
 ]
 const SNAPSHOT_REF_PREFIX = 'refs/turnrewind/'
 
@@ -587,6 +588,43 @@ export function currentState(workspaceDir, path) {
   return { kind: 'file', digest: digest(readFileSync(target)) }
 }
 
+/**
+ * Crash-safe restore window. The pre-atomic sequence was delete-then-rename:
+ * a crash between those two steps left the target missing and its only copy
+ * in a .tmp file nobody resurrected. The swap keeps a full copy on disk at
+ * every instant:
+ *
+ *   target -> target.turnrewind-restore.bak   (rename, atomic)
+ *   temp   -> target                          (rename, atomic)
+ *   bak    -> deleted                         (only after success)
+ *
+ * A crash anywhere leaves either the new content or the .bak; the startup
+ * sweep (restoreCrashedSwaps) resurrects a .bak whose target is missing.
+ */
+const BAK_SUFFIX = '.turnrewind-restore.bak'
+
+/**
+ * Remove one path, retrying briefly: Windows antivirus/indexers hold
+ * short-lived handles on freshly written files, and a transient EPERM/EBUSY
+ * on the .bak delete must not fail an otherwise successful restore.
+ */
+function rmSyncWithRetry(target, attempts = 5) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      rmSync(target, { force: true })
+      return
+    }
+    catch (error) {
+      const retryable = error?.code === 'EBUSY' || error?.code === 'EPERM' || error?.code === 'EACCES'
+      if (retryable && attempt < attempts) {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30)
+        continue
+      }
+      throw error
+    }
+  }
+}
+
 export async function restorePath(store, commit, path) {
   const target = assertSafePath(store.workspaceDir, path)
   if (!await commitEntry(store, commit, path)) {
@@ -608,20 +646,99 @@ export async function restorePath(store, commit, path) {
   mkdirSync(dirname(target), { recursive: true })
   const temp = `${target}.turnrewind-${randomUUID()}.tmp`
   writeFileSync(temp, bytes, { flag: 'wx' })
+  let bak
   try {
     if (existsSync(target)) {
       const info = lstatSync(target)
       if (info.isSymbolicLink() || !info.isFile())
         throw new Error(`TURNREWIND_UNSUPPORTED_TARGET: ${path}`)
-      rmSync(target, { force: true })
+      // Move the old content aside instead of deleting it: the swap keeps a
+      // complete copy on disk across both renames.
+      bak = `${target}${BAK_SUFFIX}`
+      rmSync(bak, { force: true })
+      renameSync(target, bak)
     }
-    renameSync(temp, target)
+    try {
+      renameSync(temp, target)
+    }
+    catch (error) {
+      // The swap failed halfway: put the old content back before reporting.
+      if (bak !== undefined) {
+        try {
+          if (!existsSync(target))
+            renameSync(bak, target)
+          else
+            rmSync(bak, { force: true })
+        }
+        catch { /* best-effort self-heal; a leftover .bak stays recoverable */ }
+      }
+      throw error
+    }
+    // New content is in place; the old copy is now redundant. The delete is
+    // retried: a transient antivirus handle on the fresh .bak must not turn
+    // a completed restore into a reported failure (the sweep cleans a
+    // leftover .bak anyway).
+    if (bak !== undefined)
+      rmSyncWithRetry(bak)
   }
   catch (error) {
     rmSync(temp, { force: true })
     throw new Error(`TURNREWIND_RESTORE_FAILED: ${path}: ${error.message}`)
   }
   return { path, result: 'restored' }
+}
+
+/**
+ * Startup sweep for atomic-swap leftovers. A .turnrewind-restore.bak next to
+ * a missing target means the process died between the two renames: resurrect
+ * the old content. A .bak next to an existing target is debris from a crash
+ * after the second rename (before the delete) - safe to remove. Returns the
+ * resurrected workspace-relative paths for logging.
+ */
+export function restoreCrashedSwaps(workspaceDir) {
+  const root = resolve(workspaceDir)
+  const resurrected = []
+  const visit = (dir) => {
+    let entries
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    }
+    catch {
+      return
+    }
+    for (const entry of entries) {
+      const full = join(dir, entry.name)
+      if (entry.isDirectory() && entry.name !== '.git' && !entry.name.endsWith('.turnrewind-restore.bak'))
+        visit(full)
+      if (entry.isFile() && entry.name.endsWith('.turnrewind-restore.bak')) {
+        const target = full.slice(0, -BAK_SUFFIX.length)
+        // Windows antivirus/indexers hold brief handles on freshly renamed
+        // files; retry a few times before giving this bak up to the fence.
+        for (let attempt = 0; ; attempt += 1) {
+          try {
+            if (!existsSync(target)) {
+              renameSync(full, target)
+              resurrected.push(relative(root, target))
+            }
+            else {
+              rmSync(full, { force: true })
+            }
+            break
+          }
+          catch (error) {
+            const retryable = error?.code === 'EBUSY' || error?.code === 'EPERM' || error?.code === 'EACCES'
+            if (retryable && attempt < 5) {
+              Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30)
+              continue
+            }
+            break // deeper damage: leave for the recovery fence
+          }
+        }
+      }
+    }
+  }
+  visit(root)
+  return resurrected
 }
 
 export function pathIsSafe(workspaceDir, path) {

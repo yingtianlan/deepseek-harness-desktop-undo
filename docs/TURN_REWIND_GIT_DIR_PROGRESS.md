@@ -105,6 +105,15 @@ Failed:     0
 - rewind_notices 膨胀：新增 pruneConsumedNotices（consumed 且 claimed_at > 7 天删除，保留 pending 与近期行以维持 unsupported 弹窗去重语义），插件启动时执行一次；
 - 「git 全程异步」措辞修正为「git 子进程模型」，如实标注两处同步路径（工作区解析 spawnSync、冲突检测同步读盘）与异步化待办。
 
+### 原子替换已落地（2026-09-02 第三批）
+
+- restorePath 从「删除→改名」改为 **bak-swap 原子替换**：目标先改名为 .turnrewind-restore.bak（同卷原子），临时文件再改名就位，成功后才删 bak——崩溃窗口内磁盘上始终保有完整副本（新内容或 bak 之一），文件不再可能凭空消失；
+- 二次 rename 失败时自愈回滚（bak 改回目标）；
+- 启动清扫 restoreCrashedSwaps：挂在 ensureRuntime 首次接触 workspace 时执行——目标缺失 + bak 在场 → 复活旧内容（日志告警）；目标在场 + bak 在场 → 清 debris；
+- 快照排除规则新增 *.turnrewind-restore.bak，防止崩溃残留被下次 capture 吸进快照进而被 undo 复活；
+- Windows 实测发现并修复竞态：Defender/索引器对新鲜文件短暂持锁（EPERM/EBUSY）会打断 bak 的 rename/delete——rmSyncWithRetry + sweep 重试（30ms x 5）；该竞态此前也是 oversize 测试偶发失败的根因；
+- 4 个新测试：干净恢复零残留、crash 窗口复活（含嵌套目录）、debris 清扫、bak 不进快照。回归 17 文件 / 82 测试全绿。
+
 ### 可选优化
 
 1. 连通性检查的性能优化：当前每次 capture 走全链 `rev-list`（O(链上对象总数)）。优化方向：常态走 `--not <parent>` 的增量检查 + 源对象库 mtime 变化时触发全链检查。大仓库上需先实测 capture 耗时；
