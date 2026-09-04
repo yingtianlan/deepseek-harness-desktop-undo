@@ -52,6 +52,7 @@ import {
 } from './ledger'
 
 import { classifyUndo, planDrift } from './planner'
+import { acquireWorkspaceLock } from './workspace-lock'
 
 // ————————————————— redo（与 undo 同等的生产加固：applying operation / 失败明细 / needs-recovery） —————————————————
 
@@ -90,46 +91,53 @@ async function applyRedo(runtime: WorkspaceRuntime, invocation: UndoInvocation, 
 
   runtime.undoing = true
   try {
-    const operationId = randomUUID()
-    const beforeRef = `refs/turnrewind/redo-${operationId}`
-    await captureSnapshot(runtime.store, beforeRef, `turnrewind redo ${turn.turn_id}`, runtime.parentRef)
-    // redo 与 undo 对等：先登记 applying operation，崩溃/账本失败时由
-    // needs-recovery 围栏接管，不再留下无围栏的部分 redo（P0-4）。
-    createOperation(runtime.db, {
-      operationId,
-      kind: 'redo',
-      targetTurnId: turn.turn_id,
-      requestedAt: new Date().toISOString(),
-      beforeRef,
-    })
-    const restoredPaths: string[] = []
-    const failedPaths: { path: string, reason: string }[] = []
-    for (const path of paths) {
-      try {
-        await restorePath(runtime.store, turn.after_ref, path)
-        restoredPaths.push(path)
+    // 与 undo 相同的跨进程互斥（P1-1）；redo 虽被入口冻结，加固路径保持一致。
+    const lock = await acquireWorkspaceLock(runtime.store.rootDir, runtime.workspaceDir, { waitMs: 10000 })
+    try {
+      const operationId = randomUUID()
+      const beforeRef = `refs/turnrewind/redo-${operationId}`
+      await captureSnapshot(runtime.store, beforeRef, `turnrewind redo ${turn.turn_id}`, runtime.parentRef)
+      // redo 与 undo 对等：先登记 applying operation，崩溃/账本失败时由
+      // needs-recovery 围栏接管，不再留下无围栏的部分 redo（P0-4）。
+      createOperation(runtime.db, {
+        operationId,
+        kind: 'redo',
+        targetTurnId: turn.turn_id,
+        requestedAt: new Date().toISOString(),
+        beforeRef,
+      })
+      const restoredPaths: string[] = []
+      const failedPaths: { path: string, reason: string }[] = []
+      for (const path of paths) {
+        try {
+          await restorePath(runtime.store, turn.after_ref, path)
+          restoredPaths.push(path)
+        }
+        catch (error) {
+          // 与 undo 相同的单路径策略：一个文件失败不炸整体，失败明细持久化。
+          failedPaths.push({ path, reason: String((error as Error).message ?? error) })
+        }
       }
-      catch (error) {
-        // 与 undo 相同的单路径策略：一个文件失败不炸整体，失败明细持久化。
-        failedPaths.push({ path, reason: String((error as Error).message ?? error) })
-      }
+      completeRedoTransaction(runtime.db, {
+        noticeId: randomUUID(),
+        sessionId: invocation.agent.session.id,
+        workspaceKey,
+        targetTurnId: turn.turn_id,
+        redoneOperationId: op.operation_id,
+        operationId,
+        restoredPaths,
+        notRestored: failedPaths,
+        createdAt: new Date().toISOString(),
+      })
+      runtime.parentRef = beforeRef
+      let text = `re-applied ${restoredPaths.length} file(s). The next model request will receive a rewind notice.`
+      if (failedPaths.length > 0)
+        text += ` Not restored (${failedPaths.length} file(s)): ${failedPaths.map(failure => `${failure.path} (${failure.reason.includes('TURNREWIND_FILE_TOO_LARGE') ? 'over the size limit' : failure.reason})`).join('; ')}.`
+      return { kind: 'success', text }
     }
-    completeRedoTransaction(runtime.db, {
-      noticeId: randomUUID(),
-      sessionId: invocation.agent.session.id,
-      workspaceKey,
-      targetTurnId: turn.turn_id,
-      redoneOperationId: op.operation_id,
-      operationId,
-      restoredPaths,
-      notRestored: failedPaths,
-      createdAt: new Date().toISOString(),
-    })
-    runtime.parentRef = beforeRef
-    let text = `re-applied ${restoredPaths.length} file(s). The next model request will receive a rewind notice.`
-    if (failedPaths.length > 0)
-      text += ` Not restored (${failedPaths.length} file(s)): ${failedPaths.map(failure => `${failure.path} (${failure.reason.includes('TURNREWIND_FILE_TOO_LARGE') ? 'over the size limit' : failure.reason})`).join('; ')}.`
-    return { kind: 'success', text }
+    finally {
+      lock.release()
+    }
   }
   catch (error) {
     // completeRedoTransaction 已把本次 redo operation 落 needs-recovery，
@@ -399,75 +407,83 @@ export async function executeUndoRestore(
   params: { sessionId: string, workspaceKey: string, target: TurnRow, paths: string[], entries: PlanEntry[], skipConflicts?: boolean },
 ): Promise<string> {
   const { sessionId, workspaceKey, target, paths, entries, skipConflicts } = params
-  const operationId = randomUUID()
-  const beforeRef = `refs/turnrewind/operation-${operationId}`
-  await captureSnapshot(runtime.store, beforeRef, `turnrewind undo ${target.turn_id}`, runtime.parentRef)
-  createOperation(runtime.db, {
-    operationId,
-    kind: 'undo',
-    targetTurnId: target.turn_id,
-    requestedAt: new Date().toISOString(),
-    beforeRef,
-  })
-
+  // 跨进程互斥（P1-1）：operation 快照、文件恢复与账本事务与另一个进程
+  // 对同一 workspace 的 capture/settle/undo 互斥；忙等 10s 后显式报错。
+  const lock = await acquireWorkspaceLock(runtime.store.rootDir, runtime.workspaceDir, { waitMs: 10000 })
   try {
-    const targets = skipConflicts ? entries.filter(entry => !entry.conflict) : entries
-    const restoredPaths: string[] = []
-    const failedPaths: { path: string, reason: string }[] = []
-    for (const entry of targets) {
-      try {
-        await restorePath(runtime.store, target.before_ref!, entry.path)
-        restoredPaths.push(entry.path)
-      }
-      catch (error) {
-        // One unrestorable file (oversized blob, unsupported target) must not
-        // abort the whole undo: the other files still restore, and the failure
-        // is reported per path instead of triggering a full rollback.
-        failedPaths.push({ path: entry.path, reason: String((error as Error).message ?? error) })
-      }
-    }
-    const skippedPaths = skipConflicts
-      ? entries.filter(entry => entry.conflict).map(entry => entry.path)
-      : []
-    // 单事务完成 turn/operation/notice；含 notRestored 明细，部分失败
-    // 持久化进 operation.error 与 notice（P0-5）。状态漂移或事务失败时
-    // operation 落 needs-recovery，由启动围栏拦截（P0-3）。
-    completeUndoTransaction(runtime.db, {
-      noticeId: randomUUID(),
-      sessionId,
-      workspaceKey,
-      targetTurnId: target.turn_id,
-      restoredPaths,
-      notRestored: failedPaths,
+    const operationId = randomUUID()
+    const beforeRef = `refs/turnrewind/operation-${operationId}`
+    await captureSnapshot(runtime.store, beforeRef, `turnrewind undo ${target.turn_id}`, runtime.parentRef)
+    createOperation(runtime.db, {
       operationId,
-      createdAt: new Date().toISOString(),
+      kind: 'undo',
+      targetTurnId: target.turn_id,
+      requestedAt: new Date().toISOString(),
+      beforeRef,
     })
-    runtime.parentRef = beforeRef
-    let text = `Undid turn ${target.turn_id} and restored ${restoredPaths.length} file(s). The next model request will receive a rewind notice.`
-    if (skippedPaths.length > 0)
-      text += ` Skipped ${skippedPaths.length} conflicted file(s): ${skippedPaths.join(', ')}.`
-    if (failedPaths.length > 0)
-      text += ` Not restored (${failedPaths.length} file(s)): ${failedPaths.map(failure => `${failure.path} (${failure.reason.includes('TURNREWIND_FILE_TOO_LARGE') ? 'over the size limit' : failure.reason})`).join('; ')}.`
-    return text
-  }
-  catch (error) {
-    let rollbackError: unknown = null
+
     try {
-      // `beforeRef` is the state immediately before this operation. Restore every
-      // path this operation actually touched - with --skip-conflicts the skipped
-      // conflicted files were never written, so rolling them back here would
-      // overwrite the human edits the user explicitly chose to keep.
-      const rollbackPaths = skipConflicts ? entries.filter(entry => !entry.conflict).map(entry => entry.path) : paths
-      for (const path of rollbackPaths)
-        await restorePath(runtime.store, beforeRef, path)
-      settleOperation(runtime.db, operationId, 'rolled_back', error)
+      const targets = skipConflicts ? entries.filter(entry => !entry.conflict) : entries
+      const restoredPaths: string[] = []
+      const failedPaths: { path: string, reason: string }[] = []
+      for (const entry of targets) {
+        try {
+          await restorePath(runtime.store, target.before_ref!, entry.path)
+          restoredPaths.push(entry.path)
+        }
+        catch (error) {
+          // One unrestorable file (oversized blob, unsupported target) must not
+          // abort the whole undo: the other files still restore, and the failure
+          // is reported per path instead of triggering a full rollback.
+          failedPaths.push({ path: entry.path, reason: String((error as Error).message ?? error) })
+        }
+      }
+      const skippedPaths = skipConflicts
+        ? entries.filter(entry => entry.conflict).map(entry => entry.path)
+        : []
+      // 单事务完成 turn/operation/notice；含 notRestored 明细，部分失败
+      // 持久化进 operation.error 与 notice（P0-5）。状态漂移或事务失败时
+      // operation 落 needs-recovery，由启动围栏拦截（P0-3）。
+      completeUndoTransaction(runtime.db, {
+        noticeId: randomUUID(),
+        sessionId,
+        workspaceKey,
+        targetTurnId: target.turn_id,
+        restoredPaths,
+        notRestored: failedPaths,
+        operationId,
+        createdAt: new Date().toISOString(),
+      })
+      runtime.parentRef = beforeRef
+      let text = `Undid turn ${target.turn_id} and restored ${restoredPaths.length} file(s). The next model request will receive a rewind notice.`
+      if (skippedPaths.length > 0)
+        text += ` Skipped ${skippedPaths.length} conflicted file(s): ${skippedPaths.join(', ')}.`
+      if (failedPaths.length > 0)
+        text += ` Not restored (${failedPaths.length} file(s)): ${failedPaths.map(failure => `${failure.path} (${failure.reason.includes('TURNREWIND_FILE_TOO_LARGE') ? 'over the size limit' : failure.reason})`).join('; ')}.`
+      return text
     }
-    catch (rollbackFailure) {
-      rollbackError = rollbackFailure
+    catch (error) {
+      let rollbackError: unknown = null
+      try {
+        // `beforeRef` is the state immediately before this operation. Restore every
+        // path this operation actually touched - with --skip-conflicts the skipped
+        // conflicted files were never written, so rolling them back here would
+        // overwrite the human edits the user explicitly chose to keep.
+        const rollbackPaths = skipConflicts ? entries.filter(entry => !entry.conflict).map(entry => entry.path) : paths
+        for (const path of rollbackPaths)
+          await restorePath(runtime.store, beforeRef, path)
+        settleOperation(runtime.db, operationId, 'rolled_back', error)
+      }
+      catch (rollbackFailure) {
+        rollbackError = rollbackFailure
+      }
+      if (rollbackError)
+        throw new Error(`Undo and automatic recovery both failed: ${String(error)}; rollback failed: ${String(rollbackError)}`)
+      throw new Error(`Undo failed and the pre-undo file state was restored: ${String(error)}`)
     }
-    if (rollbackError)
-      throw new Error(`Undo and automatic recovery both failed: ${String(error)}; rollback failed: ${String(rollbackError)}`)
-    throw new Error(`Undo failed and the pre-undo file state was restored: ${String(error)}`)
+  }
+  finally {
+    lock.release()
   }
 }
 

@@ -9,6 +9,8 @@ export type HostContext = any
 
 /** 快照仓库句柄：一个 Git worktree 对应一个私有 snapshot repo。 */
 export interface SnapshotStore {
+  /** 数据根目录（$DSH_HOME），workspace 锁文件的定位依赖它。 */
+  rootDir: string
   repoDir: string
   workspaceDir: string
   sourceGitDir: string

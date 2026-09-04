@@ -355,6 +355,7 @@ export function createSnapshotStore(rootDir: string, workspaceDir: string): Snap
   const normalizedWorkspace = source.workspaceDir
   const repoDir = join(rootDir, 'snapshots', `${workspaceHash(normalizedWorkspace)}.git`)
   return {
+    rootDir,
     repoDir,
     workspaceDir: normalizedWorkspace,
     sourceGitDir: source.gitDir,

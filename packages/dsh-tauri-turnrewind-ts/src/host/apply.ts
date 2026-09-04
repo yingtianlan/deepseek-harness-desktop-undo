@@ -50,6 +50,7 @@ import {
 } from './service/ledger'
 import { planDrift } from './service/planner'
 import { applyUndo, buildPlanEntries, executeUndoRestore, turnRefsExist, workspaceForAgent, workspaceHasActiveTurn, workspaceIssue, workspaceKeyFor } from './service/undo'
+import { withWorkspaceLock, WorkspaceLockBusyError } from './service/workspace-lock'
 
 /** 插件名（诊断元数据，与 shared/constants 的 TURNREWIND_PLUGIN_NAME 一致）。 */
 export const name = 'dsh-tauri-turnrewind'
@@ -144,20 +145,24 @@ async function settleActiveTurn(ledger: Ledger, active: Map<string, ActiveEntry>
   if (!current || current.runtime.disposed)
     return
   try {
-    const afterRef = turnSnapshotRef(current.turnId, 'after')
-    await captureSnapshot(current.runtime.store, afterRef, `turnrewind after ${current.turnId}`, current.runtime.parentRef)
-    if (current.runtime.disposed)
-      return
-    const changed = await snapshotDiff(current.runtime.store, current.beforeRef, afterRef)
-    if (current.runtime.disposed)
-      return
-    if (changed.length === 0)
-      settleNoopTurn(ledger, current.turnId, afterRef)
-    else if (reason)
-      settleInterruptedTurn(ledger, current.turnId, afterRef, reason)
-    else
-      settleTurn(ledger, current.turnId, afterRef)
-    current.runtime.parentRef = afterRef
+    // 跨进程互斥（P1-1）：after 快照 + 账本结算与另一个 Host 进程 /
+    // purge 脚本对同一 workspace 的写操作互斥。忙等 5s 后放弃并 failTurn。
+    await withWorkspaceLock(current.runtime.store.rootDir, current.runtime.workspaceDir, async () => {
+      const afterRef = turnSnapshotRef(current.turnId, 'after')
+      await captureSnapshot(current.runtime.store, afterRef, `turnrewind after ${current.turnId}`, current.runtime.parentRef)
+      if (current.runtime.disposed)
+        return
+      const changed = await snapshotDiff(current.runtime.store, current.beforeRef, afterRef)
+      if (current.runtime.disposed)
+        return
+      if (changed.length === 0)
+        settleNoopTurn(ledger, current.turnId, afterRef)
+      else if (reason)
+        settleInterruptedTurn(ledger, current.turnId, afterRef, reason)
+      else
+        settleTurn(ledger, current.turnId, afterRef)
+      current.runtime.parentRef = afterRef
+    }, { waitMs: 5000 })
   }
   catch (error) {
     if (!current.runtime.disposed)
@@ -367,24 +372,34 @@ export function apply(ctx: HostApplyContext): void {
           settleDeferred(baseline, { ok: false, reason: 'turnrewind plugin disposed during baseline capture' })
           return
         }
-        await captureSnapshot(runtime.store, beforeRef, `turnrewind before ${key}`, runtime.parentRef)
+        // 跨进程互斥（P1-1）：before 快照 + turn 入账与另一个进程对同一
+        // workspace 的写操作互斥；忙等 5s 后按显式 skip 释放 barrier。
+        await withWorkspaceLock(dataRoot, runtime.workspaceDir, async () => {
+          if (disposed || runtime.disposed)
+            return
+          await captureSnapshot(runtime.store, beforeRef, `turnrewind before ${key}`, runtime.parentRef)
+          if (disposed || runtime.disposed)
+            return
+          insertTurn(ledger, {
+            turnId: key,
+            sessionId,
+            workspaceKey: runtime.workspaceKey,
+            startedAt,
+            beforeRef,
+          })
+          entry.baselineReady = true
+        }, { waitMs: 5000 })
         if (disposed || runtime.disposed) {
           settleDeferred(baseline, { ok: false, reason: 'turnrewind plugin disposed during baseline capture' })
           return
         }
-        insertTurn(ledger, {
-          turnId: key,
-          sessionId,
-          workspaceKey: runtime.workspaceKey,
-          startedAt,
-          beforeRef,
-        })
-        entry.baselineReady = true
         settleDeferred(baseline, { ok: true })
       }
       catch (error) {
         active.delete(key)
-        const reason = `TURNREWIND_CAPTURE_FAILED: ${String(error)}`
+        const reason = error instanceof WorkspaceLockBusyError
+          ? error.message
+          : `TURNREWIND_CAPTURE_FAILED: ${String(error)}`
         // Transient capture failure (disk full, permissions): record the skip
         // before releasing the barrier, so the turn is explicitly untracked.
         if (!disposed && !runtime.disposed)
@@ -456,14 +471,24 @@ export function apply(ctx: HostApplyContext): void {
           const conflicts = entries.filter(entry => entry.conflict)
           if (conflicts.length > 0)
             return [409, { error: `the workspace changed since the preview (${conflicts.length} conflicted file(s)) — run /undo again to refresh the plan` }]
-          const message = await executeUndoRestore(planRuntime, {
-            sessionId,
-            workspaceKey: row.workspace_key,
-            target,
-            paths,
-            entries,
-            skipConflicts: false,
-          })
+          let message: string
+          try {
+            message = await executeUndoRestore(planRuntime, {
+              sessionId,
+              workspaceKey: row.workspace_key,
+              target,
+              paths,
+              entries,
+              skipConflicts: false,
+            })
+          }
+          catch (error) {
+            // 另一个进程正持有该 workspace 的锁（P1-1）：计划仍未消费，
+            // 以 409 告知客户端稍后重试。
+            if (error instanceof WorkspaceLockBusyError)
+              return [409, { error: `${(error as Error).message} — retry shortly` }]
+            throw error
+          }
           markPendingPlanApplied(ledger, planId, sessionId, message)
           committed = true
           return [200, { ok: true, message }]
