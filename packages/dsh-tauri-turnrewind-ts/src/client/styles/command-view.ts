@@ -98,11 +98,11 @@ export function mountCommandViewStyles(): () => void {
     cssr.c(`.${P}-card-hint-ok`, {
       color: 'var(--dsw-alias-state-success-primary, #3fb950)',
     }),
-    // 展开态容器：diff 面板
+    // 展开态容器：diff 面板（圆角对齐 DSH 原生嵌入卡片档位：.dpte-card 10px）
     cssr.c(`.${P}-panel`, {
       marginTop: 8,
       border: '1px solid var(--dsw-alias-border-l2, #30363d)',
-      borderRadius: 8,
+      borderRadius: 10,
       overflow: 'hidden',
       background: 'var(--dsw-alias-bg-layer-2, #161b22)',
     }),
