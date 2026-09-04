@@ -4,6 +4,10 @@
  * 按 AGENTS.plugins.md 约定：样式对象树由 css-render 生成，style id / class
  * 使用插件前缀；挂载/卸载由 apply() 的 effect 管理；重复挂载时取得既有实例
  * 所有权之外的部分（find 命中即不重复挂载）。
+ *
+ * 命名空间：dialog 节点统一使用 `-dialog-*` 前缀，与 command-view 树的
+ * `-card-*` / `-panel-*` / `-diffline-*` 类零重叠——两棵树同时挂载时
+ * CSS 规则互不污染。
  */
 
 import { CssRender } from 'dsh-tauri/client'
@@ -25,7 +29,7 @@ export function mountDialogStyles(): () => void {
   if (typeof document !== 'undefined' && document.getElementById(styleId) !== null)
     return () => {}
   const style = cssr.c([
-    cssr.c(`.${p}-backdrop`, {
+    cssr.c(`.${p}-dialog-backdrop`, {
       display: 'none',
       position: 'fixed',
       inset: 0,
@@ -34,10 +38,10 @@ export function mountDialogStyles(): () => void {
       justifyContent: 'center',
       background: 'var(--dsw-alias-bg-mask-1, rgba(0, 0, 0, 0.45))',
     }),
-    cssr.c(`.${p}-backdrop[data-visible='true']`, {
+    cssr.c(`.${p}-dialog-backdrop[data-visible='true']`, {
       display: 'flex',
     }),
-    cssr.c(`.${p}-card`, {
+    cssr.c(`.${p}-dialog-card`, {
       maxWidth: '440px',
       width: 'calc(100vw - 48px)',
       boxSizing: 'border-box',
@@ -51,21 +55,21 @@ export function mountDialogStyles(): () => void {
       lineHeight: 1.6,
       boxShadow: '0 20px 50px rgba(0, 0, 0, 0.25)',
     }),
-    cssr.c(`.${p}-card-title`, {
+    cssr.c(`.${p}-dialog-title`, {
       fontSize: '15px',
       fontWeight: '600',
       marginBottom: '10px',
       color: 'var(--dsw-alias-state-error-primary, #d03050)',
     }),
-    cssr.c(`.${p}-card-intro`, {
+    cssr.c(`.${p}-dialog-intro`, {
       color: 'var(--dsw-alias-label-secondary, #333333)',
     }),
-    cssr.c(`.${p}-card-reason-label`, {
+    cssr.c(`.${p}-dialog-reason-label`, {
       marginTop: '12px',
       color: 'var(--dsw-alias-label-tertiary, #8b8b8b)',
       fontSize: '12px',
     }),
-    cssr.c(`.${p}-card-reason`, {
+    cssr.c(`.${p}-dialog-reason`, {
       marginTop: '6px',
       padding: '8px 10px',
       borderRadius: '8px',
@@ -76,11 +80,11 @@ export function mountDialogStyles(): () => void {
       maxHeight: '160px',
       overflowY: 'auto',
     }),
-    cssr.c(`.${p}-card-actions`, {
+    cssr.c(`.${p}-dialog-actions`, {
       marginTop: '16px',
       textAlign: 'right',
     }),
-    cssr.c(`.${p}-card-button`, {
+    cssr.c(`.${p}-dialog-button`, {
       background: 'var(--dsw-alias-button-primary-fill, #4f46e5)',
       color: 'var(--dsw-alias-label-primary-foreground, #ffffff)',
       border: 'none',
@@ -89,7 +93,7 @@ export function mountDialogStyles(): () => void {
       fontSize: '13px',
       cursor: 'pointer',
     }),
-    cssr.c(`.${p}-card-button:hover`, {
+    cssr.c(`.${p}-dialog-button:hover`, {
       background: 'var(--dsw-alias-button-primary-hover, #4338ca)',
     }),
   ])

@@ -57,31 +57,31 @@ function ensureDialog(): DialogElements {
     return dialog
   const backdrop = document.createElement('div')
   backdrop.setAttribute('role', 'presentation')
-  backdrop.className = `${TURNREWIND_CLASS_PREFIX}-backdrop`
+  backdrop.className = `${TURNREWIND_CLASS_PREFIX}-dialog-backdrop`
   backdrop.dataset.visible = 'false'
 
   const card = document.createElement('div')
   card.setAttribute('role', 'dialog')
   card.setAttribute('aria-modal', 'true')
-  card.className = `${TURNREWIND_CLASS_PREFIX}-card`
+  card.className = `${TURNREWIND_CLASS_PREFIX}-dialog-card`
 
   const title = document.createElement('div')
-  title.className = `${TURNREWIND_CLASS_PREFIX}-card-title`
+  title.className = `${TURNREWIND_CLASS_PREFIX}-dialog-title`
 
   const intro = document.createElement('div')
-  intro.className = `${TURNREWIND_CLASS_PREFIX}-card-intro`
+  intro.className = `${TURNREWIND_CLASS_PREFIX}-dialog-intro`
 
   const reasonLabel = document.createElement('div')
-  reasonLabel.className = `${TURNREWIND_CLASS_PREFIX}-card-reason-label`
+  reasonLabel.className = `${TURNREWIND_CLASS_PREFIX}-dialog-reason-label`
 
   const reasonBox = document.createElement('div')
-  reasonBox.className = `${TURNREWIND_CLASS_PREFIX}-card-reason`
+  reasonBox.className = `${TURNREWIND_CLASS_PREFIX}-dialog-reason`
 
   const actions = document.createElement('div')
-  actions.className = `${TURNREWIND_CLASS_PREFIX}-card-actions`
+  actions.className = `${TURNREWIND_CLASS_PREFIX}-dialog-actions`
   const button = document.createElement('button')
   button.type = 'button'
-  button.className = `${TURNREWIND_CLASS_PREFIX}-card-button`
+  button.className = `${TURNREWIND_CLASS_PREFIX}-dialog-button`
   actions.appendChild(button)
 
   card.append(title, intro, reasonLabel, reasonBox, actions)
