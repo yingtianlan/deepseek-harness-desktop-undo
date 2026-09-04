@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'pathe'
 import { it } from 'vitest'
 import { captureSnapshot, classifyPathChange, createSnapshotStore, currentState, diffAgainstDisk, gitAvailable, probeWorkspace, restorePath, snapshotDiff, snapshotFileDiff, stateAt } from '../src/host/service/git-snapshot'
-import { completeUndoWithNotice, getLatestTurn, insertTurn, openLedger, settleInterruptedTurn, settleTurn } from '../src/host/service/ledger'
+import { completeUndoTransaction, createOperation, getLatestTurn, insertTurn, openLedger, settleInterruptedTurn, settleTurn } from '../src/host/service/ledger'
 import { initGitWorkspace } from './git-test-utils.js'
 
 it('captures and restores modified, added, and deleted files', async () => {
@@ -73,12 +73,15 @@ it('allows sequential undo of an interrupted turn after a later turn', async () 
     settleTurn(db, 'session:B', 'refs/turnrewind/b-after')
 
     for (const file of await snapshotDiff(store, beforeB.commit, afterB.commit)) await restorePath(store, beforeB.commit, file)
-    completeUndoWithNotice(db, 'session:B', {
+    createOperation(db, { operationId: 'op-b', kind: 'undo', targetTurnId: 'session:B', requestedAt: '2026-01-01T00:01:30.000Z' })
+    completeUndoTransaction(db, {
       noticeId: 'notice-b',
       sessionId: 'session',
       workspaceKey: workspace.toLowerCase(),
       targetTurnId: 'session:B',
-      paths: filesB,
+      restoredPaths: filesB,
+      notRestored: [],
+      operationId: 'op-b',
       createdAt: '2026-01-01T00:02:00.000Z',
     })
     assert.equal(getLatestTurn(db, 'session', workspace.toLowerCase()).turn_id, 'session:A')

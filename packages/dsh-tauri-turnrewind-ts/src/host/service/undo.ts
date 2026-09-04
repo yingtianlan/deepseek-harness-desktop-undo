@@ -37,7 +37,7 @@ import { isSystemSensitiveWorkspace } from './guard'
 import {
   claimPendingPlan,
   completeRedoWithNotice,
-  completeUndoWithNotice,
+  completeUndoTransaction,
   createOperation,
   createPendingPlan,
   getLatestAppliedUndo,
@@ -383,7 +383,7 @@ export async function executeUndoRestore(
   try {
     const targets = skipConflicts ? entries.filter(entry => !entry.conflict) : entries
     const restoredPaths: string[] = []
-    const failedPaths: { path: string, error: string }[] = []
+    const failedPaths: { path: string, reason: string }[] = []
     for (const entry of targets) {
       try {
         await restorePath(runtime.store, target.before_ref!, entry.path)
@@ -393,27 +393,31 @@ export async function executeUndoRestore(
         // One unrestorable file (oversized blob, unsupported target) must not
         // abort the whole undo: the other files still restore, and the failure
         // is reported per path instead of triggering a full rollback.
-        failedPaths.push({ path: entry.path, error: String((error as Error).message ?? error) })
+        failedPaths.push({ path: entry.path, reason: String((error as Error).message ?? error) })
       }
     }
     const skippedPaths = skipConflicts
       ? entries.filter(entry => entry.conflict).map(entry => entry.path)
       : []
-    completeUndoWithNotice(runtime.db, target.turn_id, {
+    // 单事务完成 turn/operation/notice；含 notRestored 明细，部分失败
+    // 持久化进 operation.error 与 notice（P0-5）。状态漂移或事务失败时
+    // operation 落 needs-recovery，由启动围栏拦截（P0-3）。
+    completeUndoTransaction(runtime.db, {
       noticeId: randomUUID(),
       sessionId,
       workspaceKey,
       targetTurnId: target.turn_id,
-      paths: restoredPaths,
+      restoredPaths,
+      notRestored: failedPaths,
+      operationId,
       createdAt: new Date().toISOString(),
     })
-    settleOperation(runtime.db, operationId, 'applied')
     runtime.parentRef = beforeRef
     let text = `Undid turn ${target.turn_id} and restored ${restoredPaths.length} file(s). The next model request will receive a rewind notice.`
     if (skippedPaths.length > 0)
       text += ` Skipped ${skippedPaths.length} conflicted file(s): ${skippedPaths.join(', ')}.`
     if (failedPaths.length > 0)
-      text += ` Not restored (${failedPaths.length} file(s)): ${failedPaths.map(failure => `${failure.path} (${failure.error.includes('TURNREWIND_FILE_TOO_LARGE') ? 'over the size limit' : failure.error})`).join('; ')}.`
+      text += ` Not restored (${failedPaths.length} file(s)): ${failedPaths.map(failure => `${failure.path} (${failure.reason.includes('TURNREWIND_FILE_TOO_LARGE') ? 'over the size limit' : failure.reason})`).join('; ')}.`
     return text
   }
   catch (error) {
