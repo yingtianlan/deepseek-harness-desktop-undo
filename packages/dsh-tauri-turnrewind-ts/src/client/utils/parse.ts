@@ -33,7 +33,11 @@ export function parseUndoOutput(raw: string | undefined): ParsedUndoOutput {
     // branch (which would misclassify them as conflicts).
     const listed = /^ {2,}(modified|created|deleted) (.*\S)\s*$/.exec(line)
     if (listed && !inDiffs) {
-      let path = listed[2]!
+      // Host aligns `change.padEnd(8)`: `created`/`deleted` therefore leave
+      // extra separator spaces before the path. Trim only the formatting
+      // prefix so `my notes.txt` matches its diff separator instead of
+      // falling into the synthetic conflict fallback.
+      let path = listed[2]!.trimStart()
       let conflict = false
       if (/\s{2,}\[conflict\]$/.test(path)) {
         conflict = true
