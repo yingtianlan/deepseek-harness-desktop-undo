@@ -39,12 +39,17 @@ export function parseUndoOutput(raw: string | undefined): ParsedUndoOutput {
       // falling into the synthetic conflict fallback.
       let path = listed[2]!.trimStart()
       let conflict = false
-      if (/\s{2,}\[conflict\]$/.test(path)) {
+      // padEnd makes `created`/`deleted` rows carry two spaces before a flag
+      // while `modified` rows carry one — accept any run of whitespace so the
+      // flag strips reliably for every change kind.
+      if (/\s+\[conflict\]$/.test(path)) {
         conflict = true
-        path = path.replace(/\s{2,}\[conflict\]$/, '')
+        path = path.replace(/\s+\[conflict\]$/, '')
       }
-      if (/\s{2,}\[too large\]$/.test(path))
-        path = path.replace(/\s{2,}\[too large\]$/, '')
+      if (/\s+\[too large\]$/.test(path))
+        path = path.replace(/\s+\[too large\]$/, '')
+      if (/\s+\[unsupported\]$/.test(path))
+        path = path.replace(/\s+\[unsupported\]$/, '')
       result.files.push({ path, change: listed[1] as ParsedUndoFile['change'], additions: 0, deletions: 0, diff: [], conflict })
       continue
     }

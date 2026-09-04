@@ -1,11 +1,46 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'pathe'
 import { it } from 'vitest'
 import { captureSnapshot, classifyPathChange, createSnapshotStore, currentState, diffAgainstDisk, gitAvailable, probeWorkspace, restorePath, snapshotDiff, snapshotFileDiff, stateAt } from '../src/host/service/git-snapshot'
 import { completeUndoTransaction, createOperation, getLatestTurn, insertTurn, openLedger, settleInterruptedTurn, settleTurn } from '../src/host/service/ledger'
 import { initGitWorkspace } from './git-test-utils.js'
+
+it('reports snapshot symlinks as unsupported and refuses to restore them', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'turnrewind-symlink-snap-'))
+  const workspace = join(root, 'workspace')
+  try {
+    await initGitWorkspace(workspace)
+    await writeFile(join(workspace, 'target.txt'), 'target\n')
+    try {
+      await symlink(join(workspace, 'target.txt'), join(workspace, 'link'))
+    }
+    catch (error) {
+      if (error.code === 'EPERM' || error.code === 'EACCES')
+        return
+      throw error
+    }
+    const store = createSnapshotStore(join(root, 'data'), workspace)
+    const snapshot = await captureSnapshot(store, 'refs/turnrewind/symlink-snap', 'snap')
+
+    // The snapshot entry has git mode 120000: stateAt reports unsupported
+    // instead of masquerading the link target text as file content (P1-3).
+    assert.equal((await stateAt(store, snapshot.commit, 'link')).kind, 'unsupported')
+
+    // Restore refuses even when the disk link is gone — the blob is only the
+    // link target text and must never be written as a regular file.
+    await rm(join(workspace, 'link'))
+    await assert.rejects(
+      () => restorePath(store, snapshot.commit, 'link'),
+      /TURNREWIND_UNSUPPORTED_TARGET.*symlink/u,
+    )
+    assert.equal(await readFile(join(workspace, 'target.txt'), 'utf8'), 'target\n')
+  }
+  finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
 
 it('captures and restores modified, added, and deleted files', async () => {
   const root = await mkdtemp(join(tmpdir(), 'turnrewind-test-'))

@@ -348,7 +348,7 @@ pnpm --filter dsh-tauri-turnrewind typecheck
 pnpm --filter dsh-tauri-turnrewind test
 ```
 
-当前 17 个测试文件、82 个测试，覆盖：Git 快照（增删改恢复、中文路径、CRLF、路径逃逸、符号链接、ignore 委托、alternates 复用与自愈）、原子 bak-swap 恢复与崩溃清扫、Git 状态零污染（HEAD/branch/index/status/refs/stash 不变）、linked worktree 隔离、oversized blob 单文件报告、账本生命周期、pending plan 原子 claim、interrupted turn、barrier 时序、undo/redo 往返、client 纯函数（输出解析/plan 状态判定/会话归属）。
+当前 18 个测试文件、97 个测试，覆盖：Git 快照（增删改恢复、中文路径、CRLF、路径逃逸、symlink 路径拒绝与快照 symlink 策略、ignore 委托、alternates 复用与自愈）、原子 bak-swap 恢复与崩溃清扫、Git 状态零污染（HEAD/branch/index/status/refs/stash 不变）、linked worktree 隔离、oversized blob 单文件报告、账本生命周期（含 needs-recovery 围栏）、pending plan 原子 claim 与预览绑定漂移校验、interrupted turn、barrier 时序、跨进程 workspace 锁、undo 入口与 redo 冻结、client 纯函数（输出解析/plan 状态判定/会话归属）。
 
 ## 当前限制
 
@@ -357,8 +357,13 @@ pnpm --filter dsh-tauri-turnrewind test
 - 接入受控的宿主 sandbox/Tauri bridge；
 - 完成真实 DSH lifecycle integration tests；
 - 快照容量治理：按 turn 数/容量/保留期清理旧 snapshot ref（当前只做断链自愈，不清理历史）；
-- 完善多 workspace 并发锁；
 - 实现父对话递归 undo；
 - 实现消息旁 Undo 按钮；
-- 明确二进制、重命名、权限位和特殊文件策略；
+- 明确二进制、重命名、权限位等策略（symlink 已定义：捕获进快照但 undo 标注 `[unsupported]` 并跳过，见下文「符号链接策略」）；
 - 重新开放 redo：移除解析层禁用分支、恢复端到端 redo 测试（底层加固已完成，见「已禁用：redo」）。
+
+### 符号链接策略（P1-3）
+
+- 工作区内指向外部的 symlink 路径：从不遍历、从不写入（`TURNREWIND_SYMLINK_UNSUPPORTED`）；
+- 快照中记录的 symlink 条目（git mode `120000`）：`stateAt` 报告为 `unsupported`，预览卡与 dry-run 标注 `[unsupported]` 并单独列出；undo 执行时跳过该路径并计入「未恢复」清单，绝不把 link target 文本伪装成普通文件写回；`restorePath` 内有同规则双保险；
+- turn 把 symlink 替换为普通文件（或反向）时，类型变化按 modified 处理；含 symlink 的 undo 结果中该文件始终出现在「未恢复」明细与 notice 里，需要用户手工重建。

@@ -23,6 +23,9 @@ export const SYNC_GIT_TIMEOUT_MS = 15 * 1000
 /** 快照 refs 允许的前缀（拒绝其他 refs 命名空间与路径穿越）。 */
 export const SNAPSHOT_REF_PREFIX = 'refs/turnrewind/'
 
+/** Git symlink 条目的 mode 值（P1-3：stateAt/restore 据此拒绝，而非伪装成文件）。 */
+export const GIT_SYMLINK_MODE = '120000'
+
 /** 原子替换的 bak 后缀。 */
 export const BAK_SUFFIX = '.turnrewind-restore.bak'
 

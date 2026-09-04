@@ -42,6 +42,7 @@ import {
   GIT_PROBE_RETRY_MS,
   GIT_PROBE_TIMEOUT_MS,
   GIT_SUBPROCESS_TIMEOUT_MS,
+  GIT_SYMLINK_MODE,
   MAX_FILE_BYTES,
   MAX_OUTPUT_BYTES,
   SNAPSHOT_PATHSPECS,
@@ -476,9 +477,9 @@ function truncateDiff(text: string, maxLines: number = DEFAULT_MAX_DIFF_LINES): 
 export async function classifyPathChange(store: SnapshotStore, beforeCommit: string, afterCommit: string, path: string): Promise<PathChange> {
   const before = await stateAt(store, beforeCommit, path)
   const after = await stateAt(store, afterCommit, path)
-  if (before.kind === 'absent' && after.kind === 'file')
+  if (before.kind === 'absent' && (after.kind === 'file' || after.kind === 'unsupported'))
     return 'created'
-  if ((before.kind === 'file' || before.kind === 'tooLarge') && after.kind === 'absent')
+  if ((before.kind === 'file' || before.kind === 'tooLarge' || before.kind === 'unsupported') && after.kind === 'absent')
     return 'deleted'
   return 'modified'
 }
@@ -563,6 +564,23 @@ async function commitEntrySize(store: SnapshotStore, commit: string, path: strin
   return undefined
 }
 
+/**
+ * Git mode of one committed path ('100644' regular, '100755' executable,
+ * '120000' symlink, '160000' submodule), or undefined when absent.
+ * P1-3: symlinks are identified here so stateAt/restore can refuse them
+ * instead of silently writing the link target as file content.
+ */
+async function commitEntryMode(store: SnapshotStore, commit: string, path: string): Promise<string | undefined> {
+  const output = await runGit(store.repoDir, store.workspaceDir, ['ls-tree', '-r', '-z', commit, '--', path])
+  for (const line of output.toString('utf8').split('\0')) {
+    // mode SP type SP oid TAB path
+    const tab = line.lastIndexOf('\t')
+    if (tab !== -1 && line.slice(tab + 1) === path)
+      return line.slice(0, tab).split(' ')[0]
+  }
+  return undefined
+}
+
 async function commitBytes(store: SnapshotStore, commit: string, path: string): Promise<Buffer> {
   const output = await runGit(store.repoDir, store.workspaceDir, ['show', `${commit}:${path}`], {}, MAX_FILE_BYTES + 1)
   if (output.length > MAX_FILE_BYTES)
@@ -584,7 +602,12 @@ function digest(bytes: Buffer): string {
 
 export async function stateAt(store: SnapshotStore, commit: string, path: string): Promise<PathState> {
   // stateAt only inspects the private snapshot repo (commit:path revisions),
-  // never the filesystem, so a symlinked or odd path simply reads as absent.
+  // never the filesystem.
+  // P1-3: a symlink entry ('120000') must not masquerade as a regular file —
+  // its blob is just the link target text. Report it as unsupported so the
+  // plan flags it and restore refuses, instead of writing wrong content.
+  if ((await commitEntryMode(store, commit, path)) === GIT_SYMLINK_MODE)
+    return { kind: 'unsupported', digest: null }
   if (!await commitEntry(store, commit, path))
     return { kind: 'absent', digest: null }
   // Oversized blobs are reported instead of thrown: the caller can mark the
@@ -665,6 +688,12 @@ export async function restorePath(store: SnapshotStore, commit: string, path: st
     }
     return { path, result: 'removed' }
   }
+
+  // P1-3: a symlink entry must never be "restored" by writing the link target
+  // text as a regular file. Fail this one path with a stable code so the undo
+  // loop reports it as not restored instead of corrupting the workspace type.
+  if ((await commitEntryMode(store, commit, path)) === GIT_SYMLINK_MODE)
+    throw new Error(`TURNREWIND_UNSUPPORTED_TARGET: ${path} is a symlink in the snapshot; undo cannot restore symlinks (recreate the link manually if intended)`)
 
   // Restoring an oversized blob would require materializing it through the
   // same output-limited channel. Fail this one path with a stable code so the

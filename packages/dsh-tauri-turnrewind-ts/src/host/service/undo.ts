@@ -286,6 +286,7 @@ export async function buildPlanEntries(runtime: WorkspaceRuntime, workspaceDir: 
       change: await classifyPathChange(runtime.store, target.before_ref!, target.after_ref!, path),
       conflict: !await diskMatchesSnapshot(runtime, workspaceDir, target.after_ref!, path),
       tooLarge: beforeState.kind === 'tooLarge',
+      unsupported: beforeState.kind === 'unsupported',
     }
   }))
 }
@@ -305,17 +306,25 @@ export interface PlanFormatOptions {
 export async function formatPlan(runtime: WorkspaceRuntime, target: TurnRow, entries: PlanEntry[], options: PlanFormatOptions): Promise<string> {
   const conflicts = entries.filter(entry => entry.conflict)
   const oversized = entries.filter(entry => entry.tooLarge)
+  const unsupported = entries.filter(entry => entry.unsupported)
   const lines: string[] = []
   lines.push(`${options.preview ? 'Undo preview' : options.dryRun ? 'Undo plan' : 'Undo preflight'}: turn ${target.turn_id}; ${entries.length} file(s) (${summarizeChanges(entries)}); ${conflicts.length} conflict(s).`)
   for (const entry of entries) {
     const flag = entry.conflict ? ' [conflict]' : ''
     const sizeFlag = entry.tooLarge ? ' [too large]' : ''
-    lines.push(`  ${entry.change.padEnd(8)} ${entry.path}${flag}${sizeFlag}`)
+    const unsupportedFlag = entry.unsupported ? ' [unsupported]' : ''
+    lines.push(`  ${entry.change.padEnd(8)} ${entry.path}${flag}${sizeFlag}${unsupportedFlag}`)
   }
   if (oversized.length > 0) {
     lines.push('')
     lines.push(`Oversized files (over the ${MAX_FILE_BYTES / (1024 * 1024)} MB restore limit) cannot be restored by this undo; they will be reported as not restored:`)
     for (const entry of oversized)
+      lines.push(`  ${entry.path}`)
+  }
+  if (unsupported.length > 0) {
+    lines.push('')
+    lines.push('Unrestorable entries (symlinks and other unsupported types in the before snapshot) will be reported as not restored; recreate them manually if intended:')
+    for (const entry of unsupported)
       lines.push(`  ${entry.path}`)
   }
   if (options.preview || options.withDiffs) {
@@ -427,6 +436,12 @@ export async function executeUndoRestore(
       const restoredPaths: string[] = []
       const failedPaths: { path: string, reason: string }[] = []
       for (const entry of targets) {
+        // P1-3: symlink/其他不可恢复类型的快照条目直接跳过并上报，
+        // 不再伪装成普通文件写回（restorePath 内还有同规则的双保险）。
+        if (entry.unsupported) {
+          failedPaths.push({ path: entry.path, reason: 'TURNREWIND_UNSUPPORTED_TARGET: snapshot entry is a symlink or otherwise unrestorable' })
+          continue
+        }
         try {
           await restorePath(runtime.store, target.before_ref!, entry.path)
           restoredPaths.push(entry.path)

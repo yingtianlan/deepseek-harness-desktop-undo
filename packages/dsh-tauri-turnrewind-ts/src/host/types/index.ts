@@ -72,6 +72,8 @@ export interface PlanEntry {
   conflict: boolean
   /** before 快照超限：恢复会失败并计入未恢复清单。 */
   tooLarge: boolean
+  /** before 快照中的条目不可恢复（symlink 等）：恢复会跳过并计入未恢复清单。 */
+  unsupported: boolean
 }
 
 /** /undo 命令解析结果（confirm/cancel 为标志；plan id 或 turn id 落在 turnId）。 */

@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readdir, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'pathe'
+import { join, resolve } from 'pathe'
 import { it } from 'vitest'
 import { captureSnapshot, createSnapshotStore, currentState, restorePath, stateAt } from '../src/host/service/git-snapshot'
+import { insertTurn, openLedger, settleTurn } from '../src/host/service/ledger'
+import { applyUndo } from '../src/index'
 import { initGitWorkspace } from './git-test-utils.js'
 
 it('delegates secret-file exclusion to the source repository ignore rules', async () => {
@@ -152,5 +154,71 @@ it('refuses symlinked workspace paths during inspection and restore', async () =
   }
   finally {
     await rm(root, { recursive: true, force: true })
+  }
+})
+
+it('keeps snapshot symlinks unrestorable and reported by undo', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'turnrewind-symlink-undo-'))
+  const workspace = join(root, 'workspace')
+  try {
+    await initGitWorkspace(workspace)
+    await writeFile(join(workspace, 'keep.txt'), 'before\n')
+    await writeFile(join(workspace, 'original.txt'), 'original\n')
+    try {
+      await symlink('original.txt', join(workspace, 'link'))
+    }
+    catch (error) {
+      if (error.code === 'EPERM' || error.code === 'EACCES')
+        return
+      throw error
+    }
+    const db = openLedger(join(root, 'ledger'))
+    const store = createSnapshotStore(join(root, 'data'), workspace)
+    await captureSnapshot(store, 'refs/turnrewind/sl-before', 'before')
+
+    // The turn: replace the symlink with a regular file and edit keep.txt.
+    await rm(join(workspace, 'link'))
+    await writeFile(join(workspace, 'link'), 'now-a-file\n')
+    await writeFile(join(workspace, 'keep.txt'), 'after\n')
+    await captureSnapshot(store, 'refs/turnrewind/sl-after', 'after', 'refs/turnrewind/sl-before')
+    insertTurn(db, {
+      turnId: 'session:1',
+      sessionId: 'session',
+      workspaceKey: resolve(workspace).toLowerCase(),
+      startedAt: '2026-01-01T00:00:00.000Z',
+      beforeRef: 'refs/turnrewind/sl-before',
+    })
+    settleTurn(db, 'session:1', 'refs/turnrewind/sl-after')
+
+    const runtime = {
+      db,
+      store,
+      workspaceKey: resolve(workspace).toLowerCase(),
+      parentRef: 'refs/turnrewind/sl-after',
+      undoing: false,
+    }
+    const invocation = (rawInput = '') => ({
+      rawInput,
+      agent: { session: { id: 'session', header: { cwd: workspace } } },
+    })
+
+    // The preview flags the symlink entry as unsupported (P1-3).
+    const preview = await applyUndo(runtime, new Map(), invocation())
+    assert.equal(preview.kind, 'success')
+    assert.match(preview.text, /link \[unsupported\]/u)
+    assert.match(preview.text, /Unrestorable entries/u)
+
+    // Confirm: keep.txt restores normally; the link is reported as not
+    // restored and stays a regular file instead of receiving target text.
+    const planId = /plan ([0-9a-f-]+)/u.exec(preview.text)?.[1]
+    const confirmed = await applyUndo(runtime, new Map(), invocation(`--confirm ${planId}`))
+    assert.equal(confirmed.kind, 'success')
+    assert.match(confirmed.text, /Not restored \(1 file\(s\)\): link/u)
+    assert.equal(await readFile(join(workspace, 'link'), 'utf8'), 'now-a-file\n')
+    assert.equal(await readFile(join(workspace, 'keep.txt'), 'utf8'), 'before\n')
+    db.close()
+  }
+  finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 })
   }
 })

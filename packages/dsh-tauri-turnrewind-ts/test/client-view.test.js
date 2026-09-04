@@ -55,6 +55,18 @@ it('resolveOwnerSessionId never guesses from missing or invalid ids', () => {
   assert.equal(client.resolveOwnerSessionId({ sessionId: 'session-a', node: { sessionId: '' } }), 'session-a')
 })
 
+it('parseUndoOutput strips the unsupported flag from unrestorable entries', () => {
+  const parsed = client.parseUndoOutput([
+    'Undo preflight: turn s:1; 2 file(s) (modified 2, created 0, deleted 0); 0 conflict(s).',
+    '  modified link [unsupported]',
+    '  modified keep.txt',
+  ].join('\n'))
+  assert.deepEqual(
+    parsed.files.map(file => [file.path, file.conflict]),
+    [['link', false], ['keep.txt', false]],
+  )
+})
+
 it('parseUndoOutput still extracts the pending plan id', () => {
   const parsed = client.parseUndoOutput([
     'Undo preflight: turn s:1; 1 file(s); 0 conflicts.',
