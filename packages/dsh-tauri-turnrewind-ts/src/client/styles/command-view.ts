@@ -13,27 +13,28 @@ let cardCssr: ReturnType<typeof CssRender> | undefined
 
 const P = TURNREWIND_CLASS_PREFIX
 
-/** 挂载 undo 卡片样式，返回 disposer。 */
-export function mountCommandViewStyles(): () => void {
-  const cssr = cardCssr ??= CssRender()
-  const styleId = `${TURNREWIND_STYLE_ID}-command-view`
-  if (typeof document !== 'undefined' && document.getElementById(styleId) !== null)
-    return () => {}
-
-  const style = cardCssr.c([
+/**
+ * 构建 undo 卡片样式节点。独立导出供测试渲染断言：css-render 不会给数字
+ * 自动补 px，这里所有尺寸必须是带单位字符串（曾因裸数字导致 gap /
+ * border-radius / font-size 全部失效）。
+ */
+export function buildCommandViewStyleNodes(cssr: ReturnType<typeof CssRender>) {
+  return cssr.c([
     // 折叠态：无边框原生风格行
+    // 注意：css-render 不会给数字自动补 px，所有尺寸必须写成带单位字符串，
+    // 否则生成非法声明被浏览器丢弃（gap/border-radius/font-size 曾因此全部失效）。
     cssr.c(`.${P}-card`, {
       display: 'flex',
       alignItems: 'center',
-      gap: 6,
+      gap: '6px',
       padding: '2px 12px 2px 4px',
       margin: '2px 0 2px 4px',
-      fontSize: 13,
+      fontSize: '13px',
     }),
     cssr.c(`.${P}-card-header`, {
       display: 'flex',
       alignItems: 'center',
-      gap: 8,
+      gap: '8px',
       width: '100%',
       textAlign: 'left',
       background: 'transparent',
@@ -41,7 +42,7 @@ export function mountCommandViewStyles(): () => void {
       cursor: 'pointer',
       padding: '8px 12px',
       color: 'var(--dsw-alias-label-primary, #cccccc)',
-      fontSize: 13,
+      fontSize: '13px',
     }),
     cssr.c(`.${P}-card-caret`, {
       transform: 'rotate(0deg)',
@@ -100,22 +101,22 @@ export function mountCommandViewStyles(): () => void {
     }),
     // 展开态容器：diff 面板（圆角对齐 DSH 原生嵌入卡片档位：.dpte-card 10px）
     cssr.c(`.${P}-panel`, {
-      marginTop: 8,
+      marginTop: '8px',
       border: '1px solid var(--dsw-alias-border-l2, #30363d)',
-      borderRadius: 10,
+      borderRadius: '10px',
       overflow: 'hidden',
       background: 'var(--dsw-alias-bg-layer-2, #161b22)',
     }),
     cssr.c(`.${P}-panel-file`, {
       display: 'flex',
-      gap: 8,
+      gap: '8px',
       padding: '2px 0',
       fontFamily: 'var(--ds-font-family-code, monospace)',
-      fontSize: 12,
+      fontSize: '12px',
     }),
     cssr.c(`.${P}-panel-file-change`, {
       color: 'var(--dsw-alias-label-tertiary, #8b8b8b)',
-      width: 64,
+      width: '64px',
       flex: 'none',
     }),
     cssr.c(`.${P}-panel-file-path`, {
@@ -125,7 +126,7 @@ export function mountCommandViewStyles(): () => void {
       whiteSpace: 'nowrap',
     }),
     cssr.c(`.${P}-panel-diff`, {
-      maxHeight: 260,
+      maxHeight: '260px',
       overflowY: 'auto',
       padding: '3px 0',
       borderTop: '1px solid var(--dsw-alias-border-l2, #30363d)',
@@ -136,10 +137,10 @@ export function mountCommandViewStyles(): () => void {
     // 数字徽标
     cssr.c(`.${P}-numbadge`, {
       display: 'inline-flex',
-      gap: 6,
+      gap: '6px',
       flex: 'none',
       fontFamily: 'var(--ds-font-family-code, monospace)',
-      fontSize: 11,
+      fontSize: '11px',
     }),
     cssr.c(`.${P}-numbadge-add`, {
       color: 'var(--dsw-alias-state-success-primary, #3fb950)',
@@ -151,12 +152,12 @@ export function mountCommandViewStyles(): () => void {
     cssr.c(`.${P}-diffline`, {
       display: 'flex',
       fontFamily: 'var(--ds-font-family-code, monospace)',
-      fontSize: 12,
+      fontSize: '12px',
       lineHeight: 1.5,
       whiteSpace: 'pre-wrap',
     }),
     cssr.c(`.${P}-diffline-sign`, {
-      width: 14,
+      width: '14px',
       flex: 'none',
       textAlign: 'center',
     }),
@@ -184,7 +185,7 @@ export function mountCommandViewStyles(): () => void {
     cssr.c(`.${P}-card-actions`, {
       display: 'flex',
       alignItems: 'center',
-      gap: 8,
+      gap: '8px',
       padding: '6px 12px 10px',
       borderTop: '1px solid var(--dsw-alias-border-l2, #30363d)',
     }),
@@ -192,26 +193,36 @@ export function mountCommandViewStyles(): () => void {
       background: 'var(--dsw-alias-button-primary-fill, #2ea043)',
       color: 'var(--dsw-alias-label-primary-foreground, #ffffff)',
       border: 'none',
-      borderRadius: 6,
+      borderRadius: '6px',
       padding: '4px 14px',
-      fontSize: 12,
+      fontSize: '12px',
       cursor: 'pointer',
     }),
     cssr.c(`.${P}-card-cancel`, {
       background: 'transparent',
       color: 'var(--dsw-alias-label-secondary, #cccccc)',
       border: '1px solid var(--dsw-alias-border-l2, #30363d)',
-      borderRadius: 6,
+      borderRadius: '6px',
       padding: '4px 14px',
-      fontSize: 12,
+      fontSize: '12px',
       cursor: 'pointer',
     }),
     cssr.c(`.${P}-card-result`, {
       padding: '6px 12px 10px',
       color: 'var(--dsw-alias-label-secondary, #cccccc)',
-      fontSize: 12,
+      fontSize: '12px',
     }),
   ])
+}
+
+/** 挂载 undo 卡片样式，返回 disposer。 */
+export function mountCommandViewStyles(): () => void {
+  const cssr = cardCssr ??= CssRender()
+  const styleId = `${TURNREWIND_STYLE_ID}-command-view`
+  if (typeof document !== 'undefined' && document.getElementById(styleId) !== null)
+    return () => {}
+
+  const style = buildCommandViewStyleNodes(cssr)
   style.mount({ id: styleId, head: true })
   return () => style.unmount({ id: styleId })
 }

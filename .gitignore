@@ -18,7 +18,8 @@ release-msi-version.tmp.json
 skills
 .serena
 .cargo/config.toml
-# 参考源码克隆（如 source/dsh-automation），不作为本仓库内容提交
+# 参考源码克隆（�?source/dsh-automation），不作为本仓库内容提交
 source/
 .gitmodules
-.tmp-alpha-inspect.playwright-cli/
+.tmp-alpha-inspect
+.playwright-cli/

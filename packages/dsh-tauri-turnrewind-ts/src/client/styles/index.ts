@@ -22,13 +22,9 @@ function ensureDialogCssr(): ReturnType<typeof CssRender> {
 }
 
 /** 挂载不可用弹窗样式，返回 disposer。 */
-export function mountDialogStyles(): () => void {
-  const cssr = ensureDialogCssr()
+export function buildDialogStyleNodes(cssr: ReturnType<typeof CssRender>) {
   const p = TURNREWIND_CLASS_PREFIX
-  const styleId = `${TURNREWIND_STYLE_ID}-dialog`
-  if (typeof document !== 'undefined' && document.getElementById(styleId) !== null)
-    return () => {}
-  const style = cssr.c([
+  return cssr.c([
     cssr.c(`.${p}-dialog-backdrop`, {
       display: 'none',
       position: 'fixed',
@@ -97,6 +93,15 @@ export function mountDialogStyles(): () => void {
       background: 'var(--dsw-alias-button-primary-hover, #4338ca)',
     }),
   ])
+}
+
+/** 挂载不可用弹窗样式，返回 disposer。 */
+export function mountDialogStyles(): () => void {
+  const styleId = `${TURNREWIND_STYLE_ID}-dialog`
+  if (typeof document !== 'undefined' && document.getElementById(styleId) !== null)
+    return () => {}
+  const cssr = ensureDialogCssr()
+  const style = buildDialogStyleNodes(cssr)
   style.mount({ id: styleId, head: true })
   return () => style.unmount({ id: styleId })
 }
