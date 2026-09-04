@@ -76,7 +76,8 @@ it('parseUndoOutput keeps paths with spaces and plan flags out of the conflict f
   const parsed = client.parseUndoOutput([
     'Undo preflight: turn s:1; 3 file(s) (modified 2, created 1, deleted 0); 1 conflict(s).',
     '  modified my notes.txt',
-    '  created reports/q3 summary.md',
+    // Host formats change.padEnd(8) plus one separator: created has two spaces.
+    '  created  reports/q3 summary.md',
     '  modified assets/logo.png  [conflict]',
     '  modified assets/hero.png  [too large]',
     '',
