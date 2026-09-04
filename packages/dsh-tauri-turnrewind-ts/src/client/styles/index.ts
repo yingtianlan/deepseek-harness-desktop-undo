@@ -96,3 +96,5 @@ export function mountDialogStyles(): () => void {
   style.mount({ id: styleId, head: true })
   return () => style.unmount({ id: styleId })
 }
+
+export { mountCommandViewStyles } from './command-view'

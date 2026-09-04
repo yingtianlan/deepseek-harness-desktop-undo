@@ -8,26 +8,13 @@
 
 import type { ParsedUndoFile, ParsedUndoOutput } from '../types'
 import React, { useEffect, useRef, useState } from 'react'
-import { TURNREWIND_HTTP_BASE, TURNREWIND_POLL_INTERVAL_MS } from '../constants'
+import { TURNREWIND_CLASS_PREFIX, TURNREWIND_HTTP_BASE, TURNREWIND_POLL_INTERVAL_MS } from '../constants'
 import { parseUndoOutput, resolvePlanStatus } from '../utils/parse'
 import { resolveOwnerSessionId } from '../utils/session'
 
 // ------------------------------------------------------------------
 // 颜色：全部引用应用主题 token（带硬编码 fallback），随主题切换实时变化。
 // ------------------------------------------------------------------
-const DIFF_COLORS = {
-  delBg: 'rgba(248, 81, 73, 0.26)',
-  addBg: 'rgba(63, 185, 80, 0.38)',
-  del: 'var(--dsw-alias-state-error-primary, #f85149)',
-  add: 'var(--dsw-alias-state-success-primary, #3fb950)',
-  delText: 'var(--dsw-alias-state-error-primary, #ffb3ab)',
-  addText: 'var(--dsw-alias-state-success-primary, #8ff0a4)',
-  hunk: 'var(--dsw-alias-label-tertiary, #8b8b8b)',
-  meta: 'var(--dsw-alias-label-dimmed, #8b8b8b)',
-  text: 'var(--dsw-alias-label-secondary, #cccccc)',
-  bg: 'var(--dsw-alias-bg-layer-2, #161b22)',
-  border: 'var(--dsw-alias-border-l2, #30363d)',
-} as const
 
 /** 连续轮询失败上限（404/gone 不计——它们直接 settle plan）。 */
 const MAX_POLL_FAILURES = 5
@@ -53,16 +40,6 @@ function classifyLine(raw: string): { kind: LineKind, text: string } {
   return { kind: 'ctx', text: line.replace(/^\s+/, '') }
 }
 
-function diffLineStyle(kind: LineKind): React.CSSProperties {
-  switch (kind) {
-    case 'del': return { background: DIFF_COLORS.delBg, color: DIFF_COLORS.delText }
-    case 'add': return { background: DIFF_COLORS.addBg, color: DIFF_COLORS.addText }
-    case 'hunk': return { color: DIFF_COLORS.hunk }
-    case 'meta': return { color: DIFF_COLORS.meta }
-    default: return { color: DIFF_COLORS.text }
-  }
-}
-
 function diffSign(kind: LineKind): string {
   if (kind === 'del')
     return '-'
@@ -78,33 +55,18 @@ interface DiffLineEntry {
 
 function DiffLine({ entry }: { entry: DiffLineEntry }): React.ReactElement {
   return React.createElement('div', {
-    style: {
-      display: 'flex',
-      fontFamily: 'var(--ds-font-family-code, monospace)',
-      fontSize: '12px',
-      lineHeight: '19px',
-      paddingLeft: 8,
-      paddingRight: 8,
-      whiteSpace: 'pre-wrap',
-      wordBreak: 'break-all',
-      ...diffLineStyle(entry.kind),
-    },
+    className: `${TURNREWIND_CLASS_PREFIX}-diffline ${TURNREWIND_CLASS_PREFIX}-diffline-${entry.kind}`,
   }, React.createElement('span', {
-    style: {
-      width: 14,
-      flex: 'none',
-      color: entry.kind === 'del' ? DIFF_COLORS.del : entry.kind === 'add' ? DIFF_COLORS.add : 'transparent',
-      userSelect: 'none',
-    },
-  }, diffSign(entry.kind)), React.createElement('span', { style: { flex: 1 } }, entry.text))
+    className: `${TURNREWIND_CLASS_PREFIX}-diffline-sign`,
+  }, diffSign(entry.kind)), React.createElement('span', { className: `${TURNREWIND_CLASS_PREFIX}-diffline-text` }, entry.text))
 }
 
 function NumBadge({ additions, deletions }: { additions: number, deletions: number }): React.ReactElement | null {
   if (additions === 0 && deletions === 0)
     return null
   return React.createElement('span', {
-    style: { display: 'inline-flex', gap: 6, flex: 'none', fontFamily: 'var(--ds-font-family-code, monospace)', fontSize: 11 },
-  }, React.createElement('span', { style: { color: 'var(--dsw-alias-state-success-primary, #3fb950)' } }, `+${additions}`), React.createElement('span', { style: { color: 'var(--dsw-alias-state-error-primary, #f85149)' } }, `-${deletions}`))
+    className: `${TURNREWIND_CLASS_PREFIX}-numbadge`,
+  }, React.createElement('span', { className: `${TURNREWIND_CLASS_PREFIX}-numbadge-add` }, `+${additions}`), React.createElement('span', { className: `${TURNREWIND_CLASS_PREFIX}-numbadge-del` }, `-${deletions}`))
 }
 
 function DiffBlock({ file }: { file: ParsedUndoFile }): React.ReactElement {
@@ -118,20 +80,10 @@ function DiffBlock({ file }: { file: ParsedUndoFile }): React.ReactElement {
     rows.push(React.createElement(DiffLine, { key: `${file.path}:${rows.length}`, entry: classifyLine(line) }))
   }
   return React.createElement('div', {
-    style: { marginTop: 8, border: `1px solid ${DIFF_COLORS.border}`, borderRadius: 8, overflow: 'hidden' },
+    className: `${TURNREWIND_CLASS_PREFIX}-panel`,
   }, React.createElement('div', {
-    style: {
-      display: 'flex',
-      alignItems: 'center',
-      gap: 8,
-      padding: '5px 10px',
-      fontFamily: 'var(--ds-font-family-code, monospace)',
-      fontSize: '11.5',
-      color: 'var(--dsw-alias-label-secondary, #cccccc)',
-      borderBottom: `1px solid ${DIFF_COLORS.border}`,
-      background: 'var(--dsw-alias-bg-layer-1, transparent)',
-    },
-  }, React.createElement('span', { style: { color: 'var(--dsw-alias-label-tertiary, #8b8b8b)' } }, file.change), React.createElement('span', { style: { flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, file.path), React.createElement(NumBadge, { additions: file.additions, deletions: file.deletions })), React.createElement('div', { style: { maxHeight: 260, overflowY: 'auto', padding: '3px 0' } }, rows))
+    className: `${TURNREWIND_CLASS_PREFIX}-panel-file-header`,
+  }, React.createElement('span', { className: `${TURNREWIND_CLASS_PREFIX}-panel-file-change` }, file.change), React.createElement('span', { className: `${TURNREWIND_CLASS_PREFIX}-panel-file-path` }, file.path), React.createElement(NumBadge, { additions: file.additions, deletions: file.deletions })), React.createElement('div', { className: `${TURNREWIND_CLASS_PREFIX}-panel-diff` }, rows))
 }
 
 // ------------------------------------------------------------------
@@ -251,7 +203,6 @@ export function UndoCommandView(props: CommandViewProps): React.ReactElement {
     }
   }, [state, parsed.planId, ownerSessionId])
 
-  const titleColor = state === 'error' ? 'var(--dsw-alias-state-error-primary, #f85149)' : 'var(--dsw-alias-label-primary, #cccccc)'
   const collapsed = planStatus === 'cancelled' || planStatus === 'gone'
   const showBody = expanded && !collapsed && (hasDiff || parsed.files.length > 0)
   const actionable = parsed.planId !== undefined && state === 'ok' && !collapsed && (planStatus === null || planStatus === 'pending')
@@ -302,119 +253,59 @@ export function UndoCommandView(props: CommandViewProps): React.ReactElement {
     : resultText || (planStatus === 'applied' || pendingWait
       ? '已提交，等待执行结果…'
       : planStatus === 'cancelled' || submitted === 'cancel' ? '已取消' : planStatus === 'gone' ? '该计划已过期，重新执行 /undo 可生成新预览' : '执行将恢复下方文件到本轮改动前')
-  const hintColor = submitError
-    ? 'var(--dsw-alias-state-error-primary, #f85149)'
-    : resultText || planStatus === 'applied'
-      ? 'var(--dsw-alias-state-success-primary, #3fb950)'
-      : 'var(--dsw-alias-label-secondary, #333333)'
   const showFooter = actionable || submitting || resultText !== null || submitError !== null || submitted !== null || planStatus === 'applied'
 
   // 取消/过期折叠为无边框细行。
   if (collapsed) {
     return React.createElement('div', {
-      style: { display: 'flex', alignItems: 'center', gap: 6, padding: '2px 12px 2px 4px', margin: '2px 0 2px 4px', fontSize: 13 },
-    }, React.createElement('span', { style: { color: 'var(--dsw-alias-label-dimmed, #8b8b8b)' } }, '▸'), React.createElement('span', { style: { color: 'var(--dsw-alias-label-secondary, #cccccc)' } }, node.name || 'undo'), React.createElement('span', { style: { color: 'var(--dsw-alias-label-dimmed, #8b8b8b)' } }, '·'), React.createElement('span', { style: { color: 'var(--dsw-alias-state-error-primary, #f85149)' } }, hint))
+      className: `${TURNREWIND_CLASS_PREFIX}-card`,
+    }, React.createElement('span', { className: `${TURNREWIND_CLASS_PREFIX}-card-glyph` }, '▸'), React.createElement('span', { className: `${TURNREWIND_CLASS_PREFIX}-card-name` }, node.name || 'undo'), React.createElement('span', { className: `${TURNREWIND_CLASS_PREFIX}-card-dot` }, '·'), React.createElement('span', { className: `${TURNREWIND_CLASS_PREFIX}-card-hint` }, hint))
   }
 
   return React.createElement('div', {
-    style: {
-      border: `1px solid ${DIFF_COLORS.border}`,
-      background: 'var(--dsw-alias-bg-layer-1, transparent)',
-      borderRadius: 12,
-      margin: '4px 0 4px 4px',
-      overflow: 'hidden',
-      maxWidth: '100%',
-    },
+    className: `${TURNREWIND_CLASS_PREFIX}-panel`,
   },
   // 可折叠标题行。
   React.createElement('button', {
     type: 'button',
     onClick: toggleExpanded,
-    style: {
-      display: 'flex',
-      alignItems: 'center',
-      gap: 8,
-      width: '100%',
-      textAlign: 'left',
-      background: 'transparent',
-      border: 'none',
-      cursor: 'pointer',
-      padding: '8px 12px',
-      color: titleColor,
-      fontSize: 13,
-    },
+    className: `${TURNREWIND_CLASS_PREFIX}-card-header`,
   }, React.createElement('span', {
-    style: {
-      transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)',
-      transition: 'transform .12s',
-      display: 'inline-block',
-      color: 'var(--dsw-alias-label-tertiary, #8b8b8b)',
-    },
-  }, '▸'), React.createElement('span', { style: { fontWeight: 500 } }, node.name || 'undo'), React.createElement(NumBadge, { additions: totals.additions, deletions: totals.deletions }), React.createElement('span', {
-    style: {
-      color: 'var(--dsw-alias-label-secondary, #cccccc)',
-      overflow: 'hidden',
-      textOverflow: 'ellipsis',
-      whiteSpace: 'nowrap',
-      flex: 1,
-      minWidth: 0,
-    },
+    className: `${TURNREWIND_CLASS_PREFIX}-card-caret${expanded ? ` ${TURNREWIND_CLASS_PREFIX}-card-caret-open` : ''}`,
+  }, '▸'), React.createElement('span', { className: `${TURNREWIND_CLASS_PREFIX}-card-name` }, node.name || 'undo'), React.createElement(NumBadge, { additions: totals.additions, deletions: totals.deletions }), React.createElement('span', {
+    className: `${TURNREWIND_CLASS_PREFIX}-card-summary`,
   }, summary)),
   // 文件清单 / diff 内容。
   showBody
     ? React.createElement('div', {
-        style: { borderTop: `1px solid ${DIFF_COLORS.border}`, padding: hasDiff ? '6px 10px 10px' : '6px 12px 10px' },
+        className: `${TURNREWIND_CLASS_PREFIX}-panel-body`,
       }, hasDiff
         ? withDiff.map(file => React.createElement(DiffBlock, { key: file.path, file }))
         : parsed.files.map(file => React.createElement('div', {
             key: file.path,
-            style: { display: 'flex', gap: 8, padding: '2px 0', fontFamily: 'var(--ds-font-family-code, monospace)', fontSize: 12 },
-          }, React.createElement('span', { style: { color: 'var(--dsw-alias-label-tertiary, #8b8b8b)', width: 64, flex: 'none' } }, file.change), React.createElement('span', null, file.path))))
+            className: `${TURNREWIND_CLASS_PREFIX}-panel-file`,
+          }, React.createElement('span', { className: `${TURNREWIND_CLASS_PREFIX}-panel-file-change` }, file.change), React.createElement('span', null, file.path))))
     : null,
   // 操作 footer。
   showFooter
     ? React.createElement('div', {
-        style: {
-          display: 'flex',
-          alignItems: 'center',
-          gap: 10,
-          borderTop: `1px solid ${DIFF_COLORS.border}`,
-          padding: '8px 12px',
-        },
+        className: `${TURNREWIND_CLASS_PREFIX}-card-actions`,
       }, actionable || submitting
         ? React.createElement('button', {
             type: 'button',
             onClick: () => { void submit('confirm') },
             disabled: submitting || submitted !== null,
-            style: {
-              background: 'var(--dsw-alias-button-primary-fill, #4f46e5)',
-              color: 'var(--dsw-alias-label-primary-foreground, #ffffff)',
-              border: 'none',
-              borderRadius: 8,
-              padding: '5px 16px',
-              fontSize: '12.5px',
-              cursor: submitting ? 'wait' : 'pointer',
-              opacity: submitting ? 0.75 : 1,
-            },
+            className: `${TURNREWIND_CLASS_PREFIX}-card-confirm${submitting ? ` ${TURNREWIND_CLASS_PREFIX}-card-busy` : ''}`,
           }, confirmLabel)
         : null, actionable || submitting
         ? React.createElement('button', {
             type: 'button',
             onClick: () => { void submit('cancel') },
             disabled: submitting || submitted !== null,
-            style: {
-              background: 'transparent',
-              color: submitted === 'cancel' ? 'var(--dsw-alias-label-tertiary, #8b8b8b)' : 'var(--dsw-alias-state-error-primary, #f85149)',
-              border: '1px solid var(--dsw-alias-border-l2, #30363d)',
-              borderRadius: 8,
-              padding: '5px 16px',
-              fontSize: '12.5px',
-              cursor: submitting ? 'wait' : 'pointer',
-              opacity: submitting ? 0.75 : 1,
-            },
+            className: `${TURNREWIND_CLASS_PREFIX}-card-cancel${submitted === 'cancel' ? ` ${TURNREWIND_CLASS_PREFIX}-card-cancel-dim` : ''}${submitting ? ` ${TURNREWIND_CLASS_PREFIX}-card-busy` : ''}`,
           }, cancelLabel)
-        : null, React.createElement('span', { style: { flex: 1 } }), React.createElement('span', {
-        style: { color: hintColor, fontSize: '11.5px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+        : null, React.createElement('span', { className: `${TURNREWIND_CLASS_PREFIX}-card-spacer` }), React.createElement('span', {
+        className: `${TURNREWIND_CLASS_PREFIX}-card-hint${submitError ? ` ${TURNREWIND_CLASS_PREFIX}-card-hint-error` : resultText || planStatus === 'applied' ? ` ${TURNREWIND_CLASS_PREFIX}-card-hint-ok` : ''}`,
       }, hint))
     : null)
 }

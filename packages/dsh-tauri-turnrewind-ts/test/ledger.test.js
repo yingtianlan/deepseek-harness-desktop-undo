@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'pathe'
 import { it } from 'vitest'
-import { claimPendingPlan, claimRewindNotices, completeRedoWithNotice, completeUndoTransaction, createOperation, createPendingPlan, getLatestAppliedUndo, getLatestSnapshotRef, getLatestTurn, getPendingPlanStatus, getTurn, insertTurn, listNeedsRecoveryWorkspaces, listReversibleTurns, markPendingPlanApplied, markPendingPlanCancelled, markTurnSnapshotMissing, openLedger, pruneConsumedNotices, queueRewindNotice, recordSkippedTurn, releasePendingPlanClaim, settleInterruptedTurn, settleNoopTurn, settleOperation, settleTurn } from '../src/host/service/ledger'
+import { claimPendingPlan, claimRewindNotices, completeRedoWithNotice, completeUndoTransaction, createOperation, createPendingPlan, getLatestAppliedUndo, getLatestSnapshotRef, getLatestTurn, getPendingPlanStatus, getTurn, insertTurn, listNeedsRecoveryWorkspaces, listReversibleTurns, markPendingPlanApplied, markPendingPlanCancelled, markTurnSnapshotMissing, openLedger, pruneConsumedNotices, queueRewindNotice, recordSkippedTurn, releasePendingPlanClaim, settleInterruptedTurn, settleNoopTurn, settleTurn } from '../src/host/service/ledger'
 
 it('persists turn lifecycle and resumes from the latest durable snapshot', async () => {
   const root = await mkdtemp(join(tmpdir(), 'turnrewind-ledger-test-'))
@@ -155,7 +155,7 @@ it('merges a C-B-A undo sequence into one complete notice', async () => {
       ['session:B', 'b.ts', '2026-01-01T00:04:00.000Z'],
       ['session:A', 'a.ts', '2026-01-01T00:05:00.000Z'],
     ]) {
-        createOperation(db, { operationId: `op-${turnId}`, kind: 'undo', targetTurnId: turnId, requestedAt: time })
+      createOperation(db, { operationId: `op-${turnId}`, kind: 'undo', targetTurnId: turnId, requestedAt: time })
       completeUndoTransaction(db, {
         noticeId: `notice-${turnId}`,
         sessionId: 'session',
@@ -537,7 +537,7 @@ it('lands needs-recovery when the turn state drifted after files were restored',
     createOperation(db, { operationId: 'op-m', kind: 'undo', targetTurnId: 'session:m', requestedAt: '2026-01-01T00:00:00.000Z' })
     // Simulate the crash window: files restored on disk, but the turn state
     // drifted elsewhere. No turn rows may update.
-    db.prepare("UPDATE turns SET status = 'failed' WHERE turn_id = ?").run('session:m')
+    db.prepare('UPDATE turns SET status = \'failed\' WHERE turn_id = ?').run('session:m')
 
     assert.throws(
       () => completeUndoTransaction(db, {
