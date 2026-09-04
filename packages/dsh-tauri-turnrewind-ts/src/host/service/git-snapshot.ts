@@ -303,6 +303,11 @@ function assertSafePath(workspaceDir: string, path: string): string {
   const target = resolve(root, path)
   if (target !== root && !target.startsWith(`${root}${sep}`))
     throw new Error(`TURNREWIND_PATH_ESCAPE: ${path}`)
+  // Defense in depth: the workspace root itself is never a restorable path.
+  // A path that normalizes to the root would make a restore delete the whole
+  // workspace instead of one file.
+  if (target === root)
+    throw new Error(`TURNREWIND_PATH_ESCAPE: ${path} (workspace root cannot be restored)`)
 
   let current = root
   const suffix = relative(root, target)
@@ -642,7 +647,20 @@ export async function restorePath(store: SnapshotStore, commit: string, path: st
       const info = lstatSync(target)
       if (info.isSymbolicLink() || (!info.isFile() && !info.isDirectory()))
         throw new Error(`TURNREWIND_UNSUPPORTED_TARGET: ${path}`)
-      rmSync(target, { recursive: info.isDirectory(), force: true })
+      if (info.isDirectory()) {
+        // The turn replaced a file with a directory, or the user built a
+        // directory at this path after the snapshot. Recursively deleting it
+        // can destroy unrelated files that the turn never touched (files
+        // ignored by git are not even in the snapshot). Refuse loudly; only
+        // an EMPTY directory is removed, since it holds nothing to lose.
+        const contents = readdirSync(target)
+        if (contents.length > 0)
+          throw new Error(`TURNREWIND_UNSUPPORTED_TARGET: ${path} is now a non-empty directory; undo will not recursively delete it (remove it manually if intended)`)
+        rmSync(target, { force: true })
+      }
+      else {
+        rmSync(target, { force: true })
+      }
     }
     return { path, result: 'removed' }
   }
@@ -660,6 +678,11 @@ export async function restorePath(store: SnapshotStore, commit: string, path: st
   try {
     if (existsSync(target)) {
       const info = lstatSync(target)
+      // A directory (even an empty one) at the target is refused: restoring a
+      // file over it must never recurse into unrelated content, with or
+      // without --force. The user removes the directory manually instead.
+      if (info.isDirectory())
+        throw new Error(`TURNREWIND_UNSUPPORTED_TARGET: ${path} is a directory; undo will not delete it to restore a file`)
       if (info.isSymbolicLink() || !info.isFile())
         throw new Error(`TURNREWIND_UNSUPPORTED_TARGET: ${path}`)
       // Move the old content aside instead of deleting it: the swap keeps a

@@ -1,0 +1,217 @@
+/**
+ * client/styles/command-view.ts — /undo 卡片样式（css-render 树）。
+ *
+ * 规则：颜色走主题 token；状态类（成功/失败/运行中）由组件切换 class 而非
+ * 直接改 style；diff 行语义类（add/del/hunk/meta/text）集中在此。
+ */
+
+import { CssRender } from 'dsh-tauri/client'
+import { TURNREWIND_CLASS_PREFIX, TURNREWIND_STYLE_ID } from '../constants'
+
+/** 卡片样式实例（一次性）。 */
+let cardCssr: ReturnType<typeof CssRender> | undefined
+
+const P = TURNREWIND_CLASS_PREFIX
+
+/** 挂载 undo 卡片样式，返回 disposer。 */
+export function mountCommandViewStyles(): () => void {
+  const cssr = cardCssr ??= CssRender()
+  const styleId = `${TURNREWIND_STYLE_ID}-command-view`
+  if (typeof document !== 'undefined' && document.getElementById(styleId) !== null)
+    return () => {}
+
+  const style = cardCssr.c([
+    // 折叠态：无边框原生风格行
+    cssr.c(`.${P}-card`, {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+      padding: '2px 12px 2px 4px',
+      margin: '2px 0 2px 4px',
+      fontSize: 13,
+    }),
+    cssr.c(`.${P}-card-header`, {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      width: '100%',
+      textAlign: 'left',
+      background: 'transparent',
+      border: 'none',
+      cursor: 'pointer',
+      padding: '8px 12px',
+      color: 'var(--dsw-alias-label-primary, #cccccc)',
+      fontSize: 13,
+    }),
+    cssr.c(`.${P}-card-caret`, {
+      transform: 'rotate(0deg)',
+      transition: 'transform .12s',
+      display: 'inline-block',
+      color: 'var(--dsw-alias-label-tertiary, #8b8b8b)',
+    }),
+    cssr.c(`.${P}-card-caret-open`, {
+      transform: 'rotate(90deg)',
+    }),
+    cssr.c(`.${P}-card-summary`, {
+      color: 'var(--dsw-alias-label-secondary, #cccccc)',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap',
+      flex: 1,
+      minWidth: 0,
+    }),
+    cssr.c(`.${P}-panel-body`, {
+      borderTop: '1px solid var(--dsw-alias-border-l2, #30363d)',
+      padding: '6px 10px 10px',
+    }),
+    cssr.c(`.${P}-card-spacer`, {
+      flex: 1,
+    }),
+    cssr.c(`.${P}-card-busy`, {
+      cursor: 'wait',
+      opacity: 0.75,
+    }),
+    cssr.c(`.${P}-card-cancel-dim`, {
+      color: 'var(--dsw-alias-label-tertiary, #8b8b8b)',
+    }),
+    cssr.c(`.${P}-card-glyph`, {
+      color: 'var(--dsw-alias-label-dimmed, #8b8b8b)',
+    }),
+    cssr.c(`.${P}-card-name`, {
+      fontWeight: 500,
+      color: 'var(--dsw-alias-label-secondary, #cccccc)',
+    }),
+    cssr.c(`.${P}-card-dot`, {
+      color: 'var(--dsw-alias-label-dimmed, #8b8b8b)',
+    }),
+    cssr.c(`.${P}-card-hint`, {
+      color: 'var(--dsw-alias-label-dimmed, #8b8b8b)',
+      fontSize: '11.5px',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap',
+      flex: 1,
+    }),
+    cssr.c(`.${P}-card-hint-error`, {
+      color: 'var(--dsw-alias-state-error-primary, #f85149)',
+    }),
+    cssr.c(`.${P}-card-hint-ok`, {
+      color: 'var(--dsw-alias-state-success-primary, #3fb950)',
+    }),
+    // 展开态容器：diff 面板
+    cssr.c(`.${P}-panel`, {
+      marginTop: 8,
+      border: '1px solid var(--dsw-alias-border-l2, #30363d)',
+      borderRadius: 8,
+      overflow: 'hidden',
+      background: 'var(--dsw-alias-bg-layer-2, #161b22)',
+    }),
+    cssr.c(`.${P}-panel-file`, {
+      display: 'flex',
+      gap: 8,
+      padding: '2px 0',
+      fontFamily: 'var(--ds-font-family-code, monospace)',
+      fontSize: 12,
+    }),
+    cssr.c(`.${P}-panel-file-change`, {
+      color: 'var(--dsw-alias-label-tertiary, #8b8b8b)',
+      width: 64,
+      flex: 'none',
+    }),
+    cssr.c(`.${P}-panel-file-path`, {
+      flex: 1,
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap',
+    }),
+    cssr.c(`.${P}-panel-diff`, {
+      maxHeight: 260,
+      overflowY: 'auto',
+      padding: '3px 0',
+      borderTop: '1px solid var(--dsw-alias-border-l2, #30363d)',
+    }),
+    cssr.c(`.${P}-panel-file-header`, {
+      padding: '6px 10px 10px',
+    }),
+    // 数字徽标
+    cssr.c(`.${P}-numbadge`, {
+      display: 'inline-flex',
+      gap: 6,
+      flex: 'none',
+      fontFamily: 'var(--ds-font-family-code, monospace)',
+      fontSize: 11,
+    }),
+    cssr.c(`.${P}-numbadge-add`, {
+      color: 'var(--dsw-alias-state-success-primary, #3fb950)',
+    }),
+    cssr.c(`.${P}-numbadge-del`, {
+      color: 'var(--dsw-alias-state-error-primary, #f85149)',
+    }),
+    // diff 行
+    cssr.c(`.${P}-diffline`, {
+      display: 'flex',
+      fontFamily: 'var(--ds-font-family-code, monospace)',
+      fontSize: 12,
+      lineHeight: 1.5,
+      whiteSpace: 'pre-wrap',
+    }),
+    cssr.c(`.${P}-diffline-sign`, {
+      width: 14,
+      flex: 'none',
+      textAlign: 'center',
+    }),
+    cssr.c(`.${P}-diffline-text`, {
+      flex: 1,
+    }),
+    cssr.c(`.${P}-diffline-add`, {
+      background: 'rgba(63, 185, 80, 0.38)',
+      color: 'var(--dsw-alias-state-success-primary, #8ff0a4)',
+    }),
+    cssr.c(`.${P}-diffline-del`, {
+      background: 'rgba(248, 81, 73, 0.26)',
+      color: 'var(--dsw-alias-state-error-primary, #ffb3ab)',
+    }),
+    cssr.c(`.${P}-diffline-hunk`, {
+      color: 'var(--dsw-alias-label-tertiary, #8b8b8b)',
+    }),
+    cssr.c(`.${P}-diffline-meta`, {
+      color: 'var(--dsw-alias-label-dimmed, #8b8b8b)',
+    }),
+    cssr.c(`.${P}-diffline-text-line`, {
+      color: 'var(--dsw-alias-label-secondary, #cccccc)',
+    }),
+    // 卡内确认按钮组
+    cssr.c(`.${P}-card-actions`, {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      padding: '6px 12px 10px',
+      borderTop: '1px solid var(--dsw-alias-border-l2, #30363d)',
+    }),
+    cssr.c(`.${P}-card-confirm`, {
+      background: 'var(--dsw-alias-button-primary-fill, #2ea043)',
+      color: 'var(--dsw-alias-label-primary-foreground, #ffffff)',
+      border: 'none',
+      borderRadius: 6,
+      padding: '4px 14px',
+      fontSize: 12,
+      cursor: 'pointer',
+    }),
+    cssr.c(`.${P}-card-cancel`, {
+      background: 'transparent',
+      color: 'var(--dsw-alias-label-secondary, #cccccc)',
+      border: '1px solid var(--dsw-alias-border-l2, #30363d)',
+      borderRadius: 6,
+      padding: '4px 14px',
+      fontSize: 12,
+      cursor: 'pointer',
+    }),
+    cssr.c(`.${P}-card-result`, {
+      padding: '6px 12px 10px',
+      color: 'var(--dsw-alias-label-secondary, #cccccc)',
+      fontSize: 12,
+    }),
+  ])
+  style.mount({ id: styleId, head: true })
+  return () => style.unmount({ id: styleId })
+}

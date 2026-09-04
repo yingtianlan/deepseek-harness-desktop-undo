@@ -52,9 +52,18 @@ function runGitSync(workspaceDir: string, args: string[]): GitSyncResult {
  * 解析 canonical Git worktree 与其元数据，不改变任何 Git 状态。
  * 非 worktree 返回 undefined；git 缺失置 gitUnavailableReason 的标志。
  */
+// 进程级解析缓存：同一 cwd 的 rev-parse 结果在短时间内不变，而 turn 领取、
+// pre-step、命令处理都会重复触发解析。TTL 兼顾正确性（新分支/worktree 切换后
+// 元数据仍会刷新）与事件循环友好（冷缓存时一轮同步调用 <100ms）。
+const WORKSPACE_CACHE_TTL_MS = 60 * 1000
+const workspaceCache = new Map<string, { at: number, info: GitWorkspaceInfo | undefined }>()
+
 export function gitWorkspace(workspaceDir: string): GitWorkspaceInfo | undefined {
   const requestedDir = resolve(workspaceDir)
   gitExecutableMissing = false
+  const cached = workspaceCache.get(requestedDir)
+  if (cached && Date.now() - cached.at < WORKSPACE_CACHE_TTL_MS)
+    return cached.info
   const inside = runGitSync(requestedDir, ['rev-parse', '--is-inside-work-tree'])
   if (inside.error?.code === 'ENOENT') {
     gitExecutableMissing = true
@@ -75,7 +84,7 @@ export function gitWorkspace(workspaceDir: string): GitWorkspaceInfo | undefined
   if (!existsSync(workspaceRoot) || !existsSync(resolvedGitDir) || !existsSync(resolvedCommonDir))
     return undefined
 
-  return {
+  const info: GitWorkspaceInfo = {
     workspaceDir: workspaceRoot,
     requestedDir,
     gitDir: resolvedGitDir,
@@ -83,4 +92,10 @@ export function gitWorkspace(workspaceDir: string): GitWorkspaceInfo | undefined
     indexPath: resolvedIndex,
     infoExcludePath: infoExclude.ok ? resolve(requestedDir, infoExclude.stdout!) : undefined,
   }
+  workspaceCache.set(requestedDir, { at: Date.now(), info })
+  if (workspaceCache.size > 64) {
+    const oldest = [...workspaceCache.entries()].sort((a, b) => a[1].at - b[1].at)[0]
+    workspaceCache.delete(oldest[0])
+  }
+  return info
 }

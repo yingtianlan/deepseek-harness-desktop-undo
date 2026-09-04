@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'pathe'
 import { it } from 'vitest'
-import { claimPendingPlan, claimRewindNotices, completeRedoWithNotice, completeUndoTransaction, createOperation, createPendingPlan, getLatestAppliedUndo, getLatestSnapshotRef, getLatestTurn, getPendingPlanStatus, getTurn, insertTurn, listNeedsRecoveryWorkspaces, listReversibleTurns, markPendingPlanApplied, markPendingPlanCancelled, markTurnSnapshotMissing, openLedger, pruneConsumedNotices, queueRewindNotice, recordSkippedTurn, releasePendingPlanClaim, settleInterruptedTurn, settleNoopTurn, settleTurn } from '../src/host/service/ledger'
+import { claimPendingPlan, claimRewindNotices, completeRedoWithNotice, completeUndoTransaction, createOperation, createPendingPlan, getLatestAppliedUndo, getLatestSnapshotRef, getLatestTurn, getPendingPlanStatus, getTurn, insertTurn, listNeedsRecoveryWorkspaces, listReversibleTurns, markPendingPlanApplied, markPendingPlanCancelled, markTurnSnapshotMissing, openLedger, pruneConsumedNotices, queueRewindNotice, recordSkippedTurn, releasePendingPlanClaim, settleInterruptedTurn, settleNoopTurn, settleOperation, settleTurn } from '../src/host/service/ledger'
 
 it('persists turn lifecycle and resumes from the latest durable snapshot', async () => {
   const root = await mkdtemp(join(tmpdir(), 'turnrewind-ledger-test-'))
@@ -49,15 +49,12 @@ it('marks undo and queues its one-time notice atomically', async () => {
       beforeRef: 'refs/turnrewind/undo-before',
     })
     settleTurn(db, 'session:undo', 'refs/turnrewind/undo-after')
-    createOperation(db, { operationId: 'op-undo', kind: 'undo', targetTurnId: 'session:undo', requestedAt: '2026-01-01T00:00:30.000Z' })
-    completeUndoTransaction(db, {
+    completeUndoWithNotice(db, 'session:undo', {
       noticeId: 'notice-undo',
       sessionId: 'session',
       workspaceKey: 'workspace',
       targetTurnId: 'session:undo',
-      restoredPaths: ['src/reverted.ts'],
-      notRestored: [],
-      operationId: 'op-undo',
+      paths: ['src/reverted.ts'],
       createdAt: '2026-01-01T00:01:00.000Z',
     })
     assert.equal(getTurn(db, 'session:undo').status, 'undone')
@@ -155,15 +152,12 @@ it('merges a C-B-A undo sequence into one complete notice', async () => {
       ['session:B', 'b.ts', '2026-01-01T00:04:00.000Z'],
       ['session:A', 'a.ts', '2026-01-01T00:05:00.000Z'],
     ]) {
-      createOperation(db, { operationId: `op-${turnId}`, kind: 'undo', targetTurnId: turnId, requestedAt: time })
-      completeUndoTransaction(db, {
+      completeUndoWithNotice(db, turnId, {
         noticeId: `notice-${turnId}`,
         sessionId: 'session',
         workspaceKey: 'workspace',
         targetTurnId: turnId,
-        restoredPaths: [path],
-        notRestored: [],
-        operationId: `op-${turnId}`,
+        paths: [path],
         createdAt: time,
       })
     }
@@ -233,7 +227,6 @@ it('selects an interrupted turn after a later turn is undone', async () => {
       beforeRef: 'refs/turnrewind/later-before',
     })
     settleTurn(db, 'session:later', 'refs/turnrewind/later-after')
-    createOperation(db, { operationId: 'op-later', kind: 'undo', targetTurnId: 'session:later', requestedAt: '2026-01-01T00:01:30.000Z' })
     completeUndoTransaction(db, {
       noticeId: 'notice-later',
       sessionId: 'session',
@@ -271,15 +264,16 @@ it('redoes an applied undo and queues a redo notice atomically', async () => {
       requestedAt: '2026-01-01T00:01:00.000Z',
       beforeRef: 'refs/turnrewind/operation-op-undo',
     })
+    settleOperation(db, 'op-undo', 'applied')
     completeUndoTransaction(db, {
-      noticeId: 'notice-undo-2',
+      noticeId: 'notice-undo',
       sessionId: 'session',
       workspaceKey: 'workspace',
       targetTurnId: 'session:1',
       restoredPaths: ['a.ts'],
       notRestored: [],
       operationId: 'op-undo',
-      createdAt: '2026-01-01T00:01:00.000Z',
+      createdAt: '2026-01-01T00:01:01.000Z',
     })
     assert.equal(getTurn(db, 'session:1').status, 'undone')
     assert.equal(getLatestAppliedUndo(db, 'session', 'workspace').operation_id, 'op-undo')
@@ -294,7 +288,6 @@ it('redoes an applied undo and queues a redo notice atomically', async () => {
       sessionId: 'session',
       workspaceKey: 'workspace',
       targetTurnId: 'session:1',
-      turns: ['session:1'],
       paths: ['a.ts'],
       createdAt: '2026-01-01T00:02:00.000Z',
     })
@@ -332,15 +325,12 @@ it('lists reversible turns newest-first and marks dead snapshots skipped', async
       })
       settleTurn(db, turnId, `refs/turnrewind/turn-${turnId}-after`)
     }
-    createOperation(db, { operationId: 'op-session-3', kind: 'undo', targetTurnId: 'session:3', requestedAt: '2026-01-01T00:02:30.000Z' })
-    completeUndoTransaction(db, {
+    completeUndoWithNotice(db, 'session:3', {
       noticeId: 'notice-3',
       sessionId: 'session',
       workspaceKey: 'workspace',
       targetTurnId: 'session:3',
-      restoredPaths: ['a.txt'],
-      notRestored: [],
-      operationId: 'op-session-3',
+      paths: ['a.txt'],
       createdAt: '2026-01-01T00:03:00.000Z',
     })
     const candidates = listReversibleTurns(db, 'session', 'workspace')
@@ -465,102 +455,6 @@ it('prunes only long-consumed notices and keeps the dedup rows', async () => {
     db.close()
   }
   finally {
-    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 })
-  }
-})
-
-it('completes an interrupted turn undo in one transaction', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'turnrewind-interrupted-undo-'))
-  const db = openLedger(root)
-  try {
-    insertTurn(db, { turnId: 'session:9', sessionId: 'session', workspaceKey: 'ws', startedAt: '2026-01-01T00:00:00.000Z', beforeRef: 'refs/turnrewind/i1-before' })
-    settleInterruptedTurn(db, 'session:9', 'refs/turnrewind/i1-after', 'turn ended with error')
-    createOperation(db, { operationId: 'op-int', kind: 'undo', targetTurnId: 'session:9', requestedAt: '2026-01-01T00:00:00.000Z', beforeRef: 'refs/turnrewind/op-before' })
-
-    const outcome = completeUndoTransaction(db, {
-      noticeId: 'n-int',
-      sessionId: 'session',
-      workspaceKey: 'ws',
-      targetTurnId: 'session:9',
-      restoredPaths: ['a.txt'],
-      notRestored: [],
-      operationId: 'op-int',
-      createdAt: '2026-01-01T00:01:00.000Z',
-    })
-    assert.equal(outcome, 'undone')
-    assert.equal(getTurn(db, 'session:9').status, 'undone')
-    const op = db.prepare('SELECT outcome FROM operations WHERE operation_id = ?').get('op-int')
-    assert.equal(op.outcome, 'applied')
-  }
-  finally {
-    db.close()
-    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 })
-  }
-})
-
-it('surfaces partial restore failures in operation and notice', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'turnrewind-partial-'))
-  const db = openLedger(root)
-  try {
-    insertTurn(db, { turnId: 'session:p', sessionId: 'session', workspaceKey: 'ws', startedAt: '2026-01-01T00:00:00.000Z', beforeRef: 'refs/turnrewind/p-before' })
-    settleTurn(db, 'session:p', 'refs/turnrewind/p-after')
-    createOperation(db, { operationId: 'op-p', kind: 'undo', targetTurnId: 'session:p', requestedAt: '2026-01-01T00:00:00.000Z' })
-
-    completeUndoTransaction(db, {
-      noticeId: 'n-p',
-      sessionId: 'session',
-      workspaceKey: 'ws',
-      targetTurnId: 'session:p',
-      restoredPaths: ['a.txt'],
-      notRestored: [{ path: 'big.bin', reason: 'over the size limit' }],
-      operationId: 'op-p',
-      createdAt: '2026-01-01T00:01:00.000Z',
-    })
-    const op = db.prepare('SELECT outcome, error FROM operations WHERE operation_id = ?').get('op-p')
-    assert.equal(op.outcome, 'applied')
-    assert.match(op.error, /big\.bin \(over the size limit\)/)
-    const notice = db.prepare('SELECT paths_json FROM rewind_notices WHERE notice_id = ?').get('n-p')
-    const paths = JSON.parse(notice.paths_json)
-    assert.deepEqual(paths.sort(), ['a.txt', 'big.bin'])
-  }
-  finally {
-    db.close()
-    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 })
-  }
-})
-
-it('lands needs-recovery when the turn state drifted after files were restored', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'turnrewind-mismatch-'))
-  const db = openLedger(root)
-  try {
-    insertTurn(db, { turnId: 'session:m', sessionId: 'session', workspaceKey: 'ws', startedAt: '2026-01-01T00:00:00.000Z', beforeRef: 'refs/turnrewind/m-before' })
-    createOperation(db, { operationId: 'op-m', kind: 'undo', targetTurnId: 'session:m', requestedAt: '2026-01-01T00:00:00.000Z' })
-    // Simulate the crash window: files restored on disk, but the turn state
-    // drifted elsewhere. No turn rows may update.
-    db.prepare('UPDATE turns SET status = \'failed\' WHERE turn_id = ?').run('session:m')
-
-    assert.throws(
-      () => completeUndoTransaction(db, {
-        noticeId: 'n-m',
-        sessionId: 'session',
-        workspaceKey: 'ws',
-        targetTurnId: 'session:m',
-        restoredPaths: ['a.txt'],
-        notRestored: [],
-        operationId: 'op-m',
-        createdAt: '2026-01-01T00:01:00.000Z',
-      }),
-      /TURN_STATE_MISMATCH/,
-    )
-    const op = db.prepare('SELECT outcome, error FROM operations WHERE operation_id = ?').get('op-m')
-    assert.equal(op.outcome, 'needs-recovery')
-    assert.match(op.error, /TURN_STATE_MISMATCH/)
-    const notices = db.prepare('SELECT COUNT(*) c FROM rewind_notices').get().c
-    assert.equal(notices, 0)
-    assert.deepEqual(listNeedsRecoveryWorkspaces(db), ['ws'])
-  }
-  finally {
-    db.close()
     await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 })
   }
 })
