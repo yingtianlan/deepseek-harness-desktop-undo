@@ -9,7 +9,7 @@
  */
 
 import type { PlanEntry, SnapshotStore, UndoInput } from '../types'
-import type { Ledger, TurnRow } from './ledger'
+import type { Ledger, PendingPlanRow, TurnRow } from './ledger'
 import { randomUUID } from 'node:crypto'
 import { resolve } from 'pathe'
 import { MAX_FILE_BYTES } from '../constants'
@@ -51,7 +51,7 @@ import {
   settleOperation,
 } from './ledger'
 
-import { classifyUndo } from './planner'
+import { classifyUndo, planDrift } from './planner'
 
 // ————————————————— redo（与 undo 同等的生产加固：applying operation / 失败明细 / needs-recovery） —————————————————
 
@@ -548,6 +548,7 @@ export async function applyUndo(
   }
 
   let target: TurnRow | undefined
+  let planRow: (PendingPlanRow & { paths: string[] }) | undefined
   let pendingPlanClaimed = false
   let pendingPlanCommitted = false
   const abortPendingPlanClaim = (): void => {
@@ -565,6 +566,7 @@ export async function applyUndo(
     // Reserve the workspace before the first await so another confirm route
     // cannot start a concurrent restore during snapshot validation.
     runtime.undoing = true
+    planRow = claim.row
     const pendingTurnId = claim.row.turn_id
     target = getTurn(runtime.db, pendingTurnId)
     if (!target || !await turnRefsExist(runtime.store, target)) {
@@ -616,6 +618,15 @@ export async function applyUndo(
   runtime.undoing = true
   try {
     const paths = await snapshotDiff(runtime.store, target.before_ref, target.after_ref)
+    // 计划漂移校验（P1-2）：确认时的快照 ref 与重算 diff 必须与预览一致，
+    // 保证「确认的就是预览时看到的」。漂移即释放 claim 并要求重新预览。
+    if (planRow) {
+      const drift = planDrift(planRow, target, paths)
+      if (drift) {
+        abortPendingPlanClaim()
+        return { kind: 'error', text: `${drift} — run /undo again to preview a fresh plan.` }
+      }
+    }
     if (paths.length === 0) {
       if (pendingPlanClaimed) {
         markPendingPlanApplied(runtime.db, parsed.turnId!, invocation.agent.session.id, 'No file changes were recorded for this turn.')
@@ -645,6 +656,8 @@ export async function applyUndo(
         workspaceKey,
         turnId: target.turn_id,
         paths,
+        beforeRef: target.before_ref!,
+        afterRef: target.after_ref!,
       })
       return {
         kind: 'success',

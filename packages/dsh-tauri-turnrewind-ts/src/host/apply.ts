@@ -48,6 +48,7 @@ import {
   settleTurn,
   skipTurn,
 } from './service/ledger'
+import { planDrift } from './service/planner'
 import { applyUndo, buildPlanEntries, executeUndoRestore, turnRefsExist, workspaceForAgent, workspaceHasActiveTurn, workspaceIssue, workspaceKeyFor } from './service/undo'
 
 /** 插件名（诊断元数据，与 shared/constants 的 TURNREWIND_PLUGIN_NAME 一致）。 */
@@ -441,6 +442,11 @@ export function apply(ctx: HostApplyContext): void {
           if (target === undefined || target.reversible !== 1 || !target.before_ref || !target.after_ref || !await turnRefsExist(planRuntime.store, target))
             return [409, { error: 'the planned turn\'s snapshot data no longer exists — run /undo again' }]
           const paths = await snapshotDiff(planRuntime.store, target.before_ref, target.after_ref)
+          // 计划漂移校验（P1-2）：与命令路径同一规则——确认时的快照 ref 与
+          // 重算 diff 必须与预览一致，否则拒绝并要求重新预览。
+          const drift = planDrift(row, target, paths)
+          if (drift)
+            return [409, { error: `${drift} — run /undo again to refresh the plan` }]
           if (paths.length === 0) {
             markPendingPlanApplied(ledger, planId, sessionId, 'No file changes were recorded for this turn.')
             committed = true

@@ -4,6 +4,7 @@
 
 import type { DiskState, PathState } from '../types'
 import type { TurnRow } from './ledger'
+import { planPathsDigest } from './ledger'
 
 /** 叶序收集 turn 及其全部后代（父撤销的递归范围）。 */
 export function collectDescendantTurns(turn: TurnRow, childrenByParent: Map<string, TurnRow[]>): TurnRow[] {
@@ -48,4 +49,26 @@ export function classifyUndo(current: DiskState, expected: PathState): 'safe' | 
   if (current.digest !== expected.digest)
     return 'conflict'
   return 'safe'
+}
+
+/** pending plan 中参与漂移校验的绑定列（P1-2）。 */
+export interface PendingPlanBinding {
+  before_ref: string | null
+  after_ref: string | null
+  paths_digest: string | null
+}
+
+/**
+ * 计划漂移校验（P1-2）：确认时的 turn 快照 ref 与重算 diff 必须与预览一致，
+ * 即「确认的就是预览时看到的」。三列任一为 NULL 视为旧格式 plan（5 分钟
+ * TTL 内自然清空），跳过严格校验保持兼容。返回 undefined 表示未漂移。
+ */
+export function planDrift(plan: PendingPlanBinding, target: TurnRow, currentPaths: string[]): string | undefined {
+  if (plan.before_ref === null || plan.after_ref === null || plan.paths_digest === null)
+    return undefined
+  if (target.before_ref !== plan.before_ref || target.after_ref !== plan.after_ref)
+    return 'the turn snapshots no longer match the preview'
+  if (planPathsDigest(currentPaths) !== plan.paths_digest)
+    return 'the change set no longer matches the preview'
+  return undefined
 }

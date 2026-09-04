@@ -5,7 +5,7 @@
  * 一次性提示与恢复围栏（needs-recovery）的持久状态都住在这里。
  */
 
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import { dirname, join } from 'pathe'
@@ -123,6 +123,10 @@ export interface PendingPlanRow {
   result_text: string | null
   created_at: string
   expires_at: string
+  /** 预览时的快照绑定（P1-2）；旧格式行为 NULL，confirm 时跳过严格校验。 */
+  before_ref: string | null
+  after_ref: string | null
+  paths_digest: string | null
 }
 
 export type Ledger = DatabaseSync
@@ -140,6 +144,9 @@ export function openLedger(rootDir: string): Ledger {
     'ALTER TABLE rewind_notices ADD COLUMN reason TEXT',
     'ALTER TABLE pending_plans ADD COLUMN status TEXT NOT NULL DEFAULT \'pending\'',
     'ALTER TABLE pending_plans ADD COLUMN result_text TEXT',
+    'ALTER TABLE pending_plans ADD COLUMN before_ref TEXT',
+    'ALTER TABLE pending_plans ADD COLUMN after_ref TEXT',
+    'ALTER TABLE pending_plans ADD COLUMN paths_digest TEXT',
   ]) {
     try {
       db.exec(migration)
@@ -285,6 +292,11 @@ export function listNeedsRecoveryWorkspaces(db: Ledger): string[] {
   `).all() as { workspace_key: string }[]).map(row => row.workspace_key)
 }
 
+/** 预览路径集的稳定摘要：排序后 sha256。confirm 时校验计划是否漂移（P1-2）。 */
+export function planPathsDigest(paths: string[]): string {
+  return createHash('sha256').update([...paths].sort().join('\0')).digest('hex')
+}
+
 export function createPendingPlan(db: Ledger, plan: PendingPlan): string {
   db.exec('BEGIN')
   try {
@@ -294,9 +306,20 @@ export function createPendingPlan(db: Ledger, plan: PendingPlan): string {
     const planId = randomUUID()
     const createdAt = new Date().toISOString()
     db.prepare(`
-      INSERT INTO pending_plans(plan_id, session_id, workspace_key, turn_id, paths_json, created_at, expires_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(planId, plan.sessionId, plan.workspaceKey, plan.turnId, JSON.stringify(plan.paths), createdAt, new Date(Date.now() + PENDING_PLAN_TTL_MS).toISOString())
+      INSERT INTO pending_plans(plan_id, session_id, workspace_key, turn_id, paths_json, before_ref, after_ref, paths_digest, created_at, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      planId,
+      plan.sessionId,
+      plan.workspaceKey,
+      plan.turnId,
+      JSON.stringify(plan.paths),
+      plan.beforeRef,
+      plan.afterRef,
+      planPathsDigest(plan.paths),
+      createdAt,
+      new Date(Date.now() + PENDING_PLAN_TTL_MS).toISOString(),
+    )
     db.exec('COMMIT')
     return planId
   }
@@ -311,6 +334,9 @@ export interface PendingPlan {
   workspaceKey: string
   turnId: string
   paths: string[]
+  /** 预览时的 turn 快照 ref，confirm 时校验未被改写（P1-2）。 */
+  beforeRef: string
+  afterRef: string
 }
 
 /**

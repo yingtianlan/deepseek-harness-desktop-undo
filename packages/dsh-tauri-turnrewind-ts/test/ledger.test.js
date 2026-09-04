@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'pathe'
 import { it } from 'vitest'
-import { claimPendingPlan, claimRewindNotices, completeRedoTransaction, completeUndoTransaction, createOperation, createPendingPlan, getLatestAppliedUndo, getLatestSnapshotRef, getLatestTurn, getPendingPlanStatus, getTurn, insertTurn, listNeedsRecoveryWorkspaces, listReversibleTurns, markPendingPlanApplied, markPendingPlanCancelled, markTurnSnapshotMissing, openLedger, pruneConsumedNotices, queueRewindNotice, recordSkippedTurn, releasePendingPlanClaim, settleInterruptedTurn, settleNoopTurn, settleOperation, settleTurn } from '../src/host/service/ledger'
+import { claimPendingPlan, claimRewindNotices, completeRedoTransaction, completeUndoTransaction, createOperation, createPendingPlan, getLatestAppliedUndo, getLatestSnapshotRef, getLatestTurn, getPendingPlanStatus, getTurn, insertTurn, listNeedsRecoveryWorkspaces, listReversibleTurns, markPendingPlanApplied, markPendingPlanCancelled, markTurnSnapshotMissing, openLedger, planPathsDigest, pruneConsumedNotices, queueRewindNotice, recordSkippedTurn, releasePendingPlanClaim, settleInterruptedTurn, settleNoopTurn, settleOperation, settleTurn } from '../src/host/service/ledger'
 
 it('persists turn lifecycle and resumes from the latest durable snapshot', async () => {
   const root = await mkdtemp(join(tmpdir(), 'turnrewind-ledger-test-'))
@@ -444,9 +444,17 @@ it('claims a pending plan exactly once and serializes cancel/apply outcomes', as
       workspaceKey: 'workspace',
       turnId: 'session:1',
       paths: ['a.txt'],
+      beforeRef: 'refs/turnrewind/turn-1-before',
+      afterRef: 'refs/turnrewind/turn-1-after',
     })
     const first = claimPendingPlan(db, planId, 'session')
     assert.equal(first.ok, true)
+    if (first.ok) {
+      // The preview binding (P1-2) is persisted with the plan.
+      assert.equal(first.row.before_ref, 'refs/turnrewind/turn-1-before')
+      assert.equal(first.row.after_ref, 'refs/turnrewind/turn-1-after')
+      assert.equal(first.row.paths_digest, planPathsDigest(['a.txt']))
+    }
     assert.equal(getPendingPlanStatus(db, planId, 'session').status, 'applying')
     assert.equal(claimPendingPlan(db, planId, 'session').ok, false)
     assert.equal(markPendingPlanCancelled(db, planId, 'session'), false)

@@ -140,12 +140,16 @@ it('purges pending plans bound to the workspace', async () => {
       workspaceKey: workspaceKey(workspace),
       turnId: 'session:1',
       paths: ['a.txt'],
+      beforeRef: 'refs/turnrewind/turn-1-before',
+      afterRef: 'refs/turnrewind/turn-1-after',
     })
     createPendingPlan(db, {
       sessionId: 'session',
       workspaceKey: workspaceKey(join(root, 'other')),
       turnId: 'session:2',
       paths: ['b.txt'],
+      beforeRef: 'refs/turnrewind/turn-2-before',
+      afterRef: 'refs/turnrewind/turn-2-after',
     })
     db.close()
 

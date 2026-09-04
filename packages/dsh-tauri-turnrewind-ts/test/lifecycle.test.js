@@ -130,6 +130,32 @@ it('applies a confirmed undo and reports redo as disabled', { timeout: 30000 }, 
   }
 })
 
+it('rejects a confirm whose change set drifted from the preview', async () => {
+  const { root, workspace, db, runtime, active, invocation } = await setupTurn()
+  try {
+    const preview = await applyUndo(runtime, active, invocation())
+    assert.equal(preview.kind, 'success')
+    const planId = /plan ([0-9a-f-]+)/u.exec(preview.text)?.[1]
+    assert.ok(planId, 'preview must carry a pending plan id')
+
+    // Simulate plan drift: the persisted binding no longer matches what the
+    // confirm recomputes. The confirm must refuse and release the claim.
+    db.prepare('UPDATE pending_plans SET paths_digest = ? WHERE plan_id = ?').run('0'.repeat(64), planId)
+    const confirmed = await applyUndo(runtime, active, invocation(`--confirm ${planId}`))
+    assert.equal(confirmed.kind, 'error')
+    assert.match(confirmed.text, /change set no longer matches/u)
+
+    // Nothing was restored and the plan stays pending for a fresh confirm.
+    assert.equal(await readFile(join(workspace, 'a.txt'), 'utf8'), 'v2\n')
+    const row = db.prepare('SELECT status FROM pending_plans WHERE plan_id = ?').get(planId)
+    assert.equal(row.status, 'pending')
+  }
+  finally {
+    db.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 it('rejects invalid option combinations', async () => {
   const { root, db, runtime, active, invocation } = await setupTurn()
   try {
