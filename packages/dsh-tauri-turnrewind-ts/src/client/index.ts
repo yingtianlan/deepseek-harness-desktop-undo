@@ -39,7 +39,6 @@ export function apply(ctx: ClientContext): void {
   // 样式挂载：css-render 对象树，apply 生命周期内挂载/卸载。
   ctx.effect(() => mountDialogStyles(), 'turnrewind dialog styles')
   ctx.effect(() => mountCommandViewStyles(), 'turnrewind command-view styles')
-  ctx.effect(() => mountCommandViewStyles(), 'turnrewind command-view styles')
 
   const t = (key: LocaleKey): string => {
     const active = locale.getLocale().active

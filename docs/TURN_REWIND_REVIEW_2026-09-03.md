@@ -20,6 +20,25 @@
 
 因此当前适合继续在可丢弃的测试工作区验证，不建议在真实用户工作区中启用。
 
+## 1.1 修复状态更新（2026-09-04）
+
+本报告发布后，P0 修复已在 `dsh/turnrewind-ts-test` 分支完成并合入主分支，随后进行了复核与补充修复。当前状态：
+
+| 项 | 状态 | 处理方式 |
+| --- | --- | --- |
+| P0-1 目录递归删除 | ✅ 已修复 | `assertSafePath` 拒绝 workspace 根；restore 只删空目录，非空目录与非普通文件一律拒绝（含 `--force`） |
+| P0-2 interrupted turn 账本错误 | ✅ 已修复 | `completeUndoTransaction` 接受 settled/interrupted，`changes !== 1` 即回滚 |
+| P0-3 恢复与账本非原子 | ✅ 已修复 | turn/operation/notice 单事务提交，失败落 `needs-recovery` |
+| P0-4 redo 无失败恢复 | ✅ 以禁用方式关闭 | **产品决策：redo 功能冻结**。底层加固（applying operation / 失败明细 / needs-recovery 事务）已实现并保留测试，入口在 `applyUndo` 顶部直接拒绝；重新开放只需替换闸门行 |
+| P0-5 单路径失败无持久记录 | ✅ 已修复 | `notRestored` 明细写入 `operation.error` 与 notice paths |
+| P1-1 ~ P1-5 | ⬜ 未处理 | workspace 持久锁、plan 版本绑定、symlink、mode、TOCTOU（root 拒绝已随 P0-1 落地） |
+| P2-5 同步 rev-parse | ✅ 已修复 | 60s TTL 进程级缓存 |
+| P2-6 status route 方法限制 | ✅ 已修复 | `jsonRoute` 支持 `methods`，status 限 GET |
+| P2-7 客户端样式规范 | ✅ 已修复 | 样式迁移至 css-render 对象树，effect 管理挂载/卸载 |
+| P2-1/P2-2/P2-4 | ⬜ 未处理 | 子树 undo、文档冲突、容量治理（README 的 redo 章节已同步本次变更） |
+
+验证：17 个测试文件 / 85 个测试全部通过；typecheck、eslint（0 errors）、build（publint 通过）均绿。附带清理：删除根目录误提交的 `test/ledger.test.js`、去除 `client/index.ts` 中重复的样式挂载 effect。
+
 ## 2. 审查范围
 
 ### 2.1 源码

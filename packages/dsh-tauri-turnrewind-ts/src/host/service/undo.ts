@@ -36,7 +36,7 @@ import { isSystemSensitiveWorkspace } from './guard'
 
 import {
   claimPendingPlan,
-  completeRedoWithNotice,
+  completeRedoTransaction,
   completeUndoTransaction,
   createOperation,
   createPendingPlan,
@@ -53,7 +53,7 @@ import {
 
 import { classifyUndo } from './planner'
 
-// ————————————————— redo（与 JS 版同语义；生产加固仍为待办） —————————————————
+// ————————————————— redo（与 undo 同等的生产加固：applying operation / 失败明细 / needs-recovery） —————————————————
 
 async function applyRedo(runtime: WorkspaceRuntime, invocation: UndoInvocation, workspaceDir: string, workspaceKey: string): Promise<UndoOutcome> {
   const op = getLatestAppliedUndo(runtime.db, invocation.agent.session.id, workspaceKey)
@@ -93,18 +93,48 @@ async function applyRedo(runtime: WorkspaceRuntime, invocation: UndoInvocation, 
     const operationId = randomUUID()
     const beforeRef = `refs/turnrewind/redo-${operationId}`
     await captureSnapshot(runtime.store, beforeRef, `turnrewind redo ${turn.turn_id}`, runtime.parentRef)
-    for (const path of paths)
-      await restorePath(runtime.store, turn.after_ref, path)
-    completeRedoWithNotice(runtime.db, op.operation_id, turn.turn_id, {
+    // redo 与 undo 对等：先登记 applying operation，崩溃/账本失败时由
+    // needs-recovery 围栏接管，不再留下无围栏的部分 redo（P0-4）。
+    createOperation(runtime.db, {
+      operationId,
+      kind: 'redo',
+      targetTurnId: turn.turn_id,
+      requestedAt: new Date().toISOString(),
+      beforeRef,
+    })
+    const restoredPaths: string[] = []
+    const failedPaths: { path: string, reason: string }[] = []
+    for (const path of paths) {
+      try {
+        await restorePath(runtime.store, turn.after_ref, path)
+        restoredPaths.push(path)
+      }
+      catch (error) {
+        // 与 undo 相同的单路径策略：一个文件失败不炸整体，失败明细持久化。
+        failedPaths.push({ path, reason: String((error as Error).message ?? error) })
+      }
+    }
+    completeRedoTransaction(runtime.db, {
       noticeId: randomUUID(),
       sessionId: invocation.agent.session.id,
       workspaceKey,
       targetTurnId: turn.turn_id,
-      paths,
+      redoneOperationId: op.operation_id,
+      operationId,
+      restoredPaths,
+      notRestored: failedPaths,
       createdAt: new Date().toISOString(),
     })
     runtime.parentRef = beforeRef
-    return { kind: 'success', text: `re-applied ${paths.length} file(s). The next model request will receive a rewind notice.` }
+    let text = `re-applied ${restoredPaths.length} file(s). The next model request will receive a rewind notice.`
+    if (failedPaths.length > 0)
+      text += ` Not restored (${failedPaths.length} file(s)): ${failedPaths.map(failure => `${failure.path} (${failure.reason.includes('TURNREWIND_FILE_TOO_LARGE') ? 'over the size limit' : failure.reason})`).join('; ')}.`
+    return { kind: 'success', text }
+  }
+  catch (error) {
+    // completeRedoTransaction 已把本次 redo operation 落 needs-recovery，
+    // 启动围栏会拦截该 workspace；这里只负责把原因带给用户。
+    return { kind: 'error', text: String((error as Error)?.message ?? error) }
   }
   finally {
     runtime.undoing = false
@@ -486,6 +516,11 @@ export async function applyUndo(
   const parsed = parseUndoInput(invocation.rawInput)
   if ('error' in parsed)
     return { kind: 'error', text: parsed.error }
+  // 功能冻结闸门（2026-09-03 审查 P0-4 决策）：redo 先禁用、暂不开放。
+  // 底层加固已落地并保留测试（applying operation / 失败明细 / needs-recovery
+  // 事务），重新开放时把本分支换回 `return applyRedo(...)` 即可。
+  if (parsed.redo)
+    return { kind: 'error', text: '/undo --redo is temporarily disabled. The most recent undo cannot be re-applied for now.' }
 
   const workspaceDir = env.workspaceForAgent(invocation.agent)
   if (!workspaceDir) {

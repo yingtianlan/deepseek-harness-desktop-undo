@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'pathe'
 import { it } from 'vitest'
-import { claimPendingPlan, claimRewindNotices, completeRedoWithNotice, completeUndoTransaction, createOperation, createPendingPlan, getLatestAppliedUndo, getLatestSnapshotRef, getLatestTurn, getPendingPlanStatus, getTurn, insertTurn, listNeedsRecoveryWorkspaces, listReversibleTurns, markPendingPlanApplied, markPendingPlanCancelled, markTurnSnapshotMissing, openLedger, pruneConsumedNotices, queueRewindNotice, recordSkippedTurn, releasePendingPlanClaim, settleInterruptedTurn, settleNoopTurn, settleTurn } from '../src/host/service/ledger'
+import { claimPendingPlan, claimRewindNotices, completeRedoTransaction, completeUndoTransaction, createOperation, createPendingPlan, getLatestAppliedUndo, getLatestSnapshotRef, getLatestTurn, getPendingPlanStatus, getTurn, insertTurn, listNeedsRecoveryWorkspaces, listReversibleTurns, markPendingPlanApplied, markPendingPlanCancelled, markTurnSnapshotMissing, openLedger, pruneConsumedNotices, queueRewindNotice, recordSkippedTurn, releasePendingPlanClaim, settleInterruptedTurn, settleNoopTurn, settleOperation, settleTurn } from '../src/host/service/ledger'
 
 it('persists turn lifecycle and resumes from the latest durable snapshot', async () => {
   const root = await mkdtemp(join(tmpdir(), 'turnrewind-ledger-test-'))
@@ -289,24 +289,103 @@ it('redoes an applied undo and queues a redo notice atomically', async () => {
     assert.equal(undoNotices.length, 1)
     assert.equal(undoNotices[0].kind, 'undo')
 
-    completeRedoWithNotice(db, 'op-undo', 'session:1', {
+    createOperation(db, {
+      operationId: 'op-redo',
+      kind: 'redo',
+      targetTurnId: 'session:1',
+      requestedAt: '2026-01-01T00:02:00.000Z',
+      beforeRef: 'refs/turnrewind/redo-op-redo',
+    })
+    completeRedoTransaction(db, {
       noticeId: 'notice-redo',
       sessionId: 'session',
       workspaceKey: 'workspace',
       targetTurnId: 'session:1',
-      turns: ['session:1'],
-      paths: ['a.ts'],
+      redoneOperationId: 'op-undo',
+      operationId: 'op-redo',
+      restoredPaths: ['a.ts'],
+      notRestored: [],
       createdAt: '2026-01-01T00:02:00.000Z',
     })
     assert.equal(getTurn(db, 'session:1').status, 'settled')
     assert.equal(getTurn(db, 'session:1').reversible, 1)
     // A redone operation is no longer a redo candidate.
     assert.equal(getLatestAppliedUndo(db, 'session', 'workspace'), undefined)
+    // The redo itself is recorded as an applied operation.
+    assert.equal(db.prepare('SELECT outcome FROM operations WHERE operation_id = ?').get('op-redo').outcome, 'applied')
 
     const redoNotices = claimRewindNotices(db, 'session', 'workspace')
     assert.equal(redoNotices.length, 1)
     assert.equal(redoNotices[0].kind, 'redo')
     assert.deepEqual(redoNotices[0].paths, ['a.ts'])
+  }
+  finally {
+    db.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+it('fences a redo whose undo operation is no longer applied as needs-recovery', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'turnrewind-redo-fence-test-'))
+  const db = openLedger(root)
+  try {
+    insertTurn(db, {
+      turnId: 'session:1',
+      sessionId: 'session',
+      workspaceKey: 'workspace-fence',
+      startedAt: '2026-01-01T00:00:00.000Z',
+      beforeRef: 'refs/turnrewind/turn-1-before',
+    })
+    settleTurn(db, 'session:1', 'refs/turnrewind/turn-1-after')
+    createOperation(db, {
+      operationId: 'op-undo',
+      kind: 'undo',
+      targetTurnId: 'session:1',
+      requestedAt: '2026-01-01T00:01:00.000Z',
+    })
+    // The undo transaction completes: turn is undone, old op applied.
+    completeUndoTransaction(db, {
+      noticeId: 'notice-undo',
+      sessionId: 'session',
+      workspaceKey: 'workspace-fence',
+      targetTurnId: 'session:1',
+      restoredPaths: ['a.ts'],
+      notRestored: [],
+      operationId: 'op-undo',
+      createdAt: '2026-01-01T00:01:00.000Z',
+    })
+    // Consume the legitimate undo notice so the final assertion can require
+    // that no ADDITIONAL (redo) notice leaked from the failed transaction.
+    assert.equal(claimRewindNotices(db, 'session', 'workspace-fence').length, 1)
+    createOperation(db, {
+      operationId: 'op-redo',
+      kind: 'redo',
+      targetTurnId: 'session:1',
+      requestedAt: '2026-01-01T00:02:00.000Z',
+    })
+    // Another writer flipped the old undo operation out from under us: the
+    // redo must roll back and fence this workspace via needs-recovery.
+    settleOperation(db, 'op-undo', 'rolled_back')
+    assert.throws(
+      () => completeRedoTransaction(db, {
+        noticeId: 'notice-redo',
+        sessionId: 'session',
+        workspaceKey: 'workspace-fence',
+        targetTurnId: 'session:1',
+        redoneOperationId: 'op-undo',
+        operationId: 'op-redo',
+        restoredPaths: ['a.ts'],
+        notRestored: [],
+        createdAt: '2026-01-01T00:02:00.000Z',
+      }),
+      /OPERATION_STATE_MISMATCH/u,
+    )
+    // The redo operation was fenced; the workspace lands in the recovery list.
+    assert.equal(db.prepare('SELECT outcome FROM operations WHERE operation_id = ?').get('op-redo').outcome, 'needs-recovery')
+    assert.deepEqual(listNeedsRecoveryWorkspaces(db), ['workspace-fence'])
+    // Nothing from the failed transaction leaked: turn is still undone, no redo notice.
+    assert.equal(getTurn(db, 'session:1').status, 'undone')
+    assert.equal(claimRewindNotices(db, 'session', 'workspace-fence').length, 0)
   }
   finally {
     db.close()

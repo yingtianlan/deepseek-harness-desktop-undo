@@ -501,15 +501,6 @@ export function pruneConsumedNotices(db: Ledger, maxAgeMs: number = 7 * 24 * 60 
   return Number(db.prepare('DELETE FROM rewind_notices WHERE status = \'consumed\' AND claimed_at < ?').run(cutoff).changes)
 }
 
-export interface UndoNoticeInput {
-  noticeId: string
-  sessionId: string
-  workspaceKey: string
-  targetTurnId: string
-  paths: string[]
-  createdAt: string
-}
-
 /** undo 完成事务：turn → undone、operation → applied、notice 入队。 */
 export interface UndoCompletion {
   noticeId: string
@@ -576,29 +567,76 @@ export function completeUndoTransaction(db: Ledger, completion: UndoCompletion):
   }
 }
 
-/** redo 完成事务：旧 undo operation → redone、turn 回 settled、notice 入队。 */
-export function completeRedoWithNotice(db: Ledger, operationId: string, turnId: string, notice: UndoNoticeInput): void {
+/** redo 完成事务的输入：旧 undo operation + 本次 redo 自己的 applying operation。 */
+export interface RedoCompletion {
+  noticeId: string
+  sessionId: string
+  workspaceKey: string
+  targetTurnId: string
+  /** 被重做的旧 undo operation（applied 状态）。 */
+  redoneOperationId: string
+  /** 本次 redo 登记的 operation（applying 状态）。 */
+  operationId: string
+  restoredPaths: string[]
+  /** 重做失败的单路径清单（含原因），随 operation.error 与 notice 持久化。 */
+  notRestored: { path: string, reason: string }[]
+  createdAt: string
+}
+
+/**
+ * 完成一次 redo 的唯一入口：单事务内校验并落旧 operation/turn/新 operation/notice。
+ *
+ * - 旧 undo operation 只能从 applied → redone，turn 只能从 undone → settled，
+ *   任一 UPDATE 命中数 !== 1 即状态漂移：事务回滚且本次 redo operation 落
+ *   needs-recovery，交给启动围栏拦截该 workspace（与 undo 路径对等，P0-4）；
+ * - 未恢复路径写入 operation.error 与 notice，部分重做同样留下持久审计。
+ */
+export function completeRedoTransaction(db: Ledger, completion: RedoCompletion): 'settled' | 'needs-recovery' {
+  const summary = completion.notRestored.length > 0
+    ? completion.notRestored.map(entry => `${entry.path} (${entry.reason})`).join('; ')
+    : null
   db.exec('BEGIN')
   try {
-    db.prepare('UPDATE operations SET outcome = \'redone\', settled_at = ? WHERE operation_id = ?')
-      .run(new Date().toISOString(), operationId)
-    db.prepare('UPDATE turns SET status = \'settled\', reversible = 1 WHERE turn_id = ? AND status = \'undone\'').run(turnId)
+    const previous = db.prepare(`
+      UPDATE operations SET outcome = 'redone', settled_at = ?
+      WHERE operation_id = ? AND kind = 'undo' AND outcome = 'applied'
+    `).run(new Date().toISOString(), completion.redoneOperationId)
+    if (previous.changes !== 1)
+      throw new Error(`OPERATION_STATE_MISMATCH: undo operation ${completion.redoneOperationId} is no longer applied`)
+    const turn = db.prepare(`
+      UPDATE turns SET status = 'settled', reversible = 1, settled_at = ?
+      WHERE turn_id = ? AND status = 'undone'
+    `).run(new Date().toISOString(), completion.targetTurnId)
+    if (turn.changes !== 1)
+      throw new Error(`TURN_STATE_MISMATCH: turn ${completion.targetTurnId} is not undone`)
+    const operation = db.prepare(`
+      UPDATE operations SET outcome = 'applied', settled_at = ?, error = ?
+      WHERE operation_id = ? AND outcome = 'applying'
+    `).run(new Date().toISOString(), summary, completion.operationId)
+    if (operation.changes !== 1)
+      throw new Error(`OPERATION_STATE_MISMATCH: operation ${completion.operationId} is not applying`)
     db.prepare(`
       INSERT INTO rewind_notices(notice_id, session_id, workspace_key, target_turn_id, turns_json, paths_json, status, created_at, kind)
       VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, 'redo')
     `).run(
-      notice.noticeId,
-      notice.sessionId,
-      notice.workspaceKey,
-      notice.targetTurnId,
-      JSON.stringify([notice.targetTurnId]),
-      JSON.stringify(notice.paths),
-      notice.createdAt,
+      completion.noticeId,
+      completion.sessionId,
+      completion.workspaceKey,
+      completion.targetTurnId,
+      JSON.stringify([completion.targetTurnId]),
+      JSON.stringify([...completion.restoredPaths, ...completion.notRestored.map(entry => entry.path)]),
+      completion.createdAt,
     )
     db.exec('COMMIT')
+    return 'settled'
   }
   catch (error) {
     db.exec('ROLLBACK')
+    // 账本未能完成：redo operation 落 needs-recovery，启动围栏将拦截该 workspace
+    db.prepare(`
+      UPDATE operations SET outcome = 'needs-recovery', settled_at = ?, error = ?
+      WHERE operation_id = ? AND outcome = 'applying'
+    `).run(new Date().toISOString(), String((error as Error).message), completion.operationId)
     throw error
   }
 }

@@ -21,12 +21,12 @@
 - **两阶段 `/undo`**：先出预览卡（红绿 diff + `+x -y` 徽标 + 文件清单），卡内 ✓/✗ 按钮确认执行或取消——不看预览就不会误执行；计划 5 分钟过期，确认时二次校验磁盘；
 - 恢复前比较当前文件与 turn 完成时的快照，发现变化则拒绝覆盖，并给出「turn 产物 → 当前磁盘」的冲突 diff；
 - 冲突可用 `--skip-conflicts`（只恢复无冲突文件）或 `--force`（强制覆盖）直接执行；
-- `/undo --redo` 重做最近一次已应用的 undo（磁盘在 undo 后被改动则拒绝）；
+- `/undo --redo`（重做最近一次已应用的 undo）**已禁用**：入口在解析层直接拒绝，底层恢复路径加固代码保留但未开放（见「已禁用：redo」）；
 - 注册人类命令 `/undo`；
 - `/undo` 默认处理当前会话最新的单个可恢复 turn，也可指定完整 turn ID；
 - 同一 workspace 的活动 turn 或 undo 操作互斥；
-- 插件重启时将未完成 turn 标记为 abandoned；未完成的 **Undo** operation 会标记为 `needs-recovery`，对应 workspace 在清理前拒绝新的 rewind 操作，避免未知磁盘状态被继续覆盖；**redo 路径尚未接入该机制**（已知缺陷，功能冻结中，见「已知缺陷：redo」）；当前只能先人工检查 workspace，再停止 Host 并使用 purge 工具（见下文「清理已膨胀的快照数据」）清理该 workspace 的 turnrewind 数据后恢复使用；
-- 每次 Undo/Redo 的回退提示独立持久化；下一次模型 step 一次性注入全部 pending notice；
+- 插件重启时将未完成 turn 标记为 abandoned；未完成的 **Undo 与 Redo** operation 会标记为 `needs-recovery`，对应 workspace 在清理前拒绝新的 rewind 操作，避免未知磁盘状态被继续覆盖；当前只能先人工检查 workspace，再停止 Host 并使用 purge 工具（见下文「清理已膨胀的快照数据」）清理该 workspace 的 turnrewind 数据后恢复使用；
+- 每次 Undo 的回退提示独立持久化；下一次模型 step 一次性注入全部 pending notice；
 - 不修改用户项目的 HEAD、分支、index、stash 或提交历史。
 
 ## 使用方法
@@ -60,14 +60,14 @@
 其他：
 
 ```text
-/undo --redo                # 重做最近一次已应用的 undo
 /undo --cancel <plan-id>    # 取消一个待确认的预览计划
 ```
 
-当前不支持：
+当前不支持 / 已禁用：
 
 ```text
-/undo --subtree
+/undo --redo     # 已禁用（功能冻结），入口直接拒绝
+/undo --subtree  # 未实现
 ```
 
 父对话递归撤销、消息旁 Undo 按钮和设置页模式切换尚未实现。
@@ -318,9 +318,13 @@ commit history
 
 **如果不希望秘密文件进入快照**：把它们加进源仓库的 ignore 规则（对 git 和本插件同时生效）。也可以在 `/undo --dry-run` 的文件清单里核对实际被追踪的范围。插件仍是实验原型，不应把它当作秘密信息保护工具。
 
-### 已知缺陷：redo（暂缓）
+### 已禁用：redo（功能冻结）
 
-`/undo --redo` 的执行段**尚未**接入 operation 记录与失败回滚：执行中任一文件恢复失败（超大文件、目标路径变为 symlink/目录、rename 失败）会留下「部分 redo」状态，无回滚、无 `needs-recovery` 标记，重启后围栏不会拦截该 workspace。该功能目前按计划冻结、后续启用时与 undo 路径对齐（`createOperation` → 失败回滚 → `needs-recovery`）后再开放；在此之前请勿在含 >64 MB 文件或路径状态复杂的 turn 上使用 redo。
+`/undo --redo` 已在解析层禁用：任何包含 `--redo` 的输入都会得到「temporarily disabled」错误，不会触发快照校验或文件恢复。
+
+禁用原因（2026-09-03 审查报告 P0-4）：redo 的执行段此前未接入 operation 记录与失败回滚，执行中任一文件恢复失败会留下「部分 redo」状态，无 `needs-recovery` 围栏。
+
+底层加固已经完成并保留（未开放）：redo 现在与 undo 共用同一套机制——`createOperation` 登记 applying operation → 单路径失败计入 `notRestored` 明细 → `completeRedoTransaction` 在单事务内结算旧 undo operation / turn / 新 operation / notice，事务失败时 redo operation 落 `needs-recovery` 由启动围栏拦截。重新开放只需移除 `parseUndoInput` 中的 `--redo` 拒绝分支并恢复对应测试。
 
 ## Debug 安装
 
@@ -357,4 +361,4 @@ pnpm --filter dsh-tauri-turnrewind test
 - 实现父对话递归 undo；
 - 实现消息旁 Undo 按钮；
 - 明确二进制、重命名、权限位和特殊文件策略；
-- redo 执行段接入 operation 记录与失败回滚（见「已知缺陷：redo」）。
+- 重新开放 redo：移除解析层禁用分支、恢复端到端 redo 测试（底层加固已完成，见「已禁用：redo」）。

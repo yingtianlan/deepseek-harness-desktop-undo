@@ -107,47 +107,21 @@ it('forces a restore over a conflicted file', async () => {
   }
 })
 
-it('round-trips undo and redo', { timeout: 30000 }, async () => {
+it('applies a confirmed undo and reports redo as disabled', { timeout: 30000 }, async () => {
   const { root, workspace, db, runtime, active, invocation } = await setupTurn()
   try {
     const undo = await undoWithConfirm(runtime, active, invocation)
     assert.equal(undo.kind, 'success')
     assert.equal(await readFile(join(workspace, 'a.txt'), 'utf8'), 'v1\n')
     await assert.rejects(stat(join(workspace, 'c.txt')))
+    assert.equal(getTurn(db, 'session:1').status, 'undone')
 
-    const redo = await applyUndo(runtime, active, invocation('--redo'))
-    assert.equal(redo.kind, 'success')
-    assert.match(redo.text, /re-applied 2 file\(s\)/u)
-    assert.equal(await readFile(join(workspace, 'a.txt'), 'utf8'), 'v2\n')
-    assert.equal(await readFile(join(workspace, 'c.txt'), 'utf8'), 'new\n')
-    assert.equal(getTurn(db, 'session:1').status, 'settled')
-
-    // The turn is reversible again after the redo.
-    const undoAgain = await undoWithConfirm(runtime, active, invocation)
-    assert.equal(undoAgain.kind, 'success')
-    assert.equal(await readFile(join(workspace, 'a.txt'), 'utf8'), 'v1\n')
-
-    // A second redo targets the new undo operation.
-    const redoAgain = await applyUndo(runtime, active, invocation('--redo'))
-    assert.equal(redoAgain.kind, 'success')
-    assert.equal(await readFile(join(workspace, 'a.txt'), 'utf8'), 'v2\n')
-  }
-  finally {
-    db.close()
-    await rm(root, { recursive: true, force: true })
-  }
-})
-
-it('blocks redo when the disk changed after the undo', async () => {
-  const { root, workspace, db, runtime, active, invocation } = await setupTurn()
-  try {
-    const undo = await undoWithConfirm(runtime, active, invocation)
-    assert.equal(undo.kind, 'success')
-    await writeFile(join(workspace, 'a.txt'), 'edited-after-undo\n')
+    // Redo is frozen at the parser: even with a clean workspace the entry
+    // refuses before any snapshot/conflict work happens.
     const redo = await applyUndo(runtime, active, invocation('--redo'))
     assert.equal(redo.kind, 'error')
-    assert.match(redo.text, /Redo is blocked/u)
-    assert.match(redo.text, /\+edited-after-undo/u)
+    assert.match(redo.text, /temporarily disabled/u)
+    assert.equal(await readFile(join(workspace, 'a.txt'), 'utf8'), 'v1\n')
     assert.equal(getTurn(db, 'session:1').status, 'undone')
   }
   finally {
