@@ -494,7 +494,7 @@ export function apply(ctx: HostApplyContext): void {
     const routes = [
       jsonRoute('/api/turnrewind/confirm', confirmRoute, { mutate: true }),
       jsonRoute('/api/turnrewind/cancel', cancelRoute, { mutate: true }),
-      jsonRoute('/api/turnrewind/status', statusRoute),
+      jsonRoute('/api/turnrewind/status', statusRoute, { methods: ['GET'] }),
     ]
     const disposers = routes.map(route => ctx.webServer.register(route))
     return () => disposers.map(dispose => dispose())

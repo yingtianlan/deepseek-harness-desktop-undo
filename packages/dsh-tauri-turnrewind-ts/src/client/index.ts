@@ -14,6 +14,7 @@ import { TURNREWIND_HTTP_BASE, TURNREWIND_LOCALE_NS } from './constants'
 import { LOCALES } from './locales'
 import { registerCommandView } from './register/command-view'
 import { disposeDialog, pickFreshNotices, showDialog } from './register/dialog'
+import { mountDialogStyles } from './styles'
 import { parseUndoOutput, resolvePlanStatus } from './utils/parse'
 import { resolveOwnerSessionId } from './utils/session'
 
@@ -34,6 +35,9 @@ export const inject = ['slots', 'sessions', 'locale']
 export function apply(ctx: ClientContext): void {
   const cx = compat(ctx)
   const locale = cx.locale
+
+  // 样式挂载：css-render 对象树，apply 生命周期内挂载/卸载。
+  ctx.effect(() => mountDialogStyles(), 'turnrewind dialog styles')
 
   const t = (key: LocaleKey): string => {
     const active = locale.getLocale().active

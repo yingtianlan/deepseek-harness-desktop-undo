@@ -31,7 +31,16 @@ export interface WebRoute {
   handler: (req: RouteRequest, res: RouteResponse) => void
 }
 
-export function jsonRoute(path: string, handler: RouteHandler, { mutate = false }: { mutate?: boolean } = {}): WebRoute {
+export interface JsonRouteOptions {
+  mutate?: boolean
+  /** 允许的 HTTP 方法（大写）。缺省不限制；mutate 路由隐式限定 POST。 */
+  methods?: string[]
+}
+
+export function jsonRoute(path: string, handler: RouteHandler, { mutate = false, methods = [] }: JsonRouteOptions = {}): WebRoute {
+  const allowed = new Set(methods.map(m => m.toUpperCase()))
+  if (mutate)
+    allowed.add('POST')
   return {
     kind: 'exact',
     path,
@@ -44,6 +53,11 @@ export function jsonRoute(path: string, handler: RouteHandler, { mutate = false 
       if (mutate && req.method !== 'POST') {
         res.setHeader('allow', 'POST')
         send(405, { error: 'mutation routes require POST' })
+        return
+      }
+      if (allowed.size > 0 && !allowed.has((req.method ?? '').toUpperCase())) {
+        res.setHeader('allow', [...allowed].join(', '))
+        send(405, { error: 'method not allowed' })
         return
       }
       const parts: string[] = []
