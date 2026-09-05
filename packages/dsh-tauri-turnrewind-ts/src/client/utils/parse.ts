@@ -76,8 +76,8 @@ export function parseUndoOutput(raw: string | undefined): ParsedUndoOutput {
   return result
 }
 
-/** plan 状态轮询的结局判定（gone 即停；applied/cancelled/error 带 resultText）。 */
-export function resolvePlanStatus(res: { ok: boolean, status: number }, payload: { status?: string, resultText?: string | null } | null): { status: 'pending' | 'applied' | 'cancelled' | 'gone' | 'error' | null, stop: boolean, resultText: string | null } {
+/** plan 状态轮询的结局判定（expired/gone/applied/cancelled/error 终态；非 404 失败继续轮询）。 */
+export function resolvePlanStatus(res: { ok: boolean, status: number }, payload: { status?: string, resultText?: string | null } | null): { status: 'pending' | 'applied' | 'cancelled' | 'expired' | 'gone' | 'error' | null, stop: boolean, resultText: string | null } {
   // Non-404 failures must not settle the card: the plan may still land on a
   // later poll, so keep polling without flipping to a terminal state.
   if (!res.ok)
@@ -85,6 +85,9 @@ export function resolvePlanStatus(res: { ok: boolean, status: number }, payload:
   const status = payload?.status
   if (status === 'gone')
     return { status: 'gone', stop: true, resultText: null }
+  // expired 是终态但不是 gone：plan 行已留档，卡片保留留档视图、仅不可执行。
+  if (status === 'expired')
+    return { status: 'expired', stop: true, resultText: payload?.resultText ?? null }
   if (status === 'applied' || status === 'cancelled' || status === 'error')
     return { status, stop: true, resultText: payload?.resultText ?? null }
   return { status: 'pending', stop: false, resultText: null }

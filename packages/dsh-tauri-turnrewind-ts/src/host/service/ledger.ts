@@ -165,14 +165,15 @@ export function openLedger(rootDir: string): Ledger {
 }
 
 /**
- * 失效 plan 清扫：只删过期的 pending 行。
+ * 失效 plan 清扫：过期的 pending 行转为 `expired` 永久留档，不删除。
  *
- * settled 行（applied/cancelled）**永远保留**：undo 的执行结果必须可追溯
- * （刷新页面、跨天查看、审计），结果行就是持久记录——删了它卡片就变成
- * "gone"，用户看不到已经执行了什么。
+ * 过期只锁执行（confirm 路径按状态拒绝），不抹掉审计记录：卡片里的文件
+ * 清单与 diff 来自命令输出文本（对话内永久存在），plan 行保留后状态轮询
+ * 返回 expired，用户随时可以回看「当时预览了什么」。settled 行
+ * （applied/cancelled）同样永远保留。
  */
 export function prunePendingPlans(db: Ledger): void {
-  db.prepare('DELETE FROM pending_plans WHERE status = \'pending\' AND expires_at < ?')
+  db.prepare('UPDATE pending_plans SET status = \'expired\' WHERE status = \'pending\' AND expires_at < ?')
     .run(new Date().toISOString())
 }
 
@@ -301,7 +302,8 @@ export function createPendingPlan(db: Ledger, plan: PendingPlan): string {
   db.exec('BEGIN')
   try {
     // One live plan per session+workspace: a newer preview replaces the older.
-    db.prepare('DELETE FROM pending_plans WHERE session_id = ? AND workspace_key = ?')
+    // 被替换的旧 plan 转 expired 留档（审计可见），不再物理删除。
+    db.prepare('UPDATE pending_plans SET status = \'expired\' WHERE session_id = ? AND workspace_key = ? AND status = \'pending\'')
       .run(plan.sessionId, plan.workspaceKey)
     const planId = randomUUID()
     const createdAt = new Date().toISOString()
@@ -348,14 +350,17 @@ export interface PendingPlan {
 export function claimPendingPlan(db: Ledger, planId: string, sessionId: string): { ok: true, row: PendingPlanRow & { paths: string[] } } | { ok: false, code: number, error: string } {
   const row = db.prepare('SELECT * FROM pending_plans WHERE plan_id = ?').get(planId) as unknown as PendingPlanRow | undefined
   if (row === undefined)
-    return { ok: false, code: 404, error: 'plan expired or already applied — run /undo again' }
+    return { ok: false, code: 404, error: 'plan not found — run /undo again' }
   if (row.session_id !== sessionId)
     return { ok: false, code: 403, error: 'the plan belongs to another session' }
+  // 过期 plan 转 expired 留档但拒绝执行：过期锁的是执行，不是查看。
+  if (row.status === 'expired')
+    return { ok: false, code: 410, error: 'this plan has expired — run /undo again to preview a fresh plan' }
   if (row.status !== 'pending')
     return { ok: false, code: 409, error: 'this plan was already applied, cancelled, or is being applied — run /undo again' }
   if (row.expires_at < new Date().toISOString()) {
-    db.prepare('DELETE FROM pending_plans WHERE plan_id = ? AND status = \'pending\'').run(planId)
-    return { ok: false, code: 404, error: 'plan expired or already applied — run /undo again' }
+    db.prepare('UPDATE pending_plans SET status = \'expired\' WHERE plan_id = ? AND status = \'pending\'').run(planId)
+    return { ok: false, code: 410, error: 'this plan has expired — run /undo again to preview a fresh plan' }
   }
   const claimed = db.prepare(`
     UPDATE pending_plans SET status = 'applying'
@@ -383,9 +388,11 @@ export function getPendingPlanRow(db: Ledger, planId: string): (PendingPlanRow &
   const row = db.prepare('SELECT * FROM pending_plans WHERE plan_id = ?').get(planId) as unknown as PendingPlanRow | undefined
   if (row === undefined)
     return undefined
+  // 过期 pending 转 expired 留档并原样返回（status = 'expired'），
+  // 由调用方按状态拒绝执行；行本身保留供审计查看。
   if (row.status === 'pending' && row.expires_at < new Date().toISOString()) {
-    db.prepare('DELETE FROM pending_plans WHERE plan_id = ? AND status = \'pending\'').run(planId)
-    return undefined
+    db.prepare('UPDATE pending_plans SET status = \'expired\' WHERE plan_id = ? AND status = \'pending\'').run(planId)
+    row.status = 'expired'
   }
   return { ...row, paths: JSON.parse(row.paths_json) }
 }
@@ -408,8 +415,15 @@ export function markPendingPlanApplied(db: Ledger, planId: string, sessionId: st
 }
 
 export function getPendingPlanStatus(db: Ledger, planId: string, sessionId: string): { status: string, resultText: string | null } | undefined {
-  const row = db.prepare('SELECT status, result_text FROM pending_plans WHERE plan_id = ? AND session_id = ?').get(planId, sessionId) as unknown as { status: string, result_text: string | null } | undefined
-  return row === undefined ? undefined : { status: row.status, resultText: row.result_text }
+  const row = db.prepare('SELECT plan_id, status, result_text, expires_at FROM pending_plans WHERE plan_id = ? AND session_id = ?').get(planId, sessionId) as unknown as { plan_id: string, status: string, result_text: string | null, expires_at: string } | undefined
+  if (row === undefined)
+    return undefined
+  // 过期 pending 转 expired 留档：状态轮询如实回报，卡片保留留档视图但不再可执行。
+  if (row.status === 'pending' && row.expires_at < new Date().toISOString()) {
+    db.prepare('UPDATE pending_plans SET status = \'expired\' WHERE plan_id = ? AND status = \'pending\'').run(row.plan_id)
+    row.status = 'expired'
+  }
+  return { status: row.status, resultText: row.result_text }
 }
 
 export function settleTurn(db: Ledger, turnId: string, afterRef: string): void {

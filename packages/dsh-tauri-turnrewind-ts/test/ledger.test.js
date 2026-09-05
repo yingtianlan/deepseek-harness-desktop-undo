@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'pathe'
 import { it } from 'vitest'
-import { claimPendingPlan, claimRewindNotices, completeRedoTransaction, completeUndoTransaction, createOperation, createPendingPlan, getLatestAppliedUndo, getLatestSnapshotRef, getLatestTurn, getPendingPlanStatus, getTurn, insertTurn, listNeedsRecoveryWorkspaces, listReversibleTurns, markPendingPlanApplied, markPendingPlanCancelled, markTurnSnapshotMissing, openLedger, planPathsDigest, pruneConsumedNotices, queueRewindNotice, recordSkippedTurn, releasePendingPlanClaim, settleInterruptedTurn, settleNoopTurn, settleOperation, settleTurn } from '../src/host/service/ledger'
+import { claimPendingPlan, claimRewindNotices, completeRedoTransaction, completeUndoTransaction, createOperation, createPendingPlan, getLatestAppliedUndo, getLatestSnapshotRef, getLatestTurn, getPendingPlanRow, getPendingPlanStatus, getTurn, insertTurn, listNeedsRecoveryWorkspaces, listReversibleTurns, markPendingPlanApplied, markPendingPlanCancelled, markTurnSnapshotMissing, openLedger, planPathsDigest, pruneConsumedNotices, prunePendingPlans, queueRewindNotice, recordSkippedTurn, releasePendingPlanClaim, settleInterruptedTurn, settleNoopTurn, settleOperation, settleTurn } from '../src/host/service/ledger'
 
 it('persists turn lifecycle and resumes from the latest durable snapshot', async () => {
   const root = await mkdtemp(join(tmpdir(), 'turnrewind-ledger-test-'))
@@ -466,6 +466,58 @@ it('claims a pending plan exactly once and serializes cancel/apply outcomes', as
     markPendingPlanApplied(db, planId, 'session', 'applied once')
     assert.deepEqual(getPendingPlanStatus(db, planId, 'session'), { status: 'applied', resultText: 'applied once' })
     assert.equal(claimPendingPlan(db, planId, 'session').ok, false)
+  }
+  finally {
+    db.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+it('archives expired plans as expired instead of deleting them', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'turnrewind-plan-expire-'))
+  const db = openLedger(root)
+  try {
+    const planId = createPendingPlan(db, {
+      sessionId: 'session',
+      workspaceKey: 'workspace',
+      turnId: 'session:1',
+      paths: ['a.txt'],
+      beforeRef: 'refs/turnrewind/b',
+      afterRef: 'refs/turnrewind/a',
+    })
+    // Force the plan past its TTL.
+    db.prepare('UPDATE pending_plans SET expires_at = \'2020-01-01T00:00:00.000Z\' WHERE plan_id = ?').run(planId)
+
+    // The status poll converts it to expired and reports it (NOT gone):
+    // the card keeps its archived view, only execution is refused.
+    assert.deepEqual(getPendingPlanStatus(db, planId, 'session'), { status: 'expired', resultText: null })
+    assert.equal(db.prepare('SELECT status FROM pending_plans WHERE plan_id = ?').get(planId).status, 'expired')
+
+    // The row lookup for the confirm route also reports expired (not undefined).
+    const row = getPendingPlanRow(db, planId)
+    assert.equal(row.status, 'expired')
+
+    // Claiming an expired plan is refused with a precise error; the row stays.
+    const claim = claimPendingPlan(db, planId, 'session')
+    assert.equal(claim.ok, false)
+    assert.equal(claim.ok ? 200 : claim.code, 410)
+    assert.match(claim.ok ? '' : claim.error, /has expired/u)
+    assert.equal(db.prepare('SELECT status FROM pending_plans WHERE plan_id = ?').get(planId).status, 'expired')
+
+    // A newer preview expires the replaced plan (kept as archive) instead of deleting it.
+    const secondId = createPendingPlan(db, {
+      sessionId: 'session',
+      workspaceKey: 'workspace',
+      turnId: 'session:2',
+      paths: ['b.txt'],
+      beforeRef: 'refs/turnrewind/b2',
+      afterRef: 'refs/turnrewind/a2',
+    })
+    db.prepare('UPDATE pending_plans SET expires_at = \'2020-01-01T00:00:00.000Z\' WHERE plan_id = ?').run(secondId)
+    prunePendingPlans(db)
+    const statuses = db.prepare('SELECT plan_id, status FROM pending_plans WHERE session_id = ? ORDER BY plan_id').all('session')
+    assert.equal(statuses.length, 2)
+    assert.deepEqual(statuses.map(row2 => row2.status), ['expired', 'expired'])
   }
   finally {
     db.close()

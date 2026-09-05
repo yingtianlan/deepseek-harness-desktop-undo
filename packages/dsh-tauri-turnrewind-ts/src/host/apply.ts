@@ -435,9 +435,12 @@ export function apply(ctx: HostApplyContext): void {
         return [400, { error: 'planId and sessionId are required' }]
       const previewRow = getPendingPlanRow(ledger, planId)
       if (previewRow === undefined)
-        return [404, { error: 'plan expired or already applied — run /undo again' }]
+        return [404, { error: 'plan not found — run /undo again' }]
       if (previewRow.session_id !== sessionId)
         return [403, { error: 'the plan belongs to another session' }]
+      // 过期 plan 已转 expired 留档：明确告知过期（可查看，不可执行）。
+      if (previewRow.status === 'expired')
+        return [409, { error: 'this plan has expired — run /undo again to preview a fresh plan' }]
       if (previewRow.status !== 'pending')
         return [409, { error: 'this plan was already applied or cancelled — run /undo again' }]
       const planRuntime = workspaceStores.get(previewRow.workspace_key)

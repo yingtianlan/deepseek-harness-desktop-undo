@@ -19,6 +19,13 @@ it('resolvePlanStatus settles an expired plan as gone and stops polling', () => 
   assert.deepEqual(explicit, { status: 'gone', stop: true, resultText: null })
 })
 
+it('resolvePlanStatus treats expired as a terminal archived state (not gone)', () => {
+  // Expired plans stay in the ledger: the card keeps its archived view and
+  // only execution is refused — it must NOT collapse to gone.
+  const expired = client.resolvePlanStatus({ ok: true, status: 200 }, { status: 'expired' })
+  assert.deepEqual(expired, { status: 'expired', stop: true, resultText: null })
+})
+
 it('resolvePlanStatus stops polling once the plan settles', () => {
   const applied = client.resolvePlanStatus({ ok: true, status: 200 }, { status: 'applied', resultText: 'Undid turn x' })
   assert.deepEqual(applied, { status: 'applied', stop: true, resultText: 'Undid turn x' })

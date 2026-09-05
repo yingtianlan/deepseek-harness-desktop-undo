@@ -203,7 +203,9 @@ export function UndoCommandView(props: CommandViewProps): React.ReactElement {
     }
   }, [state, parsed.planId, ownerSessionId])
 
-  const collapsed = planStatus === 'cancelled' || planStatus === 'gone'
+  // 只有「真不存在」（旧数据被清理/工作区被 purge）才折叠为细行；
+  // cancelled/expired 的 plan 行已永久留档，卡片保留文件清单与 diff 供随时回看。
+  const collapsed = planStatus === 'gone'
   const showBody = expanded && !collapsed && (hasDiff || parsed.files.length > 0)
   const actionable = parsed.planId !== undefined && state === 'ok' && !collapsed && (planStatus === null || planStatus === 'pending')
   // ref 防抖：React 状态更新慢一拍，双击会绕过 state-only 检查发两次请求。
@@ -252,13 +254,13 @@ export function UndoCommandView(props: CommandViewProps): React.ReactElement {
     ? `执行确认失败：${submitError}`
     : resultText || (planStatus === 'applied' || pendingWait
       ? '已提交，等待执行结果…'
-      : planStatus === 'cancelled' || submitted === 'cancel' ? '已取消' : planStatus === 'gone' ? '该计划已过期，重新执行 /undo 可生成新预览' : '执行将恢复下方文件到本轮改动前')
-  // 提交后的结果（成功/失败/等待中）靠左展示；预览提示贴 footer 右缘。
+      : planStatus === 'expired' || planStatus === 'gone' ? '该计划已过期，重新执行 /undo 可生成新预览' : planStatus === 'cancelled' || submitted === 'cancel' ? '已取消' : '执行将恢复下方文件到本轮改动前')
+  // 提交后的结果（成功/失败/等待中）靠左展示；预览/过期/取消提示贴 footer 右缘。
   const hintLeft = Boolean(resultText || submitError || submitted !== null || planStatus === 'applied')
   const hintCls = `${TURNREWIND_CLASS_PREFIX}-card-hint${submitError
     ? ` ${TURNREWIND_CLASS_PREFIX}-card-hint-error`
     : resultText || planStatus === 'applied' ? ` ${TURNREWIND_CLASS_PREFIX}-card-hint-ok` : ''}${hintLeft ? '' : ` ${TURNREWIND_CLASS_PREFIX}-card-hint-right`}`
-  const showFooter = actionable || submitting || resultText !== null || submitError !== null || submitted !== null || planStatus === 'applied'
+  const showFooter = actionable || submitting || resultText !== null || submitError !== null || submitted !== null || planStatus === 'applied' || planStatus === 'expired' || planStatus === 'cancelled'
 
   // 取消/过期折叠为无边框细行。
   if (collapsed) {
