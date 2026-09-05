@@ -20,7 +20,7 @@
 import type { SnapshotStore } from '../types'
 import type { Ledger } from './ledger'
 import { spawnSync } from 'node:child_process'
-import { existsSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs'
 import process from 'node:process'
 import { join } from 'pathe'
 import { SYNC_GIT_TIMEOUT_MS } from '../constants'
@@ -139,12 +139,25 @@ export function enforceRetention(db: Ledger, store: SnapshotStore, options: Rete
   pruneRepoLooseObjects(store.repoDir)
   result.repoSizeMb = directorySizeMb(store.repoDir)
   if (result.repoSizeMb > maxSnapshotMb) {
+    // 两阶段重建：先把 live 仓库整体改名进隔离目录，再删隔离目录。rename
+    // 是原子发布点，之后任何一步死亡都自洽——live 路径已空，下次 capture
+    // 走既有自愈路径重建基线，账本过期如实；直删在半途死亡会留下一个半删
+    // 的 live 目录。固定名隔离目录由本轮先清：同 workspace 的治理已被
+    // workspace 锁串行化，残留只可能来自上一轮崩溃。
+    const quarantine = `${store.repoDir}.retention-quarantine`
+    rmSync(quarantine, { recursive: true, force: true })
     db.prepare(`
       UPDATE turns SET reversible = 0,
         error = 'retention: snapshot repository rebuilt (size cap)'
       WHERE workspace_key = ? AND reversible = 1 AND status IN ('settled', 'interrupted')
     `).run(workspaceIdentity)
-    rmSync(store.repoDir, { recursive: true, force: true })
+    renameSync(store.repoDir, quarantine)
+    try {
+      rmSync(quarantine, { recursive: true, force: true })
+    }
+    catch {
+      // 尽力而为：隔离目录残留不回滚账本（过期已是事实），下一轮治理重试。
+    }
     result.rebuilt = true
     result.expiredByRebuild = reversible.length
   }

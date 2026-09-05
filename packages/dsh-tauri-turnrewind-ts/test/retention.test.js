@@ -74,6 +74,9 @@ it('rebuilds the snapshot repository when it exceeds the size cap', async () => 
   // Simulate a bloated snapshot repo (the size walk reads the real directory).
   await mkdir(join(store.repoDir, 'objects'), { recursive: true })
   await writeFile(join(store.repoDir, 'objects', 'blob'), Buffer.alloc(2 * 1024 * 1024, 1))
+  // A leftover quarantine from a crashed earlier rebuild must be swept first.
+  await mkdir(`${store.repoDir}.retention-quarantine`, { recursive: true })
+  await writeFile(join(`${store.repoDir}.retention-quarantine`, 'junk'), Buffer.alloc(1024, 1))
   process.env.TURNREWIND_MAX_SNAPSHOT_MB = '1'
 
   const result = enforceRetention(db, store, { retainTurns: 50 })
@@ -92,6 +95,9 @@ it('rebuilds the snapshot repository when it exceeds the size cap', async () => 
     SELECT error FROM turns WHERE workspace_key = ? AND reversible = 0
   `).all().map(row => row.error)
   assert.ok(errors.every(error => /snapshot repository rebuilt/u.test(error)))
+  // Two-phase rebuild: no half-deleted live directory or quarantine leftover.
+  assert.equal(existsSync(store.repoDir), false)
+  assert.equal(existsSync(`${store.repoDir}.retention-quarantine`), false)
   db.close()
 })
 
