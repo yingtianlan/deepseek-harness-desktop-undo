@@ -253,11 +253,11 @@ export function UndoCommandView(props: CommandViewProps): React.ReactElement {
     : resultText || (planStatus === 'applied' || pendingWait
       ? '已提交，等待执行结果…'
       : planStatus === 'cancelled' || submitted === 'cancel' ? '已取消' : planStatus === 'gone' ? '该计划已过期，重新执行 /undo 可生成新预览' : '执行将恢复下方文件到本轮改动前')
+  // 提交后的结果（成功/失败/等待中）靠左展示；预览提示贴 footer 右缘。
+  const hintLeft = Boolean(resultText || submitError || submitted !== null || planStatus === 'applied')
   const hintCls = `${TURNREWIND_CLASS_PREFIX}-card-hint${submitError
     ? ` ${TURNREWIND_CLASS_PREFIX}-card-hint-error`
-    : resultText || planStatus === 'applied' ? ` ${TURNREWIND_CLASS_PREFIX}-card-hint-ok` : ''}`
-  // 提交后的结果（成功/失败/等待中）靠左展示；预览提示跟随按钮右侧。
-  const hintLeft = Boolean(resultText || submitError || submitted !== null || planStatus === 'applied')
+    : resultText || planStatus === 'applied' ? ` ${TURNREWIND_CLASS_PREFIX}-card-hint-ok` : ''}${hintLeft ? '' : ` ${TURNREWIND_CLASS_PREFIX}-card-hint-right`}`
   const showFooter = actionable || submitting || resultText !== null || submitError !== null || submitted !== null || planStatus === 'applied'
 
   // 取消/过期折叠为无边框细行。

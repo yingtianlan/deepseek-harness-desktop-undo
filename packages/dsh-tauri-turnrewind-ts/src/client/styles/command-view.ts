@@ -94,6 +94,10 @@ export function buildCommandViewStyleNodes(cssr: ReturnType<typeof CssRender>) {
       whiteSpace: 'nowrap',
       flex: 1,
     }),
+    // 预览提示与 spacer 各占一半 flex，靠 text-align 贴右边。
+    cssr.c(`.${P}-card-hint-right`, {
+      textAlign: 'right',
+    }),
     cssr.c(`.${P}-card-hint-error`, {
       color: 'var(--dsw-alias-state-error-primary, #f85149)',
     }),
