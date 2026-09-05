@@ -275,6 +275,56 @@ it('rejects paths outside the workspace', async () => {
   }
 })
 
+it('refuses to restore or inspect the workspace root itself', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'turnrewind-root-test-'))
+  const workspace = join(root, 'workspace')
+  try {
+    await initGitWorkspace(workspace)
+    await writeFile(join(workspace, 'a.txt'), 'one')
+    const store = createSnapshotStore(join(root, 'data'), workspace)
+    const snapshot = await captureSnapshot(store, 'refs/turnrewind/root-ref', 'snap')
+
+    // '.' normalizes to the workspace root; a restore there would delete the
+    // whole workspace including .git. Both disk-touching entries must refuse.
+    await assert.rejects(restorePath(store, snapshot.commit, '.'), /TURNREWIND_PATH_ESCAPE/)
+    assert.throws(() => currentState(workspace, '.'), /TURNREWIND_PATH_ESCAPE/)
+    assert.equal(await readFile(join(workspace, 'a.txt'), 'utf8'), 'one')
+  }
+  finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+it('refuses a non-empty directory at an absent path and removes an empty one', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'turnrewind-dir-test-'))
+  const workspace = join(root, 'workspace')
+  try {
+    await initGitWorkspace(workspace)
+    await writeFile(join(workspace, 'a.txt'), 'one')
+    const store = createSnapshotStore(join(root, 'data'), workspace)
+    const before = await captureSnapshot(store, 'refs/turnrewind/dir-before', 'before')
+
+    // The turn created a file that the human later replaced by a directory
+    // holding unrelated files: undo must not recursively delete that tree.
+    await mkdir(join(workspace, 'foo'))
+    await writeFile(join(workspace, 'foo', 'user-file.txt'), 'keep me')
+    await assert.rejects(
+      restorePath(store, before.commit, 'foo'),
+      /TURNREWIND_UNSUPPORTED_TARGET.*non-empty directory/u,
+    )
+    assert.equal(await readFile(join(workspace, 'foo', 'user-file.txt'), 'utf8'), 'keep me')
+
+    // An empty directory holds nothing to lose: the restore removes it
+    // (regression pin — rmSync without directory semantics throws EISDIR).
+    await mkdir(join(workspace, 'bar'))
+    assert.deepEqual(await restorePath(store, before.commit, 'bar'), { path: 'bar', result: 'removed' })
+    await assert.rejects(stat(join(workspace, 'bar')), { code: 'ENOENT' })
+  }
+  finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 it('accepts Git worktrees and rejects ordinary directories', async () => {
   const root = await mkdtemp(join(tmpdir(), 'turnrewind-probe-'))
   const workspace = join(root, 'ws')

@@ -32,6 +32,7 @@ import {
   readdirSync,
   readFileSync,
   renameSync,
+  rmdirSync,
   rmSync,
   writeFileSync,
 } from 'node:fs'
@@ -702,7 +703,10 @@ export async function restorePath(store: SnapshotStore, commit: string, path: st
         if (contents.length > 0)
           throw new Error(`TURNREWIND_UNSUPPORTED_TARGET: ${path} is now a non-empty directory; undo will not recursively delete it (remove it manually if intended)`)
         assertSafePath(store.workspaceDir, path)
-        rmSync(target, { force: true })
+        // rmdirSync only succeeds on an empty directory: rmSync without
+        // recursive throws ERR_FS_EISDIR, and with recursive a file planted
+        // between readdir and the delete would be destroyed with the tree.
+        rmdirSync(target)
       }
       else {
         assertSafePath(store.workspaceDir, path)
