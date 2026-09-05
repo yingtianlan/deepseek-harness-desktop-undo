@@ -32,6 +32,7 @@
   "files": [
     "README.md",
     "cordis.patch.yml",
+    "purge-workspace.mjs",
     "dist"
   ],
   "dsh": {
@@ -57,7 +58,7 @@
   "scripts": {
     "build": "tsdown",
     "dev": "tsdown --watch",
-    "prepublishOnly": "nr build",
+    "prepublishOnly": "pnpm build",
     "start": "tsx src/index.ts",
     "test": "vitest run test --testTimeout=120000",
     "typecheck": "tsc"

@@ -92,13 +92,13 @@
 如果某个工作区在旧版本下已经生成过巨大快照，先停止 DSH Host 进程，再执行：
 
 ```powershell
-node packages\dsh-tauri-turnrewind-ts\dist\purge-workspace.js "C:\Users\<user>"          # release 数据目录 ~/.dsh
-node packages\dsh-tauri-turnrewind-ts\dist\purge-workspace.js "C:\Users\<user>" --home "$env:USERPROFILE\.dsh.dev"  # debug
+node packages\dsh-tauri-turnrewind-ts\purge-workspace.mjs "C:\Users\<user>\Desktop\test"          # release 数据目录 ~/.dsh
+node packages\dsh-tauri-turnrewind-ts\purge-workspace.mjs "C:\Users\<user>\Desktop\test" --home "$env:USERPROFILE\.dsh.dev"  # debug
 ```
 
-（需先 `pnpm --filter dsh-tauri-turnrewind build` 产出 `dist/`。）
+（需先 `pnpm --filter dsh-tauri-turnrewind build` 产出 `dist/`——CLI 从构建产物导入引擎。）
 
-该命令删除该工作区对应的私有快照仓库（`$DSH_HOME/snapshots/<hash>.git`）及其全部账本记录（turns / operations / notices / workspaces），其他工作区的数据不受影响。
+该命令删除该工作区对应的私有快照仓库（`$DSH_HOME/snapshots/<hash>.git`）及其全部账本记录（turns / operations / notices / plans / workspaces），其他工作区的数据不受影响。workspace 被运行中的 Host 占用时命令会拒绝执行（workspace lock），请先停止对应 Host 进程。
 
 ## Undo 的工作区范围
 

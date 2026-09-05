@@ -15,6 +15,7 @@ import { LOCALES } from './locales'
 import { registerCommandView } from './register/command-view'
 import { disposeDialog, listNotices, showDialog } from './register/dialog'
 import { mountCommandViewStyles, mountDialogStyles } from './styles'
+import { createHeadsUpTracker, resolveSessionsService } from './utils/heads-up'
 import { parseUndoOutput, resolvePlanStatus } from './utils/parse'
 import { resolveOwnerSessionId } from './utils/session'
 
@@ -94,11 +95,15 @@ export function apply(ctx: ClientContext): void {
   // 「单会话只报一次」：进入会话（或页面加载）时已存在的提示视为历史留档
   // ——它们已经以会话内消息的形式永久可见，不再重复弹窗（浏览器存储丢
   // 「已读」也不会重弹）；只有页面存活期间新到达的提示才弹一次。
-  const sessions = (ctx as unknown as { get?: (name: string) => unknown }).get?.('sessions') as
-    | { list: { getSnapshot: () => unknown, subscribe: (fn: () => void) => () => void } }
-    | undefined
-  const knownNoticeIds = new Set<string>()
-  let seededSession: unknown = null
+  // 会话服务解析优先 compat 代理（含运行时形状适配），原始 get 兜底，
+  // 两路都校验形状——不符即告警而非静默失效。
+  const sessions = resolveSessionsService([
+    (cx as unknown as { sessions?: unknown }).sessions,
+    (ctx as unknown as { get?: (name: string) => unknown }).get?.('sessions'),
+  ])
+  if (!sessions)
+    console.warn('[turnrewind] sessions service unavailable; the unsupported heads-up dialog is disabled')
+  const headsUp = createHeadsUpTracker()
 
   function checkOnce(): void {
     if (!sessions)
@@ -108,19 +113,9 @@ export function apply(ctx: ClientContext): void {
       byId?: Record<string, { projectionValues?: { turnrewind?: unknown } }>
     }
     const summary = state.current !== undefined ? state.byId?.[state.current] : undefined
-    const notices = listNotices(summary?.projectionValues?.turnrewind)
-    // 首次观察到当前会话（页面加载/切换会话）：现存提示全部视为已留档历史。
-    if (seededSession !== state.current) {
-      seededSession = state.current
-      for (const notice of notices)
-        knownNoticeIds.add(notice.id)
-      return
-    }
-    const fresh = notices.filter(notice => !knownNoticeIds.has(notice.id))
+    const fresh = headsUp.observe(state.current, listNotices(summary?.projectionValues?.turnrewind))
     if (fresh.length === 0)
       return
-    for (const notice of fresh)
-      knownNoticeIds.add(notice.id)
     console.warn(`[turnrewind] unsupported heads-up visible: ${fresh.map(notice => notice.id).join(', ')}`)
     showDialog(t, fresh)
   }
