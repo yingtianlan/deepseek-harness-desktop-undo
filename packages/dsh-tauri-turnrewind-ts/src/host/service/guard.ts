@@ -40,6 +40,13 @@ function foldCase(path: string): string {
 
 export function isSystemSensitiveWorkspace(workspaceDir: string): boolean {
   const workspace = foldCase(normalizeDir(workspaceDir))
+  // P2-11: UNC 共享（//server/share/...）——分享根（仅 server/share 两段）
+  // 是一整台机器的导出面，快照范围不可控，直接拒绝；更深的子目录允许。
+  if (workspace.startsWith('//')) {
+    const segments = workspace.split('/').filter(Boolean)
+    if (segments.length <= 2)
+      return true
+  }
   const home = foldCase(normalizeDir(homedir()))
   if (workspace === home)
     return true

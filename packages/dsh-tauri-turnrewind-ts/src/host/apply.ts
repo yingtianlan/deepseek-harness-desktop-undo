@@ -75,7 +75,7 @@ export interface HostApplyContext {
   webServer: { register: (route: unknown) => () => void }
   on: (event: string, listener: (...args: any[]) => void) => void
   effect: (factory: () => (() => void) | void, label?: string) => () => void
-  logger?: { warn?: (message: string) => void }
+  logger?: { warn?: (message: string) => void, error?: (message: string) => void }
 }
 
 interface ActiveEntry {
@@ -191,6 +191,21 @@ export function apply(ctx: HostApplyContext): void {
   // validation, conflict checks and the private snapshot repository remain.
   const dataRoot = rootDir()
   const ledger = openLedger(dataRoot)
+  // P2-11: 日志统一走 ctx.logger（宿主注入的结构化日志），console 仅兜底。
+  const log = {
+    warn: (message: string): void => {
+      if (ctx.logger?.warn)
+        ctx.logger.warn(message)
+      else
+        console.warn(message)
+    },
+    error: (message: string): void => {
+      if (ctx.logger?.error)
+        ctx.logger.error(message)
+      else
+        console.error(message)
+    },
+  }
   // P1-6：needs-recovery 围栏改为实时查库（hasNeedsRecoveryWorkspace），
   // 运行期落围栏的 workspace 立即被拦截，不再依赖启动时加载的内存快照。
   // One-shot at startup: consumed notices older than a week have no readers
@@ -248,14 +263,14 @@ export function apply(ctx: HostApplyContext): void {
       // exist inside the atomic-restore crash window.
       const resurrected = restoreCrashedSwaps(workspaceDir)
       for (const path of resurrected)
-        console.warn(`turnrewind: resurrected ${path} in ${workspaceDir} from a crashed restore swap`)
+        log.warn(`turnrewind: resurrected ${path} in ${workspaceDir} from a crashed restore swap`)
       // 容量治理（P2-4）：workspace 首次触碰是安全点（无活动 turn、无 undo）。
       // 超出保留条数的 turn 标记过期；仓库超限整仓重建（下次 capture 自愈基线）。
       const retention = enforceRetention(ledger, store)
       if (retention.expiredByCount > 0)
-        console.warn(`turnrewind: retention expired ${retention.expiredByCount} turn(s) in ${workspaceDir} (kept the most recent ones)`)
+        log.warn(`turnrewind: retention expired ${retention.expiredByCount} turn(s) in ${workspaceDir} (kept the most recent ones)`)
       if (retention.rebuilt)
-        console.warn(`turnrewind: snapshot repository for ${workspaceDir} rebuilt by retention (${retention.repoSizeMb.toFixed(1)} MB over the cap; ${retention.expiredByRebuild} turn(s) archived)`)
+        log.warn(`turnrewind: snapshot repository for ${workspaceDir} rebuilt by retention (${retention.repoSizeMb.toFixed(1)} MB over the cap; ${retention.expiredByRebuild} turn(s) archived)`)
       runtime = {
         db: ledger,
         store,
@@ -281,9 +296,9 @@ export function apply(ctx: HostApplyContext): void {
       }
     }
     catch (error) {
-      console.error(`turnrewind: failed to record skipped turn ${turnId}: ${String(error)}`)
+      log.error(`turnrewind: failed to record skipped turn ${turnId}: ${String(error)}`)
     }
-    console.error(`turnrewind: skipped turn ${turnId}: ${reason}`)
+    log.error(`turnrewind: skipped turn ${turnId}: ${reason}`)
   }
 
   function reserveTurnBaseline(agent: { session: { id: string, header?: { cwd?: string } } }, turn: number): ActiveEntry | undefined {
@@ -416,7 +431,7 @@ export function apply(ctx: HostApplyContext): void {
           recordSkipped(key, sessionId, runtime.workspaceKey, startedAt, reason, false)
         settleDeferred(baseline, { ok: false, reason })
         if (!disposed && !runtime.disposed)
-          console.error(`turnrewind: failed to start turn ${key}: ${String(error)}`)
+          log.error(`turnrewind: failed to start turn ${key}: ${String(error)}`)
       }
     }
     void enqueueTurnTask(sessionId, baselineTask).catch((error: unknown) => {
@@ -429,7 +444,7 @@ export function apply(ctx: HostApplyContext): void {
         recordSkipped(key, sessionId, runtime.workspaceKey, startedAt, reason, false)
       settleDeferred(baseline, { ok: false, reason })
       if (!disposed && !runtime.disposed)
-        console.error(`turnrewind: baseline queue failed for ${key}: ${String(error)}`)
+        log.error(`turnrewind: baseline queue failed for ${key}: ${String(error)}`)
     })
     return entry
   }
@@ -574,7 +589,7 @@ export function apply(ctx: HostApplyContext): void {
     if (disposed)
       return { kind: 'reject' }
     if (!entry && workspaceForAgent(agent) && !untrackedTurns.has(key) && !endedTurns.has(key))
-      console.error(`turnrewind: no baseline reservation for ${key}; turn is explicitly untracked`)
+      log.error(`turnrewind: no baseline reservation for ${key}; turn is explicitly untracked`)
     const decision = await next()
     if (decision.kind === 'reject' || signal.aborted || disposed)
       return decision
@@ -622,7 +637,7 @@ export function apply(ctx: HostApplyContext): void {
   ctx.on('agent/error', (payload: { agent: { session: { id: string } }, turn: number, error: unknown }) => {
     // Keep the active record until turn/end or the idle fallback. In particular,
     // model switching can emit an error before the final partial writes finish.
-    console.error(`turnrewind: observed agent error for ${activeKey(payload.agent.session.id, payload.turn)}: ${String(payload.error)}`)
+    log.error(`turnrewind: observed agent error for ${activeKey(payload.agent.session.id, payload.turn)}: ${String(payload.error)}`)
   })
   ctx.on('agent/status', ({ agent, status }: { agent: { session: { id: string } }, status: string }) => {
     if (disposed || status !== 'idle')

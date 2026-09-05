@@ -320,18 +320,35 @@ export interface PlanFormatOptions {
   withDiffs?: boolean
 }
 
+export interface PlanFormatOptions {
+  preview?: boolean
+  dryRun?: boolean
+  withDiffs?: boolean
+}
+
+/** P1-4：计划输出的规模上限——清单条数与逐文件 diff 都有界，防 UI/上下文膨胀。 */
+const MAX_LISTED_FILES = 200
+const MAX_DIFF_FILES = 50
+
+function capList<T>(items: T[], max: number): { shown: T[], total: number, omitted: number } {
+  return { shown: items.slice(0, max), total: items.length, omitted: Math.max(0, items.length - max) }
+}
+
+function omittedNote(omitted: number, label: string): string {
+  return `  …and ${omitted} more ${label} (not listed)`
+}
+
 export async function formatPlan(runtime: WorkspaceRuntime, target: TurnRow, entries: PlanEntry[], options: PlanFormatOptions): Promise<string> {
   const conflicts = entries.filter(entry => entry.conflict)
   const oversized = entries.filter(entry => entry.tooLarge)
   const unsupported = entries.filter(entry => entry.unsupported)
   const lines: string[] = []
   lines.push(`${options.preview ? 'Undo preview' : options.dryRun ? 'Undo plan' : 'Undo preflight'}: turn ${target.turn_id}; ${entries.length} file(s) (${summarizeChanges(entries)}); ${conflicts.length} conflict(s).`)
-  for (const entry of entries) {
-    const flag = entry.conflict ? ' [conflict]' : ''
-    const sizeFlag = entry.tooLarge ? ' [too large]' : ''
-    const unsupportedFlag = entry.unsupported ? ' [unsupported]' : ''
-    lines.push(`  ${entry.change.padEnd(8)} ${entry.path}${flag}${sizeFlag}${unsupportedFlag}`)
-  }
+  const listing = capList(entries.map(entry => `${entry.change.padEnd(8)} ${entry.path}${entry.conflict ? ' [conflict]' : ''}${entry.tooLarge ? ' [too large]' : ''}${entry.unsupported ? ' [unsupported]' : ''}`), MAX_LISTED_FILES)
+  for (const line of listing.shown)
+    lines.push(`  ${line}`)
+  if (listing.omitted > 0)
+    lines.push(omittedNote(listing.omitted, 'file(s)'))
   if (oversized.length > 0) {
     lines.push('')
     lines.push(`Oversized files (over the ${MAX_FILE_BYTES / (1024 * 1024)} MB restore limit) cannot be restored by this undo; they will be reported as not restored:`)
@@ -347,20 +364,26 @@ export async function formatPlan(runtime: WorkspaceRuntime, target: TurnRow, ent
   if (options.preview || options.withDiffs) {
     lines.push('')
     lines.push('Undo will apply (turn output → restored state):')
-    for (const entry of entries) {
+    const diffFiles = capList(entries, MAX_DIFF_FILES)
+    for (const entry of diffFiles.shown) {
       const diff = await snapshotFileDiff(runtime.store, target.after_ref!, target.before_ref!, entry.path)
       lines.push(`--- ${entry.path}`)
       lines.push(diff ? indent(diff, '  ') : '  (no textual diff)')
     }
+    if (diffFiles.omitted > 0)
+      lines.push(omittedNote(diffFiles.omitted, 'diff(s)'))
   }
   if (conflicts.length > 0) {
     lines.push('')
     lines.push('Conflicts (turn output → current disk; undo would overwrite these changes):')
-    for (const entry of conflicts) {
+    const conflictFiles = capList(conflicts, MAX_DIFF_FILES)
+    for (const entry of conflictFiles.shown) {
       const diff = await safeDiffAgainstDisk(runtime.store, target.after_ref!, entry.path)
       lines.push(`--- ${entry.path}`)
       lines.push(diff ? indent(diff, '  ') : '  (no textual diff)')
     }
+    if (conflictFiles.omitted > 0)
+      lines.push(omittedNote(conflictFiles.omitted, 'conflict diff(s)'))
     if (!options.dryRun && !options.preview)
       lines.push('Re-run with --skip-conflicts to restore only the non-conflicted files, or --force to overwrite the conflicts.')
   }

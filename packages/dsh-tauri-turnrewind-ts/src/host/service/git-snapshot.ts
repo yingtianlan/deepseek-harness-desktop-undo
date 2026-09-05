@@ -290,6 +290,17 @@ function normalizeSnapshotRef(ref: string): string {
   return ref
 }
 
+/**
+ * P2-11: 所有插值进 git 参数的 commit/reffed 参数统一过校验——只接受
+ * `refs/turnrewind/*` ref 名或 40 位 SHA（gitRef/captureSnapshot 的返回
+ * 形态）。ledger 之外的取值在这里被拦下，而不是散落到各 git 子进程。
+ */
+function assertCommitRef(commit: string): string {
+  if (typeof commit !== 'string' || !(commit.startsWith(SNAPSHOT_REF_PREFIX) || /^[0-9a-f]{40}$/.test(commit)))
+    throw new Error(`TURNREWIND_REF_UNSUPPORTED: ${String(commit)}`)
+  return commit
+}
+
 export async function gitRef(repoDir: string, workspaceDir: string, ref: string): Promise<string | undefined> {
   try {
     const output = await runGitText(repoDir, workspaceDir, ['rev-parse', '--verify', normalizeSnapshotRef(ref)])
@@ -461,6 +472,8 @@ async function captureInto(store: SnapshotStore, refName: string, message: strin
 }
 
 export async function snapshotDiff(store: SnapshotStore, beforeCommit: string, afterCommit: string): Promise<string[]> {
+  assertCommitRef(beforeCommit)
+  assertCommitRef(afterCommit)
   const output = await runGit(store.repoDir, store.workspaceDir, ['diff', '--name-only', '-z', '--no-renames', beforeCommit, afterCommit])
   return [...new Set(output.toString('utf8').split('\0').filter(Boolean))]
 }
@@ -487,6 +500,8 @@ export async function classifyPathChange(store: SnapshotStore, beforeCommit: str
 
 /** Unified diff of one path between two snapshot commits, truncated to maxLines. */
 export async function snapshotFileDiff(store: SnapshotStore, fromCommit: string, toCommit: string, path: string, maxLines?: number): Promise<string> {
+  assertCommitRef(fromCommit)
+  assertCommitRef(toCommit)
   const output = await runGit(store.repoDir, store.workspaceDir, ['diff', '--no-renames', fromCommit, toCommit, '--', path])
   return truncateDiff(output.toString('utf8'), maxLines)
 }
@@ -525,6 +540,7 @@ async function hashDiskFile(store: SnapshotStore, workspaceDir: string, path: st
  * snapshot repo; the user's own repository is never touched.
  */
 export async function diffAgainstDisk(store: SnapshotStore, commit: string, path: string, maxLines?: number): Promise<string> {
+  assertCommitRef(commit)
   const from = await blobFor(store, commit, path)
   const to = await hashDiskFile(store, store.workspaceDir, path)
   if (to === undefined)
@@ -543,11 +559,12 @@ export async function diffAgainstDisk(store: SnapshotStore, commit: string, path
 }
 
 /**
- * 一次 `ls-tree -l` 读取条目的 mode 与 size：stateAt/restorePath/blobFor
+ * 一次 `ls-tree -l` 读取条目的 mode、type 与 size：stateAt/restorePath/blobFor
  * 共用，避免同一路径多次子进程调用。size 为 undefined 表示未知（submodule）。
  */
 interface CommitEntryInfo {
   mode: string
+  type: string
   size: number | undefined
 }
 
@@ -561,6 +578,7 @@ async function commitEntryInfo(store: SnapshotStore, commit: string, path: strin
       const size = Number(meta.at(-1))
       return {
         mode: meta[0] ?? '100644',
+        type: meta[1] ?? 'blob',
         size: Number.isFinite(size) && meta.at(-1) !== '-' ? size : undefined,
       }
     }
@@ -593,10 +611,13 @@ export async function stateAt(store: SnapshotStore, commit: string, path: string
   // P1-3: a symlink entry ('120000') must not masquerade as a regular file —
   // its blob is just the link target text. Report it as unsupported so the
   // plan flags it and restore refuses, instead of writing wrong content.
+  // P2-11: gitlink/submodule 条目（type 'commit'）同样 unsupported——blob 是
+  // commit hash，写回会是错误内容。
+  assertCommitRef(commit)
   const info = await commitEntryInfo(store, commit, path)
   if (!info)
     return { kind: 'absent', digest: null }
-  if (info.mode === GIT_SYMLINK_MODE)
+  if (info.mode === GIT_SYMLINK_MODE || info.type === 'commit')
     return { kind: 'unsupported', digest: null }
   // Oversized blobs are reported instead of thrown: the caller can mark the
   // entry and continue, so one huge file never aborts a whole undo preview.
@@ -658,6 +679,7 @@ function rmSyncWithRetry(target: string, attempts: number = 5): void {
  * sweep (restoreCrashedSwaps) resurrects a .bak whose target is missing.
  */
 export async function restorePath(store: SnapshotStore, commit: string, path: string): Promise<RestoreResult> {
+  assertCommitRef(commit)
   let target = assertSafePath(store.workspaceDir, path)
   const entry = await commitEntryInfo(store, commit, path)
   // P1-5: the git subprocess above opens a TOCTOU window — an external
@@ -690,11 +712,11 @@ export async function restorePath(store: SnapshotStore, commit: string, path: st
     return { path, result: 'removed' }
   }
 
-  // P1-3: a symlink entry must never be "restored" by writing the link target
-  // text as a regular file. Fail this one path with a stable code so the undo
-  // loop reports it as not restored instead of corrupting the workspace type.
-  if (entry.mode === GIT_SYMLINK_MODE)
-    throw new Error(`TURNREWIND_UNSUPPORTED_TARGET: ${path} is a symlink in the snapshot; undo cannot restore symlinks (recreate the link manually if intended)`)
+  // P1-3/P2-11: symlink 与 gitlink/submodule 条目绝不能以普通文件形式写回
+  // （前者内容是 link target，后者是 commit hash）。单路径稳定错误码，
+  // undo 循环计入未恢复清单而不是破坏工作区类型。
+  if (entry.mode === GIT_SYMLINK_MODE || entry.type === 'commit')
+    throw new Error(`TURNREWIND_UNSUPPORTED_TARGET: ${path} is a symlink or submodule in the snapshot; undo cannot restore it (recreate it manually if intended)`)
 
   // Restoring an oversized blob would require materializing it through the
   // same output-limited channel. Fail this one path with a stable code so the
@@ -782,8 +804,14 @@ export function restoreCrashedSwaps(workspaceDir: string): string[] {
     }
     for (const entry of entries) {
       const full = join(dir, entry.name)
-      if (entry.isDirectory() && entry.name !== '.git' && !entry.name.endsWith(BAK_SUFFIX))
+      // P2-11: Windows junction 的 Dirent 可能报 isDirectory()——递归进
+      // junction 会越过 workspace 边界。目录在进入前先 lstat 排除 reparse
+      // point（symlink/junction 均命中 isSymbolicLink）。
+      if (entry.isDirectory() && entry.name !== '.git' && !entry.name.endsWith(BAK_SUFFIX)) {
+        if (lstatSync(full, { throwIfNoEntry: false })?.isSymbolicLink())
+          continue
         visit(full)
+      }
       if (entry.isFile() && entry.name.endsWith(BAK_SUFFIX)) {
         const target = full.slice(0, -BAK_SUFFIX.length)
         // Windows antivirus/indexers hold brief handles on freshly renamed

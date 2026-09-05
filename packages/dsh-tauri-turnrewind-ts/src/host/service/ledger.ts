@@ -163,6 +163,16 @@ export function openLedger(rootDir: string): Ledger {
   // refuses new rewind work until purged). Expired plans are swept too.
   db.exec(`UPDATE turns SET status = 'abandoned', reversible = 0, error = 'plugin restarted during active turn' WHERE status = 'active'`)
   db.prepare(`UPDATE operations SET outcome = 'needs-recovery', settled_at = COALESCE(settled_at, ?), error = 'plugin restarted while the operation was applying; workspace recovery is required' WHERE outcome = 'applying'`).run(new Date().toISOString())
+  // P2-11: 崩溃残留的 applying plan 精确清扫——
+  //   目标 turn 已 undone → undo 事务实际完成：plan 标 applied（结果如实）；
+  //   否则执行状态未知（操作已转 needs-recovery 围栏接管）：plan 转 expired。
+  db.prepare(`
+    UPDATE pending_plans SET status = 'applied',
+      result_text = COALESCE(result_text, 'host restarted while this plan was applying; the undo was applied')
+    WHERE status = 'applying'
+      AND EXISTS (SELECT 1 FROM turns WHERE turns.turn_id = pending_plans.turn_id AND turns.status = 'undone')
+  `).run()
+  db.prepare(`UPDATE pending_plans SET status = 'expired', result_text = COALESCE(result_text, 'host restarted while this plan was applying') WHERE status = 'applying'`).run()
   prunePendingPlans(db)
   return db
 }
@@ -551,6 +561,15 @@ export function pruneConsumedNotices(db: Ledger, maxAgeMs: number = 7 * 24 * 60 
   return Number(db.prepare('DELETE FROM rewind_notices WHERE status = \'consumed\' AND claimed_at < ?').run(cutoff).changes)
 }
 
+/** notice 路径清单上限（P1-4）：超出部分以摘要行代替，防账本行与模型上下文膨胀。 */
+export const MAX_NOTICE_PATHS = 500
+
+function capNoticePaths(paths: string[]): string[] {
+  return paths.length > MAX_NOTICE_PATHS
+    ? [...paths.slice(0, MAX_NOTICE_PATHS), `…and ${paths.length - MAX_NOTICE_PATHS} more path(s)`]
+    : paths
+}
+
 /** undo 完成事务：turn → undone、operation → applied、notice 入队。 */
 export interface UndoCompletion {
   noticeId: string
@@ -600,7 +619,7 @@ export function completeUndoTransaction(db: Ledger, completion: UndoCompletion):
       completion.workspaceKey,
       completion.targetTurnId,
       JSON.stringify([completion.targetTurnId]),
-      JSON.stringify([...completion.restoredPaths, ...completion.notRestored.map(entry => entry.path)]),
+      JSON.stringify(capNoticePaths([...completion.restoredPaths, ...completion.notRestored.map(entry => entry.path)])),
       completion.createdAt,
     )
     db.exec('COMMIT')
@@ -674,7 +693,7 @@ export function completeRedoTransaction(db: Ledger, completion: RedoCompletion):
       completion.workspaceKey,
       completion.targetTurnId,
       JSON.stringify([completion.targetTurnId]),
-      JSON.stringify([...completion.restoredPaths, ...completion.notRestored.map(entry => entry.path)]),
+      JSON.stringify(capNoticePaths([...completion.restoredPaths, ...completion.notRestored.map(entry => entry.path)])),
       completion.createdAt,
     )
     db.exec('COMMIT')
