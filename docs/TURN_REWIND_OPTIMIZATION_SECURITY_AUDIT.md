@@ -241,7 +241,15 @@ pnpm exec eslint packages/dsh-tauri-turnrewind-ts
 **低优先级（产品/体验）：**
 
 14. P2-1 subtree undo（先定 DSH turn tree 契约）；P2-2 文档唯一真相源三栏表；P2-4 批量 ls-tree 与元数据缓存；P2-5 结构化事件；P2-6 可访问性（焦点陷阱/Escape/aria）与轮询退避；P2-7 CI lockfile/依赖审计/平台矩阵；
-15. `createLifecycleController` 收敛、HMR 实例 token、`as never` 移除、`CommandViewProps` 入 types、中文文案入 locales（P2-10）；`ctx.logger` 统一。
+15. `createLifecycleController` 收敛、HMR 实例 token、`as never` 移除（register/command-view.ts 注释说明为结构性必需）、中文文案入 locales（P2-10）；`ctx.logger` 统一。
+
+### 本轮收尾更新（2026-09-05 晚，复核后修复）
+
+- **新发现并修复**：`restorePath` absent 分支对「空目录」的移除误用了 `rmSync`（无目录语义，必然抛 `ERR_FS_EISDIR`）——turn 把文件换成空目录的场景会把该路径误报为恢复失败。改用 `rmdirSync`（只删空目录，且对 readdir→删除竞态窗口内新放入的文件天然安全）；
+- **回归测试补齐**：工作区根恢复拒绝、absent 路径上非空目录拒绝 + 空目录移除、retention 不可达 loose object 回收（可达快照链不受影响）共 3 个测试钉住（22 文件 / 118 测试全绿）；
+- **retention 加固收尾**：`enforceRetention` 在 workspace 首触时纳入一次性跨进程 workspace lock（忙则本轮跳过，不再与另一 Host 的 capture 并发写仓库）；执行前 `git prune --expire=now` 回收 diffAgainstDisk 写入的不可达 loose object（冲突预览残留的主要膨胀源），容量测量基于治理后的真实占用。待办第 2 条的 lock 部分到此关闭，两阶段 quarantine 仍开放；
+- **文档/文案漂移修正**：README 测试数字（18/97 → 22/118）与「当前限制」中已过时的容量治理条目；命令 hint 移除已冻结的 `--redo`；
+- **中文文案入 locales（待办第 15 条部分关闭）**：undo 卡片全部硬编码中文迁入双语字典（新增 10 个 key），组件经 `setCardTranslator` 注入通道（与 `setSubmitLine` 同一生命周期模式），未注入时回退 zh 字典；提交通道的会话缺失错误同步入字典。剩余：`createLifecycleController` 收敛、HMR 实例 token。
 
 ### 实施顺序建议
 
