@@ -45,8 +45,12 @@ it('detects pending plan drift against the confirmed turn and diff', () => {
     planDrift(binding, { ...target, after_ref: 'refs/turnrewind/a2' }, ['a.txt', 'b.txt']),
     /snapshots no longer match/u,
   )
-  // Legacy plans (NULL binding columns) skip strict checks for compatibility.
-  assert.equal(planDrift({ before_ref: null, after_ref: null, paths_digest: null }, target, []), undefined)
+  // Legacy plans (NULL binding columns) cannot be verified: they are rejected
+  // (forced re-preview) instead of being trusted without checks.
+  assert.match(
+    planDrift({ before_ref: null, after_ref: null, paths_digest: null }, target, []),
+    /predates preview binding/u,
+  )
 })
 
 it('produces a stable order-independent paths digest', () => {

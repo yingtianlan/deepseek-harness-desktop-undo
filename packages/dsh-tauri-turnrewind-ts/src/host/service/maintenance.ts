@@ -44,7 +44,7 @@ export function purgeWorkspace(rootDir: string, workspaceDir: string): PurgeSumm
     if (existsSync(ledgerPath)) {
       const db = openLedger(rootDir)
       try {
-        db.exec('BEGIN')
+        db.exec('BEGIN IMMEDIATE')
         const operations = db.prepare('DELETE FROM operations WHERE target_turn_id IN (SELECT turn_id FROM turns WHERE workspace_key = ?)').run(workspaceIdentity)
         const notices = db.prepare('DELETE FROM rewind_notices WHERE workspace_key = ?').run(workspaceIdentity)
         const plans = db.prepare('DELETE FROM pending_plans WHERE workspace_key = ?').run(workspaceIdentity)

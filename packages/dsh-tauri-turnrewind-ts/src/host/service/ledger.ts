@@ -135,6 +135,9 @@ export function openLedger(rootDir: string): Ledger {
   const path = join(rootDir, 'ledger.sqlite')
   mkdirSync(dirname(path), { recursive: true })
   const db = new DatabaseSync(path)
+  // P1-7: 并发写遇 SQLITE_BUSY 时等待而非立即抛错——瞬时锁冲突不应被
+  // 上层误判为状态漂移并触发永久围栏。
+  db.exec('PRAGMA busy_timeout = 5000')
   db.exec(SCHEMA)
   // Older local prototypes may already have the table; add new columns idempotently.
   for (const migration of [
@@ -265,7 +268,7 @@ export function claimRewindNotices(db: Ledger, sessionId: string, workspaceKey: 
     UPDATE rewind_notices SET status = 'consumed', claimed_at = ?
     WHERE notice_id = ? AND status = 'pending'
   `)
-  db.exec('BEGIN')
+  db.exec('BEGIN IMMEDIATE')
   try {
     for (const notice of notices)
       statement.run(claimedAt, notice.notice_id)
@@ -293,13 +296,27 @@ export function listNeedsRecoveryWorkspaces(db: Ledger): string[] {
   `).all() as { workspace_key: string }[]).map(row => row.workspace_key)
 }
 
+/**
+ * P1-6：实时围栏查询。needs-recovery 可能发生在任意时刻（账本事务失败的
+ * catch 路径），启动时加载的内存集合会过期——围栏判定一律查库。
+ */
+export function hasNeedsRecoveryWorkspace(db: Ledger, workspaceKey: string): boolean {
+  return db.prepare(`
+    SELECT 1
+    FROM operations o
+    JOIN turns t ON t.turn_id = o.target_turn_id
+    WHERE o.outcome = 'needs-recovery' AND t.workspace_key = ?
+    LIMIT 1
+  `).get(workspaceKey) !== undefined
+}
+
 /** 预览路径集的稳定摘要：排序后 sha256。confirm 时校验计划是否漂移（P1-2）。 */
 export function planPathsDigest(paths: string[]): string {
   return createHash('sha256').update([...paths].sort().join('\0')).digest('hex')
 }
 
 export function createPendingPlan(db: Ledger, plan: PendingPlan): string {
-  db.exec('BEGIN')
+  db.exec('BEGIN IMMEDIATE')
   try {
     // One live plan per session+workspace: a newer preview replaces the older.
     // 被替换的旧 plan 转 expired 留档（审计可见），不再物理删除。
@@ -455,7 +472,7 @@ export function skipTurn(db: Ledger, turn: { turnId: string, sessionId: string, 
 
 /** skipped turn + 每会话/工作区一次性 heads-up（去重由 rewind_notices 承担）。 */
 export function recordSkippedTurn(db: Ledger, turn: { turnId: string, sessionId: string, workspaceKey: string, startedAt: string }, reason: string): void {
-  db.exec('BEGIN')
+  db.exec('BEGIN IMMEDIATE')
   try {
     skipTurn(db, turn, reason)
     // Queue one heads-up per session and workspace; repeated skips stay silent.
@@ -560,7 +577,7 @@ export function completeUndoTransaction(db: Ledger, completion: UndoCompletion):
   const summary = completion.notRestored.length > 0
     ? completion.notRestored.map(entry => `${entry.path} (${entry.reason})`).join('; ')
     : null
-  db.exec('BEGIN')
+  db.exec('BEGIN IMMEDIATE')
   try {
     const turn = db.prepare(`
       UPDATE turns SET status = 'undone', settled_at = ?
@@ -628,7 +645,7 @@ export function completeRedoTransaction(db: Ledger, completion: RedoCompletion):
   const summary = completion.notRestored.length > 0
     ? completion.notRestored.map(entry => `${entry.path} (${entry.reason})`).join('; ')
     : null
-  db.exec('BEGIN')
+  db.exec('BEGIN IMMEDIATE')
   try {
     const previous = db.prepare(`
       UPDATE operations SET outcome = 'redone', settled_at = ?

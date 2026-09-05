@@ -56,7 +56,11 @@ function pidAlive(pid: number): boolean {
     process.kill(pid, 0)
     return true
   }
-  catch {
+  catch (error) {
+    // P1-5: EPERM 表示进程存在但当前用户无权发信号——视为存活，
+    // 交给 TTL 兜底；ESRCH（及其他）才是真正死亡。
+    if ((error as NodeJS.ErrnoException)?.code === 'EPERM')
+      return true
     return false
   }
 }
@@ -114,6 +118,13 @@ export async function acquireWorkspaceLock(rootDir: string, workspaceDir: string
   for (let attempt = 0; attempt < LOCK_MAX_ATTEMPTS; attempt += 1) {
     try {
       writeLockFile(path, token)
+      // P1-5 发布竞态防护：wx 创建到内容写完之间，其他进程可能读到空文件
+      // 并判 stale 接管。获锁后回读自检——token 不在（已被接管/覆盖）即
+      // 视为未获锁并重试，绝不形成双持锁。
+      if (readLockContent(path)?.token !== token) {
+        rmSync(path, { force: true })
+        continue
+      }
       let released = false
       return {
         release() {
@@ -154,6 +165,11 @@ export function acquireWorkspaceLockSync(rootDir: string, workspaceDir: string):
   catch (error) {
     if ((error as NodeJS.ErrnoException)?.code !== 'EEXIST')
       throw error
+    throw new WorkspaceLockBusyError(workspaceDir, readLockContent(path))
+  }
+  // P1-5: 与异步路径一致的回读自检。
+  if (readLockContent(path)?.token !== token) {
+    releaseLockFile(path, token)
     throw new WorkspaceLockBusyError(workspaceDir, readLockContent(path))
   }
   let released = false

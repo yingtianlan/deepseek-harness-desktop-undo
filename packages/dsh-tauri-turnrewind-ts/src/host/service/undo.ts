@@ -274,12 +274,29 @@ async function diskMatchesSnapshot(runtime: WorkspaceRuntime, workspaceDir: stri
   }
 }
 
+/** 有界并发 map：大路径数的 undo 计划不再一次起满量 git 子进程（P1-7）。 */
+async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = Array.from({ length: items.length })
+  let next = 0
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const index = next++
+      results[index] = await fn(items[index]!)
+    }
+  })
+  await Promise.all(workers)
+  return results
+}
+
+/** 单个 plan 的路径并发预算：每条路径内部还有多次 git 子进程调用。 */
+const PLAN_ENTRY_CONCURRENCY = 8
+
 /**
  * 构建只读 undo 计划：每个路径的变化分类、磁盘是否仍匹配 turn 后快照、
  * before 快照是否超限（超限条目恢复时单文件失败，绝不静默）。
  */
 export async function buildPlanEntries(runtime: WorkspaceRuntime, workspaceDir: string, target: TurnRow, paths: string[]): Promise<PlanEntry[]> {
-  return Promise.all(paths.map(async (path) => {
+  return mapWithConcurrency(paths, PLAN_ENTRY_CONCURRENCY, async (path) => {
     const beforeState = await stateAt(runtime.store, target.before_ref!, path)
     return {
       path,
@@ -288,7 +305,7 @@ export async function buildPlanEntries(runtime: WorkspaceRuntime, workspaceDir: 
       tooLarge: beforeState.kind === 'tooLarge',
       unsupported: beforeState.kind === 'unsupported',
     }
-  }))
+  })
 }
 
 function summarizeChanges(entries: PlanEntry[]): string {

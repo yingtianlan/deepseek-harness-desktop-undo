@@ -34,8 +34,8 @@ import {
   getPendingPlanRow,
   getPendingPlanStatus,
   getTurn,
+  hasNeedsRecoveryWorkspace,
   insertTurn,
-  listNeedsRecoveryWorkspaces,
   markPendingPlanApplied,
   markPendingPlanCancelled,
   openLedger,
@@ -190,7 +190,8 @@ export function apply(ctx: HostApplyContext): void {
   // validation, conflict checks and the private snapshot repository remain.
   const dataRoot = rootDir()
   const ledger = openLedger(dataRoot)
-  const recoveryWorkspaces = new Set(listNeedsRecoveryWorkspaces(ledger))
+  // P1-6：needs-recovery 围栏改为实时查库（hasNeedsRecoveryWorkspace），
+  // 运行期落围栏的 workspace 立即被拦截，不再依赖启动时加载的内存快照。
   // One-shot at startup: consumed notices older than a week have no readers
   // left (their dedup window is long gone) and would otherwise accumulate
   // without bound on long-lived installs.
@@ -312,7 +313,7 @@ export function apply(ctx: HostApplyContext): void {
     }
 
     const workspaceKey = workspaceKeyFor(workspaceDir)
-    if (recoveryWorkspaces.has(workspaceKey)) {
+    if (hasNeedsRecoveryWorkspace(ledger, workspaceKey)) {
       recordSkipped(key, sessionId, workspaceKey, startedAt, 'TURNREWIND_RECOVERY_REQUIRED: a previous undo or redo was interrupted; inspect the workspace and clear its recovery state before using rewind again')
       return undefined
     }
@@ -435,12 +436,20 @@ export function apply(ctx: HostApplyContext): void {
   // Same-origin HTTP routes powering the ✓/✗ buttons on the undo card: the
   // harness page itself is served from this host, so these need no extra
   // auth wiring (and mutations are loopback-only on top).
+  // P1-3: planId 必须是 UUID 形态、session 长度受限且无控制字符——
+  // 防止任意字符串进入日志与 SQLite 语义。
+  const PLAN_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+  const validPlanId = (value: string): boolean => PLAN_ID_RE.test(value)
+  const validSessionId = (value: string): boolean =>
+    value.length >= 1 && value.length <= 200 && [...value].every(ch => ch.charCodeAt(0) > 31)
   ctx.effect(() => {
     function confirmRoute(body: Record<string, unknown>): Promise<[number, unknown]> | [number, unknown] {
       const planId = String(body.planId ?? '')
       const sessionId = String(body.sessionId ?? '')
       if (planId === '' || sessionId === '')
         return [400, { error: 'planId and sessionId are required' }]
+      if (!validPlanId(planId) || !validSessionId(sessionId))
+        return [400, { error: 'planId or sessionId is malformed' }]
       const previewRow = getPendingPlanRow(ledger, planId)
       if (previewRow === undefined)
         return [404, { error: 'plan not found — run /undo again' }]
@@ -454,6 +463,9 @@ export function apply(ctx: HostApplyContext): void {
       const planRuntime = workspaceStores.get(previewRow.workspace_key)
       if (planRuntime === undefined)
         return [409, { error: 'the host restarted since this preview; run /undo again' }]
+      // P1-6：实时围栏——预览后落 needs-recovery 的 workspace 立即拒绝执行。
+      if (hasNeedsRecoveryWorkspace(ledger, previewRow.workspace_key))
+        return [409, { error: 'the workspace needs recovery (a previous operation was interrupted) — purge its turnrewind data before retrying' }]
       if (planRuntime.undoing || workspaceHasActiveTurn(active, previewRow.workspace_key))
         return [409, { error: 'the workspace is busy — wait for the current turn to finish' }]
       const claim = claimPendingPlan(ledger, planId, sessionId)
@@ -517,6 +529,8 @@ export function apply(ctx: HostApplyContext): void {
       const sessionId = String(body.sessionId ?? '')
       if (planId === '' || sessionId === '')
         return [400, { error: 'planId and sessionId are required' }]
+      if (!validPlanId(planId) || !validSessionId(sessionId))
+        return [400, { error: 'planId or sessionId is malformed' }]
       const removed = markPendingPlanCancelled(ledger, planId, sessionId)
       return [200, { ok: true, message: removed ? 'Pending undo cancelled.' : 'No pending plan matched (it may have expired).' }]
     }
@@ -527,6 +541,8 @@ export function apply(ctx: HostApplyContext): void {
       const sessionId = String(url.searchParams.get('sessionId') ?? '')
       if (planId === '' || sessionId === '')
         return [400, { error: 'planId and sessionId are required' }]
+      if (!validPlanId(planId) || !validSessionId(sessionId))
+        return [400, { error: 'planId or sessionId is malformed' }]
       const status = getPendingPlanStatus(ledger, planId, sessionId)
       if (status === undefined)
         return [404, { error: 'plan expired, unavailable, or owned by another session — run /undo again' }]
@@ -649,7 +665,7 @@ export function apply(ctx: HostApplyContext): void {
         return { kind: 'error', text: 'Undo is unavailable because this session has no workspace.' }
       }
       const workspaceIdentity = workspaceKeyFor(workspaceDir)
-      if (recoveryWorkspaces.has(workspaceIdentity))
+      if (hasNeedsRecoveryWorkspace(ledger, workspaceIdentity))
         return { kind: 'error', text: 'Undo is unavailable because a previous undo or redo was interrupted. Inspect the workspace, then purge its turnrewind data before retrying.' }
       const issue = workspaceIssue(workspaceDir)
       if (issue)
