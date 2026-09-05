@@ -34,8 +34,8 @@
 | P1-1 workspace 持久锁 | ✅ 已修复 | `workspace-lock.ts`：O_EXCL 锁文件 + pid 存活探测 + 30min TTL 接管；覆盖 capture/settle/undo/redo/purge，忙时显式 `TURNREWIND_LOCK_BUSY`（HTTP confirm 转 409） |
 | P1-2 plan 未绑定预览版本 | ✅ 已修复 | pending_plans 持久化 before/after ref + paths digest（排序 sha256）；两条 confirm 路径经 `planDrift()` 校验漂移即拒绝 |
 | P1-3 symlink 静默当文件 | ✅ 已修复 | `stateAt` 识别 mode `120000` → `unsupported`；预览标注 `[unsupported]` 并单列；恢复跳过并计入未恢复清单，`restorePath` 双保险拒绝 |
-| P1-4 mode/权限位 | ⬜ 未处理 | PathState 仍无 mode；权限位变化不进 diff、恢复不还原（symlink 部分已随 P1-3 关闭） |
-| P1-5 TOCTOU/junction | ⬜ 未处理 | root 拒绝已随 P0-1 落地；检查后到写入之间的窗口、Windows reparse point 检测仍待接 sandbox bridge |
+| P1-4 mode/权限位 | ✅ 已修复 | `PathState` 携带 git mode（合并单次 `ls-tree -l` 探测）；`restorePath` 按快照 mode chmod 临时文件（可执行位跨 undo 幸存）；POSIX 磁盘态如实上报、Windows 按 filemode=false 约定 100644；冲突判定保持按内容避免假冲突 |
+| P1-5 TOCTOU/junction | ✅ 已缓解 | restorePath 全部写入点（两次异步 git 间隙、rmSync、两次 rename）前重新校验整条路径链，窗口压缩到最小；Windows junction（reparse point，无需特权创建）实测与 symlink 同样被拒。彻底消除仍待 sandbox bridge |
 | P2-5 同步 rev-parse | ✅ 已修复 | 60s TTL 进程级缓存 |
 | P2-6 status route 方法限制 | ✅ 已修复 | `jsonRoute` 支持 `methods`，status 限 GET |
 | P2-7 客户端样式规范 | ✅ 已修复并加固 | css-render 迁移后实测发现并修复：dialog/command-view 类名冲突、**css-render 裸数字不补 px 导致全部尺寸声明失效**（圆角/间距失效根因）；styles 测试 render 断言防回归 |
