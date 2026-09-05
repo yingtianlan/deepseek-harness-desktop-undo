@@ -21,6 +21,7 @@ export type LocaleKey
     | 'cancelCancelling'
     | 'cancelled'
     | 'planExpiredHint'
+    | 'planGoneHint'
     | 'previewHint'
     | 'sessionMissing'
 
@@ -43,6 +44,7 @@ const DICT_ZH: Record<LocaleKey, string> = {
   cancelCancelling: '取消中…',
   cancelled: '已取消',
   planExpiredHint: '该计划已过期，重新执行 /undo 可生成新预览',
+  planGoneHint: '该计划不存在（可能已被清理或来自旧版本数据）',
   previewHint: '执行将恢复下方文件到本轮改动前',
   sessionMissing: '无法确定该卡片所属的会话，请刷新页面后重试',
 }
@@ -66,6 +68,7 @@ const DICT_EN: Record<LocaleKey, string> = {
   cancelCancelling: 'Cancelling…',
   cancelled: 'Cancelled',
   planExpiredHint: 'This plan has expired; run /undo again for a fresh preview',
+  planGoneHint: 'This plan no longer exists (it may have been purged or comes from older data)',
   previewHint: 'Applying restores the files below to their state before this turn',
   sessionMissing: 'Cannot determine the session this card belongs to; refresh the page and try again',
 }

@@ -137,6 +137,44 @@ it('never double-claims notices across concurrent ledger connections', async () 
   }
 })
 
+it('keeps cancelled plans archived across newer previews and past their TTL', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'turnrewind-plan-archive-'))
+  const db = openLedger(root)
+  try {
+    const planA = createPendingPlan(db, {
+      sessionId: 'session',
+      workspaceKey: 'workspace',
+      turnId: 'session:1',
+      paths: ['a.txt'],
+      beforeRef: 'refs/turnrewind/turn-session-1-before',
+      afterRef: 'refs/turnrewind/turn-session-1-after',
+    })
+    assert.equal(markPendingPlanCancelled(db, planA, 'session'), true)
+
+    // A newer preview archives only the pending predecessor: the user's
+    // explicit dismissal stays 'cancelled' — refresh must reproduce it.
+    const planB = createPendingPlan(db, {
+      sessionId: 'session',
+      workspaceKey: 'workspace',
+      turnId: 'session:2',
+      paths: ['b.txt'],
+      beforeRef: 'refs/turnrewind/turn-session-2-before',
+      afterRef: 'refs/turnrewind/turn-session-2-after',
+    })
+    assert.equal(getPendingPlanStatus(db, planA, 'session')?.status, 'cancelled')
+
+    // Past-TTL sweeping (startup or lazy) flips only pending rows.
+    db.prepare('UPDATE pending_plans SET expires_at = ?').run(new Date(Date.now() - 1000).toISOString())
+    prunePendingPlans(db)
+    assert.equal(getPendingPlanStatus(db, planA, 'session')?.status, 'cancelled')
+    assert.equal(getPendingPlanStatus(db, planB, 'session')?.status, 'expired')
+  }
+  finally {
+    db.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 it('records a skipped turn with a single unsupported-workspace heads-up', async () => {
   const root = await mkdtemp(join(tmpdir(), 'turnrewind-skip-test-'))
   const db = openLedger(root)

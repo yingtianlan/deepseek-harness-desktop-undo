@@ -564,8 +564,25 @@ export function apply(ctx: HostApplyContext): void {
         return [400, { error: 'planId and sessionId are required' }]
       if (!validPlanId(planId) || !validSessionId(sessionId))
         return [400, { error: 'planId or sessionId is malformed' }]
+      // 非 pending 行返回精确错误而不是 200 假成功：假成功会让客户端先塌缩成
+      // 「已取消」，刷新后又被轮询纠正成别的状态——状态必须一次说清。
+      const row = getPendingPlanRow(ledger, planId)
+      if (row === undefined)
+        return [404, { error: 'plan not found — run /undo again' }]
+      if (row.session_id !== sessionId)
+        return [403, { error: 'the plan belongs to another session' }]
+      if (row.status === 'cancelled')
+        return [200, { ok: true, message: 'Pending undo cancelled.' }]
+      if (row.status === 'expired')
+        return [409, { error: 'this plan has expired — run /undo again to preview a fresh plan' }]
+      if (row.status === 'applied')
+        return [409, { error: 'this plan was already applied' }]
+      if (row.status === 'applying')
+        return [409, { error: 'this plan is being applied — wait for it to finish' }]
       const removed = markPendingPlanCancelled(ledger, planId, sessionId)
-      return [200, { ok: true, message: removed ? 'Pending undo cancelled.' : 'No pending plan matched (it may have expired).' }]
+      if (!removed)
+        return [409, { error: 'this plan was already applied or cancelled — run /undo again' }]
+      return [200, { ok: true, message: 'Pending undo cancelled.' }]
     }
 
     function statusRoute(_body: Record<string, unknown>, req: { url?: string }): [number, unknown] {

@@ -300,7 +300,11 @@ export function UndoCommandView(props: CommandViewProps): React.ReactElement {
     ? `${tr('confirmFailed')}${submitError}`
     : resultText || (planStatus === 'applied' || pendingWait
       ? tr('cardWaitingResult')
-      : planStatus === 'expired' || planStatus === 'gone' ? tr('planExpiredHint') : planStatus === 'cancelled' || submitted === 'cancel' ? tr('cancelled') : tr('previewHint'))
+      : planStatus === 'expired'
+        ? tr('planExpiredHint')
+        : planStatus === 'gone'
+          ? tr('planGoneHint')
+          : planStatus === 'cancelled' || submitted === 'cancel' ? tr('cancelled') : tr('previewHint'))
   // 执行结果（成功/失败）靠左展示；「已提交，等待执行结果」与预览提示一样
   // 贴 footer 右缘——等执行结果落地（resultText/applied）再切到左侧。
   const hintLeft = Boolean(resultText || submitError || planStatus === 'applied')
