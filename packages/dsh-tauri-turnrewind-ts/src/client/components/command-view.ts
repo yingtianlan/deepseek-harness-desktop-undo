@@ -6,9 +6,10 @@
  * 从 persisted plan status 重建，而不是内存态。
  */
 
-import type { CommandViewProps, ParsedUndoFile, ParsedUndoOutput } from '../types'
+import type { CommandViewProps, LocaleKey, ParsedUndoFile, ParsedUndoOutput, Translate } from '../types'
 import React, { useEffect, useRef, useState } from 'react'
 import { TURNREWIND_CLASS_PREFIX, TURNREWIND_HTTP_BASE, TURNREWIND_POLL_INTERVAL_MS } from '../constants'
+import { LOCALES } from '../locales'
 import { parseUndoOutput, resolvePlanStatus } from '../utils/parse'
 import { resolveOwnerSessionId } from '../utils/session'
 
@@ -98,6 +99,22 @@ export function setSubmitLine(next: SubmitLine | null): void {
 }
 
 // ------------------------------------------------------------------
+// locale 通道：与提交通道同一注入模式。组件不直接依赖 locale 服务
+// （slot props 不携带它），由 apply() 按当前活跃语言注入取词函数；
+// 未注入时回退到 zh 字典——字典即文案的唯一来源，不另存一份硬编码。
+// ------------------------------------------------------------------
+let translator: Translate | null = null
+
+/** 供 apply() 安装/卸载 locale 取词通道。 */
+export function setCardTranslator(next: Translate | null): void {
+  translator = next
+}
+
+function tr(key: LocaleKey): string {
+  return translator ? translator(key) : LOCALES.zh[key]
+}
+
+// ------------------------------------------------------------------
 // 命令卡片组件。props 类型集中在 client/types（P2-10）。
 // ------------------------------------------------------------------
 export type { CommandViewProps } from '../types'
@@ -112,7 +129,7 @@ export function UndoCommandView(props: CommandViewProps): React.ReactElement {
   const withDiff = parsed.files.filter(file => file.diff.length > 0)
   const totals = parsed.files.reduce((sum, file) => ({ additions: sum.additions + file.additions, deletions: sum.deletions + file.deletions }), { additions: 0, deletions: 0 })
   const hasDiff = withDiff.length > 0
-  const summary = parsed.summary || (state === 'error' ? '失败' : state === 'running' ? '运行中' : '完成')
+  const summary = parsed.summary || (state === 'error' ? tr('cardFailed') : state === 'running' ? tr('cardRunning') : tr('cardDone'))
 
   // 展开状态按命令持久化：用户折叠后刷新不重新展开。
   // 持久化 key 只用稳定且长度受限的节点标识（node.id / planId）——不回退到
@@ -182,7 +199,7 @@ export function UndoCommandView(props: CommandViewProps): React.ReactElement {
         else if (next.status === 'pending')
           setPlanStatus('pending')
         if (next.status === 'applied')
-          setResultText(next.resultText ?? '已执行')
+          setResultText(next.resultText ?? tr('cardAppliedFallback'))
         if (next.stop) {
           haltPolling()
           return
@@ -247,18 +264,18 @@ export function UndoCommandView(props: CommandViewProps): React.ReactElement {
   }
 
   const confirmLabel = submitting
-    ? '执行中…'
-    : submitted === 'confirm' ? '已提交执行确认' : '✓ 执行'
+    ? tr('confirmExecuting')
+    : submitted === 'confirm' ? tr('confirmSubmitted') : tr('confirmExecute')
   const cancelLabel = submitting
-    ? '取消中…'
-    : submitted === 'cancel' ? '已取消' : '✕ 取消'
+    ? tr('cancelCancelling')
+    : submitted === 'cancel' ? tr('cancelled') : tr('cancelAction')
   // plan 提交即置 applying：提示行不等轮询返回就切到等待态。
   const pendingWait = submitting || submitted === 'confirm' || planStatus === 'applying'
   const hint = submitError
-    ? `执行确认失败：${submitError}`
+    ? `${tr('confirmFailed')}${submitError}`
     : resultText || (planStatus === 'applied' || pendingWait
-      ? '已提交，等待执行结果…'
-      : planStatus === 'expired' || planStatus === 'gone' ? '该计划已过期，重新执行 /undo 可生成新预览' : planStatus === 'cancelled' || submitted === 'cancel' ? '已取消' : '执行将恢复下方文件到本轮改动前')
+      ? tr('cardWaitingResult')
+      : planStatus === 'expired' || planStatus === 'gone' ? tr('planExpiredHint') : planStatus === 'cancelled' || submitted === 'cancel' ? tr('cancelled') : tr('previewHint'))
   // 提交后的结果（成功/失败/等待中）靠左展示；预览/过期/取消提示贴 footer 右缘。
   const hintLeft = Boolean(resultText || submitError || submitted !== null || planStatus === 'applied')
   const hintCls = `${TURNREWIND_CLASS_PREFIX}-card-hint${submitError

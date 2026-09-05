@@ -9,7 +9,7 @@
 import type { ClientContext } from 'dsh-tauri/client'
 import type { LocaleKey } from './locales'
 import { compat } from 'dsh-tauri/client'
-import { setSubmitLine } from './components/command-view'
+import { setCardTranslator, setSubmitLine } from './components/command-view'
 import { TURNREWIND_HTTP_BASE, TURNREWIND_LOCALE_NS, TURNREWIND_POLL_INTERVAL_MS, TURNREWIND_POLL_STOP_MS } from './constants'
 import { LOCALES } from './locales'
 import { registerCommandView } from './register/command-view'
@@ -60,6 +60,16 @@ export function apply(ctx: ClientContext): void {
     return disposer
   }, 'turnrewind locale en')
 
+  // ————————————————— 卡片 locale 通道 —————————————————
+  // 组件经 slot props 拿不到 locale 服务：由 apply 层把取词函数注入组件模块
+  // （与 setSubmitLine 同一生命周期模式），stop/HMR 时置空。
+  ctx.effect(() => {
+    setCardTranslator(t)
+    return () => {
+      setCardTranslator(null)
+    }
+  }, 'turnrewind card translator')
+
   // ————————————————— ✓/✗ 提交通道 —————————————————
   // 直接 POST 到插件的同源 HTTP 路由（宿主页面本身由同一 Host 服务，无需额外
   // auth wiring）。返回错误字符串让卡片可以显示真实失败原因。
@@ -67,7 +77,7 @@ export function apply(ctx: ClientContext): void {
     setSubmitLine(async (line, ownerSessionId) => {
       try {
         if (typeof ownerSessionId !== 'string' || ownerSessionId.length === 0)
-          return '无法确定该卡片所属的会话，请刷新页面后重试'
+          return t('sessionMissing')
         const kind = line.includes('--confirm') ? 'confirm' : 'cancel'
         const planId = line.split(' ').at(-1)!
         const res = await fetch(`${TURNREWIND_HTTP_BASE}/${kind}`, {

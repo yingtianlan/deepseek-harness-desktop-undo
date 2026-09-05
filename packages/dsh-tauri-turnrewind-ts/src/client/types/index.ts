@@ -2,6 +2,8 @@
  * client/types/index.ts — 客户端共享类型。
  */
 
+import type { LocaleKey } from '../locales'
+
 export type { LocaleKey } from '../locales'
 
 /** 卡片里单个文件条目（解析 /undo 预览输出得到）。 */
@@ -34,3 +36,6 @@ export interface CommandViewProps {
   node?: { id?: string, name?: string, sessionId?: string, outcome?: { kind?: string, text?: string } }
   sessionId?: string
 }
+
+/** locale 取词函数：apply 装配层按当前活跃语言注入，组件层消费。 */
+export type Translate = (key: LocaleKey) => string
