@@ -49,6 +49,7 @@ import {
   skipTurn,
 } from './service/ledger'
 import { planDrift } from './service/planner'
+import { enforceRetention } from './service/retention'
 import { applyUndo, buildPlanEntries, executeUndoRestore, turnRefsExist, workspaceForAgent, workspaceHasActiveTurn, workspaceIssue, workspaceKeyFor } from './service/undo'
 import { withWorkspaceLock, WorkspaceLockBusyError } from './service/workspace-lock'
 
@@ -246,6 +247,13 @@ export function apply(ctx: HostApplyContext): void {
       const resurrected = restoreCrashedSwaps(workspaceDir)
       for (const path of resurrected)
         console.warn(`turnrewind: resurrected ${path} in ${workspaceDir} from a crashed restore swap`)
+      // 容量治理（P2-4）：workspace 首次触碰是安全点（无活动 turn、无 undo）。
+      // 超出保留条数的 turn 标记过期；仓库超限整仓重建（下次 capture 自愈基线）。
+      const retention = enforceRetention(ledger, store)
+      if (retention.expiredByCount > 0)
+        console.warn(`turnrewind: retention expired ${retention.expiredByCount} turn(s) in ${workspaceDir} (kept the most recent ones)`)
+      if (retention.rebuilt)
+        console.warn(`turnrewind: snapshot repository for ${workspaceDir} rebuilt by retention (${retention.repoSizeMb.toFixed(1)} MB over the cap; ${retention.expiredByRebuild} turn(s) archived)`)
       runtime = {
         db: ledger,
         store,
