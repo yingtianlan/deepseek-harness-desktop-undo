@@ -503,7 +503,9 @@ export async function classifyPathChange(store: SnapshotStore, beforeCommit: str
 export async function snapshotFileDiff(store: SnapshotStore, fromCommit: string, toCommit: string, path: string, maxLines?: number): Promise<string> {
   assertCommitRef(fromCommit)
   assertCommitRef(toCommit)
-  const output = await runGit(store.repoDir, store.workspaceDir, ['diff', '--no-renames', fromCommit, toCommit, '--', path])
+  // --ignore-cr-at-eol 与冲突检测的 CRLF 规范化同语义：换行符翻转不画成
+  // 幽灵增删（同一行删一遍又加一遍），预览只呈现内容变化。
+  const output = await runGit(store.repoDir, store.workspaceDir, ['diff', '--no-renames', '--ignore-cr-at-eol', fromCommit, toCommit, '--', path])
   return truncateDiff(output.toString('utf8'), maxLines)
 }
 
@@ -551,6 +553,7 @@ export async function diffAgainstDisk(store: SnapshotStore, commit: string, path
   const output = await runGit(store.repoDir, store.workspaceDir, [
     'diff',
     '--no-renames',
+    '--ignore-cr-at-eol',
     '--src-prefix=snapshot/',
     '--dst-prefix=disk/',
     from,

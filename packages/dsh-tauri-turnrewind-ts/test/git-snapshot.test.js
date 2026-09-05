@@ -203,6 +203,32 @@ it('does not treat CRLF conversion as a file conflict', async () => {
   }
 })
 
+it('renders a line-ending flip plus appends without phantom duplicate lines', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'turnrewind-crlf-diff-'))
+  const workspace = join(root, 'workspace')
+  try {
+    await initGitWorkspace(workspace)
+    // Pre-turn file with CRLF endings (the Windows checkout norm).
+    await writeFile(join(workspace, 'modified3.txt'), '文件 3\r\n用于测试 undo。\r\n')
+    const store = createSnapshotStore(join(root, 'data'), workspace)
+    const before = await captureSnapshot(store, 'refs/turnrewind/crlfdiff-before', 'before')
+    // The turn rewrites the same content with LF endings and appends two lines.
+    await writeFile(join(workspace, 'modified3.txt'), '文件 3\n用于测试 undo。\n额外追加一行。\n额外追加第二行。')
+    const after = await captureSnapshot(store, 'refs/turnrewind/crlfdiff-after', 'after', before.commit)
+
+    // Byte-exact git cannot pair the two visually identical lines; the
+    // --ignore-cr-at-eol preview keeps the ending flip from rendering the
+    // line as both deleted and added — only the real content change shows.
+    const undoDiff = await snapshotFileDiff(store, after.commit, before.commit, 'modified3.txt')
+    assert.match(undoDiff, /-额外追加一行。/u)
+    assert.match(undoDiff, /-额外追加第二行。/u)
+    assert.doesNotMatch(undoDiff, /\+用于测试 undo。/u)
+  }
+  finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 it('classifies path changes and produces codex-style diffs', async () => {
   const root = await mkdtemp(join(tmpdir(), 'turnrewind-diff-test-'))
   const workspace = join(root, 'workspace')
