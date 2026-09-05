@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { it } from 'vitest'
+import { peekCardTranslator, peekSubmitLine, setCardTranslator, setSubmitLine } from '../src/client/components/command-view'
 import * as client from '../src/client/index'
 
 it('exposes the cordis plugin face and pure helpers', () => {
@@ -127,4 +128,29 @@ it('parseUndoOutput keeps paths with spaces and plan flags out of the conflict f
   assert.equal(spaced.diff.length, 2)
   assert.equal(spaced.additions, 1)
   assert.equal(spaced.deletions, 1)
+})
+
+it('channel setters are latest-owner-wins (HMR interleave guard)', () => {
+  const channelA = async () => null
+  const channelB = async () => null
+  const translatorA = key => key
+  const translatorB = key => key
+
+  const releaseChannelA = setSubmitLine(channelA)
+  const releaseTranslatorA = setCardTranslator(translatorA)
+  // A newer install (an HMR successor) takes the channels over.
+  const releaseChannelB = setSubmitLine(channelB)
+  const releaseTranslatorB = setCardTranslator(translatorB)
+
+  // The stale instance's cleanup must not clear the successor's channels.
+  releaseChannelA()
+  releaseTranslatorA()
+  assert.equal(peekSubmitLine(), channelB)
+  assert.equal(peekCardTranslator(), translatorB)
+
+  // Only the latest owner's release actually clears.
+  releaseChannelB()
+  releaseTranslatorB()
+  assert.equal(peekSubmitLine(), null)
+  assert.equal(peekCardTranslator(), null)
 })

@@ -8,7 +8,7 @@
 
 import type { ClientContext } from 'dsh-tauri/client'
 import type { LocaleKey } from './locales'
-import { compat } from 'dsh-tauri/client'
+import { compat, createLifecycleController } from 'dsh-tauri/client'
 import { setCardTranslator, setSubmitLine } from './components/command-view'
 import { TURNREWIND_HTTP_BASE, TURNREWIND_LOCALE_NS, TURNREWIND_POLL_INTERVAL_MS, TURNREWIND_POLL_STOP_MS } from './constants'
 import { LOCALES } from './locales'
@@ -62,43 +62,34 @@ export function apply(ctx: ClientContext): void {
 
   // ————————————————— 卡片 locale 通道 —————————————————
   // 组件经 slot props 拿不到 locale 服务：由 apply 层把取词函数注入组件模块
-  // （与 setSubmitLine 同一生命周期模式），stop/HMR 时置空。
-  ctx.effect(() => {
-    setCardTranslator(t)
-    return () => {
-      setCardTranslator(null)
-    }
-  }, 'turnrewind card translator')
+  // （setSubmitLine/setCardTranslator 都是 latest-owner-wins，撤销函数直接
+  // 作为 effect disposer——HMR 时旧实例的撤销不会清掉新实例的通道）。
+  ctx.effect(() => setCardTranslator(t), 'turnrewind card translator')
 
   // ————————————————— ✓/✗ 提交通道 —————————————————
   // 直接 POST 到插件的同源 HTTP 路由（宿主页面本身由同一 Host 服务，无需额外
   // auth wiring）。返回错误字符串让卡片可以显示真实失败原因。
-  ctx.effect(() => {
-    setSubmitLine(async (line, ownerSessionId) => {
-      try {
-        if (typeof ownerSessionId !== 'string' || ownerSessionId.length === 0)
-          return t('sessionMissing')
-        const kind = line.includes('--confirm') ? 'confirm' : 'cancel'
-        const planId = line.split(' ').at(-1)!
-        const res = await fetch(`${TURNREWIND_HTTP_BASE}/${kind}`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ planId, sessionId: ownerSessionId }),
-        })
-        const payload = await res.json().catch(() => ({}) as Record<string, unknown>)
-        if (!res.ok)
-          return (payload as { error?: string }).error ?? `HTTP ${res.status}`
-        return null
-      }
-      catch (error) {
-        console.error('[turnrewind] failed to submit undo confirmation:', error)
-        return String((error as Error)?.message ?? error)
-      }
-    })
-    return () => {
-      setSubmitLine(null)
+  ctx.effect(() => setSubmitLine(async (line, ownerSessionId) => {
+    try {
+      if (typeof ownerSessionId !== 'string' || ownerSessionId.length === 0)
+        return t('sessionMissing')
+      const kind = line.includes('--confirm') ? 'confirm' : 'cancel'
+      const planId = line.split(' ').at(-1)!
+      const res = await fetch(`${TURNREWIND_HTTP_BASE}/${kind}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ planId, sessionId: ownerSessionId }),
+      })
+      const payload = await res.json().catch(() => ({}) as Record<string, unknown>)
+      if (!res.ok)
+        return (payload as { error?: string }).error ?? `HTTP ${res.status}`
+      return null
     }
-  }, 'turnrewind submit line')
+    catch (error) {
+      console.error('[turnrewind] failed to submit undo confirmation:', error)
+      return String((error as Error)?.message ?? error)
+    }
+  }), 'turnrewind submit line')
 
   // ————————————————— 不可用工作区弹窗 runner —————————————————
   // 通过 sessions.list 的投影值读取 Host 注入的 unsupported 提示。
@@ -115,33 +106,34 @@ export function apply(ctx: ClientContext): void {
     console.warn('[turnrewind] sessions service unavailable; the unsupported heads-up dialog is disabled')
   const headsUp = createHeadsUpTracker()
 
-  function checkOnce(): void {
-    if (!sessions)
-      return
-    const state = sessions.list.getSnapshot() as {
-      current?: string
-      byId?: Record<string, { projectionValues?: { turnrewind?: unknown } }>
-    }
-    const summary = state.current !== undefined ? state.byId?.[state.current] : undefined
-    const fresh = headsUp.observe(state.current, listNotices(summary?.projectionValues?.turnrewind))
-    if (fresh.length === 0)
-      return
-    console.warn(`[turnrewind] unsupported heads-up visible: ${fresh.map(notice => notice.id).join(', ')}`)
-    showDialog(t, fresh)
-  }
-
   ctx.effect(() => {
     if (!sessions)
       return () => {}
-    const unsubscribe = sessions.list.subscribe(checkOnce)
-    // 页面加载时投影帧可能在订阅建立前到达；短暂轮询保证时序不会吞掉提示。
-    const poll = setInterval(checkOnce, TURNREWIND_POLL_INTERVAL_MS)
-    const stopPolling = setTimeout(clearInterval, TURNREWIND_POLL_STOP_MS, poll)
-    return () => {
-      unsubscribe()
-      clearInterval(poll)
-      clearTimeout(stopPolling)
-      disposeDialog()
+    // 弹窗 runner 的全部资源（订阅/轮询 interval/停轮询 timeout/DOM 卸载）
+    // 收敛进一个控制器：dispose 幂等、一次性清理，符合 AGENTS 的
+    // Controller 化约定；checkOnce 用 isDisposed 守护 dispose 瞬间的在途回调。
+    const controller = createLifecycleController()
+
+    function checkOnce(): void {
+      if (controller.isDisposed())
+        return
+      const state = sessions!.list.getSnapshot() as {
+        current?: string
+        byId?: Record<string, { projectionValues?: { turnrewind?: unknown } }>
+      }
+      const summary = state.current !== undefined ? state.byId?.[state.current] : undefined
+      const fresh = headsUp.observe(state.current, listNotices(summary?.projectionValues?.turnrewind))
+      if (fresh.length === 0)
+        return
+      console.warn(`[turnrewind] unsupported heads-up visible: ${fresh.map(notice => notice.id).join(', ')}`)
+      showDialog(t, fresh)
     }
+
+    controller.add(sessions.list.subscribe(checkOnce))
+    // 页面加载时投影帧可能在订阅建立前到达；短暂轮询保证时序不会吞掉提示，
+    // 稳定后停掉轮询只留订阅驱动。
+    controller.timeout(controller.interval(checkOnce, TURNREWIND_POLL_INTERVAL_MS), TURNREWIND_POLL_STOP_MS)
+    controller.add(disposeDialog)
+    return () => controller.dispose()
   }, 'turnrewind dialog runner')
 }

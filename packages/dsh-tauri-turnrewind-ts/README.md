@@ -348,7 +348,7 @@ pnpm --filter dsh-tauri-turnrewind typecheck
 pnpm --filter dsh-tauri-turnrewind test
 ```
 
-当前 22 个测试文件、119 个测试，覆盖：Git 快照（增删改恢复、中文路径、CRLF、路径逃逸、工作区根拒绝、absent 路径上的非空目录拒绝与空目录移除、symlink 路径拒绝与快照 symlink 策略、ignore 委托、alternates 复用与自愈）、原子 bak-swap 恢复与崩溃清扫、Git 状态零污染（HEAD/branch/index/status/refs/stash 不变）、linked worktree 隔离、oversized blob 单文件报告、容量治理（保留条数过期、超限两阶段重建、不可达 loose object 回收）、账本生命周期（含 needs-recovery 围栏与跨连接 notice 单次消费）、pending plan 原子 claim 与预览绑定漂移校验、interrupted turn、barrier 时序、跨进程 workspace 锁、undo 入口与 redo 冻结、client 纯函数（输出解析/plan 状态判定/会话归属）。
+当前 22 个测试文件、120 个测试，覆盖：Git 快照（增删改恢复、中文路径、CRLF、路径逃逸、工作区根拒绝、absent 路径上的非空目录拒绝与空目录移除、symlink 路径拒绝与快照 symlink 策略、ignore 委托、alternates 复用与自愈）、原子 bak-swap 恢复与崩溃清扫、Git 状态零污染（HEAD/branch/index/status/refs/stash 不变）、linked worktree 隔离、oversized blob 单文件报告、容量治理（保留条数过期、超限两阶段重建、不可达 loose object 回收）、账本生命周期（含 needs-recovery 围栏与跨连接 notice 单次消费）、pending plan 原子 claim 与预览绑定漂移校验、interrupted turn、barrier 时序、跨进程 workspace 锁、undo 入口与 redo 冻结、client 纯函数（输出解析/plan 状态判定/会话归属/通道 latest-owner-wins 语义）。
 
 ## 当前限制
 

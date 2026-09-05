@@ -3,13 +3,11 @@
  *
  * 规则：颜色走主题 token；状态类（成功/失败/运行中）由组件切换 class 而非
  * 直接改 style；diff 行语义类（add/del/hunk/meta/text）集中在此。
+ * 挂载语义为 latest-wins（HMR 交错防护，见 styles/index.ts 文件头）。
  */
 
 import { CssRender } from 'dsh-tauri/client'
 import { TURNREWIND_CLASS_PREFIX, TURNREWIND_STYLE_ID } from '../constants'
-
-/** 卡片样式实例（一次性）。 */
-let cardCssr: ReturnType<typeof CssRender> | undefined
 
 const P = TURNREWIND_CLASS_PREFIX
 
@@ -220,14 +218,13 @@ export function buildCommandViewStyleNodes(cssr: ReturnType<typeof CssRender>) {
   ])
 }
 
-/** 挂载 undo 卡片样式，返回 disposer。 */
+/** 挂载 undo 卡片样式（latest-wins，见文件头），返回 disposer。 */
 export function mountCommandViewStyles(): () => void {
-  const cssr = cardCssr ??= CssRender()
   const styleId = `${TURNREWIND_STYLE_ID}-command-view`
-  if (typeof document !== 'undefined' && document.getElementById(styleId) !== null)
+  if (typeof document === 'undefined')
     return () => {}
-
-  const style = buildCommandViewStyleNodes(cssr)
+  document.getElementById(styleId)?.remove()
+  const style = buildCommandViewStyleNodes(CssRender())
   style.mount({ id: styleId, head: true })
   return () => style.unmount({ id: styleId })
 }

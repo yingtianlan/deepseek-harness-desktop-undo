@@ -34,6 +34,11 @@ let dialog: DialogElements | undefined
 function ensureDialog(): DialogElements {
   if (dialog)
     return dialog
+  // HMR 交错防护：模块实例各自持有 dialog 变量，旧实例的清理可能晚于新
+  // 实例的安装——安装前先移除文档里残留的同款 backdrop，保证任何时刻
+  // 至多一个弹窗层（类名前缀插件私有，不会误伤其他插件）。
+  for (const stale of document.querySelectorAll(`.${TURNREWIND_CLASS_PREFIX}-dialog-backdrop`))
+    stale.remove()
   const backdrop = document.createElement('div')
   backdrop.setAttribute('role', 'presentation')
   backdrop.className = `${TURNREWIND_CLASS_PREFIX}-dialog-backdrop`

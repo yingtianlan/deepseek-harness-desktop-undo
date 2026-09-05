@@ -93,9 +93,22 @@ function DiffBlock({ file }: { file: ParsedUndoFile }): React.ReactElement {
 type SubmitLine = (line: string, ownerSessionId: string | null) => Promise<string | null>
 let submitLine: SubmitLine | null = null
 
-/** 供 apply() 安装/卸载提交通道。 */
-export function setSubmitLine(next: SubmitLine | null): void {
+/**
+ * 安装提交通道，返回撤销函数。HMR 交错防护（latest-owner-wins）：通道归
+ * 最新一次安装所有——旧实例的撤销在通道已被新实例接管后是 no-op，不会把
+ * 新通道一起清掉；最新所有者自己撤销时才真正置空。
+ */
+export function setSubmitLine(next: SubmitLine | null): () => void {
   submitLine = next
+  return () => {
+    if (submitLine === next)
+      submitLine = null
+  }
+}
+
+/** 测试/诊断观察口：当前生效的提交通道。 */
+export function peekSubmitLine(): SubmitLine | null {
+  return submitLine
 }
 
 // ------------------------------------------------------------------
@@ -105,9 +118,18 @@ export function setSubmitLine(next: SubmitLine | null): void {
 // ------------------------------------------------------------------
 let translator: Translate | null = null
 
-/** 供 apply() 安装/卸载 locale 取词通道。 */
-export function setCardTranslator(next: Translate | null): void {
+/** 安装 locale 取词通道（返回撤销函数，latest-owner-wins 语义同 setSubmitLine）。 */
+export function setCardTranslator(next: Translate | null): () => void {
   translator = next
+  return () => {
+    if (translator === next)
+      translator = null
+  }
+}
+
+/** 测试/诊断观察口：当前生效的取词函数。 */
+export function peekCardTranslator(): Translate | null {
+  return translator
 }
 
 function tr(key: LocaleKey): string {
