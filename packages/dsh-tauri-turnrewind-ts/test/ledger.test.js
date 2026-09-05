@@ -105,6 +105,38 @@ it('merges multiple pending rewind notices and delivers them once', async () => 
   }
 })
 
+it('never double-claims notices across concurrent ledger connections', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'turnrewind-notice-race-'))
+  // Two connections stand in for two host processes sharing one ledger file:
+  // the claim is a BEGIN IMMEDIATE transaction, so the reader cannot observe
+  // a pending batch that another claimer is about to consume.
+  const first = openLedger(root)
+  const second = openLedger(root)
+  try {
+    queueRewindNotice(first, {
+      noticeId: 'notice-race',
+      sessionId: 'session',
+      workspaceKey: 'workspace',
+      targetTurnId: 'session:1',
+      paths: ['src/only.ts'],
+      createdAt: '2026-01-01T00:00:00.000Z',
+    })
+
+    const claimedByFirst = claimRewindNotices(first, 'session', 'workspace')
+    assert.equal(claimedByFirst.length, 1)
+    assert.equal(claimedByFirst[0].notice_id, 'notice-race')
+    // The second connection must see the consumed state, not a stale
+    // pre-transaction snapshot of the same pending row.
+    assert.deepEqual(claimRewindNotices(second, 'session', 'workspace'), [])
+    assert.deepEqual(claimRewindNotices(second, 'session', 'workspace'), [])
+  }
+  finally {
+    first.close()
+    second.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 it('records a skipped turn with a single unsupported-workspace heads-up', async () => {
   const root = await mkdtemp(join(tmpdir(), 'turnrewind-skip-test-'))
   const db = openLedger(root)

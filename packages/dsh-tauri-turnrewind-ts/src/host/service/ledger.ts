@@ -266,35 +266,40 @@ export interface ClaimedNotice extends NoticeRow {
 }
 
 export function claimRewindNotices(db: Ledger, sessionId: string, workspaceKey: string): ClaimedNotice[] {
-  const notices = db.prepare(`
-    SELECT * FROM rewind_notices
-    WHERE session_id = ? AND workspace_key = ? AND status = 'pending'
-    ORDER BY created_at ASC
-  `).all(sessionId, workspaceKey) as unknown as NoticeRow[]
-  if (notices.length === 0)
-    return []
   const claimedAt = new Date().toISOString()
-  const statement = db.prepare(`
-    UPDATE rewind_notices SET status = 'consumed', claimed_at = ?
-    WHERE notice_id = ? AND status = 'pending'
-  `)
+  // BEGIN IMMEDIATE + 事务内 SELECT：读取与消费在同一个写锁内完成，两个
+  // 并发 claim（双 Host 进程）不可能读到同一批 pending 行——事务外的
+  // 预读会让第二个调用者返回 0 行更新却仍吐出整批 notice。
   db.exec('BEGIN IMMEDIATE')
   try {
+    const notices = db.prepare(`
+      SELECT * FROM rewind_notices
+      WHERE session_id = ? AND workspace_key = ? AND status = 'pending'
+      ORDER BY created_at ASC
+    `).all(sessionId, workspaceKey) as unknown as NoticeRow[]
+    if (notices.length === 0) {
+      db.exec('COMMIT')
+      return []
+    }
+    const statement = db.prepare(`
+      UPDATE rewind_notices SET status = 'consumed', claimed_at = ?
+      WHERE notice_id = ? AND status = 'pending'
+    `)
     for (const notice of notices)
       statement.run(claimedAt, notice.notice_id)
     db.exec('COMMIT')
+    // Rows pass through verbatim (snake_case): the JS tests and the host's
+    // message builder both consume raw column names.
+    return notices.map(notice => ({
+      ...notice,
+      paths: JSON.parse(notice.paths_json),
+      turns: JSON.parse(notice.turns_json || '[]'),
+    }))
   }
   catch (error) {
     db.exec('ROLLBACK')
     throw error
   }
-  // Rows pass through verbatim (snake_case): the JS tests and the host's
-  // message builder both consume raw column names.
-  return notices.map(notize => ({
-    ...notize,
-    paths: JSON.parse(notize.paths_json),
-    turns: JSON.parse(notize.turns_json || '[]'),
-  }))
 }
 
 export function listNeedsRecoveryWorkspaces(db: Ledger): string[] {
