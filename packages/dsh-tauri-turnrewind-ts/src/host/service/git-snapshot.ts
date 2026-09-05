@@ -658,8 +658,13 @@ function rmSyncWithRetry(target: string, attempts: number = 5): void {
  * sweep (restoreCrashedSwaps) resurrects a .bak whose target is missing.
  */
 export async function restorePath(store: SnapshotStore, commit: string, path: string): Promise<RestoreResult> {
-  const target = assertSafePath(store.workspaceDir, path)
+  let target = assertSafePath(store.workspaceDir, path)
   const entry = await commitEntryInfo(store, commit, path)
+  // P1-5: the git subprocess above opens a TOCTOU window — an external
+  // process can swap a parent directory for a symlink/junction in that gap.
+  // Re-validate the full component chain immediately before any filesystem
+  // mutation; the walk is a handful of lstats, cheap per restored path.
+  target = assertSafePath(store.workspaceDir, path)
   if (!entry) {
     if (existsSync(target)) {
       const info = lstatSync(target)
@@ -674,9 +679,11 @@ export async function restorePath(store: SnapshotStore, commit: string, path: st
         const contents = readdirSync(target)
         if (contents.length > 0)
           throw new Error(`TURNREWIND_UNSUPPORTED_TARGET: ${path} is now a non-empty directory; undo will not recursively delete it (remove it manually if intended)`)
+        assertSafePath(store.workspaceDir, path)
         rmSync(target, { force: true })
       }
       else {
+        assertSafePath(store.workspaceDir, path)
         rmSync(target, { force: true })
       }
     }
@@ -695,6 +702,8 @@ export async function restorePath(store: SnapshotStore, commit: string, path: st
   if ((entry.size ?? 0) > MAX_FILE_BYTES)
     throw new Error(`TURNREWIND_FILE_TOO_LARGE: ${path} (${MAX_FILE_BYTES}-byte limit) cannot be restored; add it to .gitignore or restore it manually`)
   const bytes = await commitBytes(store, commit, path)
+  // P1-5: second re-validation after the second async subprocess gap.
+  target = assertSafePath(store.workspaceDir, path)
   mkdirSync(dirname(target), { recursive: true })
   const temp = `${target}.turnrewind-${randomUUID()}.tmp`
   writeFileSync(temp, bytes, { flag: 'wx' })
@@ -716,9 +725,14 @@ export async function restorePath(store: SnapshotStore, commit: string, path: st
       // complete copy on disk across both renames.
       bak = `${target}${BAK_SUFFIX}`
       rmSync(bak, { force: true })
+      assertSafePath(store.workspaceDir, path)
       renameSync(target, bak)
     }
     try {
+      // P1-5: last re-validation before the rename places new content — the
+      // window between this check and the rename is the narrowest we can get
+      // without an fd-based or sandboxed filesystem API.
+      assertSafePath(store.workspaceDir, path)
       renameSync(temp, target)
     }
     catch (error) {

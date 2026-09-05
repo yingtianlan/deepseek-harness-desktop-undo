@@ -222,3 +222,29 @@ it('keeps snapshot symlinks unrestorable and reported by undo', async () => {
     await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 })
   }
 })
+
+it('refuses Windows junction directories like symlinks', async () => {
+  if (process.platform !== 'win32')
+    return
+  const root = await mkdtemp(join(tmpdir(), 'turnrewind-junction-test-'))
+  const workspace = join(root, 'workspace')
+  const outside = join(root, 'outside')
+  try {
+    await initGitWorkspace(workspace)
+    await mkdir(outside, { recursive: true })
+    await writeFile(join(outside, 'secret.txt'), 'outside')
+    // Junctions need no elevation on Windows and are reparse points like
+    // symlinks — traversal through them must be refused identically (P1-5).
+    await symlink(outside, join(workspace, 'junction'), 'junction')
+    const store = createSnapshotStore(join(root, 'data'), workspace)
+    assert.throws(() => currentState(workspace, 'junction/secret.txt'), /TURNREWIND_SYMLINK_UNSUPPORTED/)
+    const snapshot = await captureSnapshot(store, 'refs/turnrewind/junction', 'junction')
+    await assert.rejects(
+      () => restorePath(store, snapshot.commit, 'junction/secret.txt'),
+      /TURNREWIND_SYMLINK_UNSUPPORTED/,
+    )
+  }
+  finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 })
+  }
+})
