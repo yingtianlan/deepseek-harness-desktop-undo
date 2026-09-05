@@ -70,9 +70,6 @@ export function buildCommandViewStyleNodes(cssr: ReturnType<typeof CssRender>) {
       cursor: 'wait',
       opacity: 0.75,
     }),
-    cssr.c(`.${P}-card-cancel-dim`, {
-      color: 'var(--dsw-alias-label-tertiary, #8b8b8b)',
-    }),
     cssr.c(`.${P}-card-glyph`, {
       color: 'var(--dsw-alias-label-dimmed, #8b8b8b)',
     }),

@@ -246,9 +246,10 @@ export function UndoCommandView(props: CommandViewProps): React.ReactElement {
     }
   }, [state, parsed.planId, ownerSessionId])
 
-  // 只有「真不存在」（旧数据被清理/工作区被 purge）才折叠为细行；
-  // cancelled/expired 的 plan 行已永久留档，卡片保留文件清单与 diff 供随时回看。
-  const collapsed = planStatus === 'gone'
+  // 「真不存在」（旧数据被清理/工作区被 purge）与「用户主动取消」折叠为
+  // 无边框细行：cancelled 是用户明确放弃，塌缩成一行「已取消」留痕即可；
+  // expired 是留档视图，卡片保留文件清单与 diff 供随时回看。
+  const collapsed = planStatus === 'gone' || planStatus === 'cancelled' || submitted === 'cancel'
   const showBody = expanded && !collapsed && (hasDiff || parsed.files.length > 0)
   const actionable = parsed.planId !== undefined && state === 'ok' && !collapsed && (planStatus === null || planStatus === 'pending')
   // ref 防抖：React 状态更新慢一拍，双击会绕过 state-only 检查发两次请求。
@@ -288,9 +289,11 @@ export function UndoCommandView(props: CommandViewProps): React.ReactElement {
   const confirmLabel = submitting
     ? tr('confirmExecuting')
     : submitted === 'confirm' ? tr('confirmSubmitted') : tr('confirmExecute')
+  // submitted === 'cancel' 的卡片已塌缩为细行，完整卡片里取消按钮不存在
+  // 「已取消」态：提交中显示取消中，其余显示可点击的取消。
   const cancelLabel = submitting
     ? tr('cancelCancelling')
-    : submitted === 'cancel' ? tr('cancelled') : tr('cancelAction')
+    : tr('cancelAction')
   // plan 提交即置 applying：提示行不等轮询返回就切到等待态。
   const pendingWait = submitting || submitted === 'confirm' || planStatus === 'applying'
   const hint = submitError
@@ -298,8 +301,9 @@ export function UndoCommandView(props: CommandViewProps): React.ReactElement {
     : resultText || (planStatus === 'applied' || pendingWait
       ? tr('cardWaitingResult')
       : planStatus === 'expired' || planStatus === 'gone' ? tr('planExpiredHint') : planStatus === 'cancelled' || submitted === 'cancel' ? tr('cancelled') : tr('previewHint'))
-  // 提交后的结果（成功/失败/等待中）靠左展示；预览/过期/取消提示贴 footer 右缘。
-  const hintLeft = Boolean(resultText || submitError || submitted !== null || planStatus === 'applied')
+  // 执行结果（成功/失败）靠左展示；「已提交，等待执行结果」与预览提示一样
+  // 贴 footer 右缘——等执行结果落地（resultText/applied）再切到左侧。
+  const hintLeft = Boolean(resultText || submitError || planStatus === 'applied')
   const hintCls = `${TURNREWIND_CLASS_PREFIX}-card-hint${submitError
     ? ` ${TURNREWIND_CLASS_PREFIX}-card-hint-error`
     : resultText || planStatus === 'applied' ? ` ${TURNREWIND_CLASS_PREFIX}-card-hint-ok` : ''}${hintLeft ? '' : ` ${TURNREWIND_CLASS_PREFIX}-card-hint-right`}`
@@ -353,7 +357,7 @@ export function UndoCommandView(props: CommandViewProps): React.ReactElement {
             type: 'button',
             onClick: () => { void submit('cancel') },
             disabled: submitting || submitted !== null,
-            className: `${TURNREWIND_CLASS_PREFIX}-card-cancel${submitted === 'cancel' ? ` ${TURNREWIND_CLASS_PREFIX}-card-cancel-dim` : ''}${submitting ? ` ${TURNREWIND_CLASS_PREFIX}-card-busy` : ''}`,
+            className: `${TURNREWIND_CLASS_PREFIX}-card-cancel${submitting ? ` ${TURNREWIND_CLASS_PREFIX}-card-busy` : ''}`,
           }, cancelLabel)
         : null, hintLeft ? hintSpan : null, React.createElement('span', { className: `${TURNREWIND_CLASS_PREFIX}-card-spacer` }), hintLeft ? null : hintSpan)
     : null)
