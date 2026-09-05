@@ -16,6 +16,7 @@ import { createHash } from 'node:crypto'
 import { homedir } from 'node:os'
 import process from 'node:process'
 import { join, resolve } from 'pathe'
+import { TURNREWIND_API_PREFIX } from '../shared/constants'
 import { MAX_ENDED_TURNS } from './constants'
 import { jsonRoute } from './routes'
 import { createDialogProjection } from './service/dialog-projection'
@@ -550,9 +551,9 @@ export function apply(ctx: HostApplyContext): void {
     }
 
     const routes = [
-      jsonRoute('/api/turnrewind/confirm', confirmRoute, { mutate: true }),
-      jsonRoute('/api/turnrewind/cancel', cancelRoute, { mutate: true }),
-      jsonRoute('/api/turnrewind/status', statusRoute, { methods: ['GET'] }),
+      jsonRoute(`${TURNREWIND_API_PREFIX}/confirm`, confirmRoute, { mutate: true }),
+      jsonRoute(`${TURNREWIND_API_PREFIX}/cancel`, cancelRoute, { mutate: true }),
+      jsonRoute(`${TURNREWIND_API_PREFIX}/status`, statusRoute, { methods: ['GET'] }),
     ]
     const disposers = routes.map(route => ctx.webServer.register(route))
     return () => disposers.map(dispose => dispose())

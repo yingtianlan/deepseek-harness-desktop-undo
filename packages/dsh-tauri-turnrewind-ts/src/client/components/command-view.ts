@@ -6,7 +6,7 @@
  * 从 persisted plan status 重建，而不是内存态。
  */
 
-import type { ParsedUndoFile, ParsedUndoOutput } from '../types'
+import type { CommandViewProps, ParsedUndoFile, ParsedUndoOutput } from '../types'
 import React, { useEffect, useRef, useState } from 'react'
 import { TURNREWIND_CLASS_PREFIX, TURNREWIND_HTTP_BASE, TURNREWIND_POLL_INTERVAL_MS } from '../constants'
 import { parseUndoOutput, resolvePlanStatus } from '../utils/parse'
@@ -98,12 +98,9 @@ export function setSubmitLine(next: SubmitLine | null): void {
 }
 
 // ------------------------------------------------------------------
-// 命令卡片组件。
+// 命令卡片组件。props 类型集中在 client/types（P2-10）。
 // ------------------------------------------------------------------
-export interface CommandViewProps {
-  node?: { id?: string, name?: string, sessionId?: string, outcome?: { kind?: string, text?: string } }
-  sessionId?: string
-}
+export type { CommandViewProps } from '../types'
 
 export function UndoCommandView(props: CommandViewProps): React.ReactElement {
   const node = props.node ?? {}
@@ -118,10 +115,13 @@ export function UndoCommandView(props: CommandViewProps): React.ReactElement {
   const summary = parsed.summary || (state === 'error' ? '失败' : state === 'running' ? '运行中' : '完成')
 
   // 展开状态按命令持久化：用户折叠后刷新不重新展开。
-  // 惰性初始化读取持久化值（node.id 稳定，expandKey 不会在生命周期内变化），
-  // 避免 effect 内同步 setState。
-  const expandKey = `turnrewind.expanded.${node.id ?? parsed.planId ?? parsed.summary}`
+  // 持久化 key 只用稳定且长度受限的节点标识（node.id / planId）——不回退到
+  // 输出摘要（audit P2-8：摘要过长导致 key 膨胀且不稳定）；两者皆缺时不持久化。
+  const persistKey = (typeof node.id === 'string' && node.id) || parsed.planId
+  const expandKey = persistKey ? `turnrewind.expanded.${persistKey}` : undefined
   const [expanded, setExpanded] = useState(() => {
+    if (!expandKey)
+      return hasDiff
     try {
       const stored = globalThis.localStorage.getItem(expandKey)
       if (stored === '0' || stored === '1')
@@ -134,10 +134,12 @@ export function UndoCommandView(props: CommandViewProps): React.ReactElement {
   function toggleExpanded(): void {
     setExpanded((v) => {
       const next = !v
-      try {
-        globalThis.localStorage.setItem(expandKey, next ? '1' : '0')
+      if (expandKey) {
+        try {
+          globalThis.localStorage.setItem(expandKey, next ? '1' : '0')
+        }
+        catch {}
       }
-      catch {}
       return next
     })
   }

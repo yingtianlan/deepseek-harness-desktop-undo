@@ -28,3 +28,9 @@ export interface PlanStatusResolution {
   stop: boolean
   resultText: string | null
 }
+
+/** /undo 命令卡片槽位组件的 props（P2-10：集中到 client/types）。 */
+export interface CommandViewProps {
+  node?: { id?: string, name?: string, sessionId?: string, outcome?: { kind?: string, text?: string } }
+  sessionId?: string
+}

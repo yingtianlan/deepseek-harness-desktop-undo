@@ -29,5 +29,5 @@ export const COMMAND_VIEW_EFFECT = 'turnrewind command view'
 /** locale 命名空间（不可用弹窗双语）。 */
 export const TURNREWIND_LOCALE_NS = 'dsh-tauri-turnrewind'
 
-/** 同源 HTTP 路由前缀（Host 注册的 /api/turnrewind/*）。 */
-export const TURNREWIND_HTTP_BASE = '/api/turnrewind'
+/** 同源 HTTP 路由前缀——唯一来源是 shared/constants，此处仅别名转发。 */
+export { TURNREWIND_API_PREFIX as TURNREWIND_HTTP_BASE } from '../../shared/constants'
