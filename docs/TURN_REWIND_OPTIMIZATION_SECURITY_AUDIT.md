@@ -247,7 +247,8 @@ pnpm exec eslint packages/dsh-tauri-turnrewind-ts
 
 - **新发现并修复**：`restorePath` absent 分支对「空目录」的移除误用了 `rmSync`（无目录语义，必然抛 `ERR_FS_EISDIR`）——turn 把文件换成空目录的场景会把该路径误报为恢复失败。改用 `rmdirSync`（只删空目录，且对 readdir→删除竞态窗口内新放入的文件天然安全）；
 - **回归测试补齐**：工作区根恢复拒绝、absent 路径上非空目录拒绝 + 空目录移除、retention 不可达 loose object 回收（可达快照链不受影响）共 3 个测试钉住（22 文件 / 118 测试全绿）；
-- **retention 加固收尾**：`enforceRetention` 在 workspace 首触时纳入一次性跨进程 workspace lock（忙则本轮跳过，不再与另一 Host 的 capture 并发写仓库）；执行前 `git prune --expire=now` 回收 diffAgainstDisk 写入的不可达 loose object（冲突预览残留的主要膨胀源），容量测量基于治理后的真实占用。待办第 2 条的 lock 部分到此关闭，两阶段 quarantine 仍开放；
+- **retention 加固收尾**：`enforceRetention` 在 workspace 首触时纳入一次性跨进程 workspace lock（忙则本轮跳过，不再与另一 Host 的 capture 并发写仓库）；执行前 `git prune --expire=now` 回收 diffAgainstDisk 写入的不可达 loose object（冲突预览残留的主要膨胀源），容量测量基于治理后的真实占用；仓库超限重建改**两阶段 quarantine**——先整体 rename 进固定名隔离目录（原子发布点，之后任何死亡都自洽）再删除，崩溃残留由下一轮治理清扫。待办第 2 条到此全部关闭；
+- **防御性小修**：`claimRewindNotices` 的 SELECT 移入 `BEGIN IMMEDIATE` 事务内——读与消费在同一写锁内完成，双 Host 并发 claim 不再可能返回同一批 pending notice（补跨连接不双消费测试）；
 - **文档/文案漂移修正**：README 测试数字（18/97 → 22/118）与「当前限制」中已过时的容量治理条目；命令 hint 移除已冻结的 `--redo`；
 - **中文文案入 locales（待办第 15 条部分关闭）**：undo 卡片全部硬编码中文迁入双语字典（新增 10 个 key），组件经 `setCardTranslator` 注入通道（与 `setSubmitLine` 同一生命周期模式），未注入时回退 zh 字典；提交通道的会话缺失错误同步入字典。剩余：`createLifecycleController` 收敛、HMR 实例 token。
 
