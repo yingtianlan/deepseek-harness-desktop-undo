@@ -20,7 +20,7 @@
 
 因此当前适合继续在可丢弃的测试工作区验证，不建议在真实用户工作区中启用。
 
-## 1.1 修复状态更新（2026-09-04）
+## 1.1 修复状态更新（2026-09-04，随修复迭代持续更新）
 
 本报告发布后，P0 修复已在 `dsh/turnrewind-ts-test` 分支完成并合入主分支，随后进行了复核与补充修复。当前状态：
 
@@ -31,13 +31,22 @@
 | P0-3 恢复与账本非原子 | ✅ 已修复 | turn/operation/notice 单事务提交，失败落 `needs-recovery` |
 | P0-4 redo 无失败恢复 | ✅ 以禁用方式关闭 | **产品决策：redo 功能冻结**。底层加固（applying operation / 失败明细 / needs-recovery 事务）已实现并保留测试，入口在 `applyUndo` 顶部直接拒绝；重新开放只需替换闸门行 |
 | P0-5 单路径失败无持久记录 | ✅ 已修复 | `notRestored` 明细写入 `operation.error` 与 notice paths |
-| P1-1 ~ P1-5 | ⬜ 未处理 | workspace 持久锁、plan 版本绑定、symlink、mode、TOCTOU（root 拒绝已随 P0-1 落地） |
+| P1-1 workspace 持久锁 | ✅ 已修复 | `workspace-lock.ts`：O_EXCL 锁文件 + pid 存活探测 + 30min TTL 接管；覆盖 capture/settle/undo/redo/purge，忙时显式 `TURNREWIND_LOCK_BUSY`（HTTP confirm 转 409） |
+| P1-2 plan 未绑定预览版本 | ✅ 已修复 | pending_plans 持久化 before/after ref + paths digest（排序 sha256）；两条 confirm 路径经 `planDrift()` 校验漂移即拒绝 |
+| P1-3 symlink 静默当文件 | ✅ 已修复 | `stateAt` 识别 mode `120000` → `unsupported`；预览标注 `[unsupported]` 并单列；恢复跳过并计入未恢复清单，`restorePath` 双保险拒绝 |
+| P1-4 mode/权限位 | ⬜ 未处理 | PathState 仍无 mode；权限位变化不进 diff、恢复不还原（symlink 部分已随 P1-3 关闭） |
+| P1-5 TOCTOU/junction | ⬜ 未处理 | root 拒绝已随 P0-1 落地；检查后到写入之间的窗口、Windows reparse point 检测仍待接 sandbox bridge |
 | P2-5 同步 rev-parse | ✅ 已修复 | 60s TTL 进程级缓存 |
 | P2-6 status route 方法限制 | ✅ 已修复 | `jsonRoute` 支持 `methods`，status 限 GET |
-| P2-7 客户端样式规范 | ✅ 已修复 | 样式迁移至 css-render 对象树，effect 管理挂载/卸载 |
-| P2-1/P2-2/P2-4 | ⬜ 未处理 | 子树 undo、文档冲突、容量治理（README 的 redo 章节已同步本次变更） |
+| P2-7 客户端样式规范 | ✅ 已修复并加固 | css-render 迁移后实测发现并修复：dialog/command-view 类名冲突、**css-render 裸数字不补 px 导致全部尺寸声明失效**（圆角/间距失效根因）；styles 测试 render 断言防回归 |
+| P2-1/P2-2/P2-4 | ⬜ 未处理 | 子树 undo、文档冲突（TURN_REWIND.md 非 Git 章节 / PROJECT_STATUS 过时）、容量治理 |
 
-验证：17 个测试文件 / 85 个测试全部通过；typecheck、eslint（0 errors）、build（publint 通过）均绿。附带清理：删除根目录误提交的 `test/ledger.test.js`、去除 `client/index.ts` 中重复的样式挂载 effect。
+### 1.2 产品行为补充修复（2026-09-05）
+
+- **过期 plan 留档可查**：过期/被替换/取消的 pending plan 转 `expired` 永久保留（不再删除），卡片保留文件清单与 diff 视图，仅执行被拒（confirm 路径 410/409 明确提示）；「真不存在」（purge/清理）才折叠；
+- **单会话只报一次提示**：unsupported 弹窗去重从浏览器 localStorage（易失，换端口/清存储即重弹）改为 runner 内置种子逻辑——进入会话时已存在的提示视为历史留档（会话内消息永久可见），仅页面存活期间新到达的提示弹一次；
+- 提示文案高对比（亮色黑/暗色白，`label-primary`）；预览提示右对齐、执行结果靠左；
+- 验证：19 个测试文件 / 101 个测试全部通过；typecheck、eslint（0 errors）、build 均绿。附带清理：删除根目录误提交的 `test/ledger.test.js`、重复样式挂载、playwright 探查脚本入 gitignore。
 
 ## 2. 审查范围
 
