@@ -1,5 +1,17 @@
 # `dsh-tauri-turnrewind` 架构设计
 
+> **⚠️ 文档状态（2026-09-05，唯一真相源指引）**
+>
+> 本文档是**设计文档**，描述架构目标与决策过程；实现已与本设计产生分化，阅读时按以下三栏区分：
+>
+> | 层 | 位置 | 说明 |
+> | --- | --- | --- |
+> | **当前实现** | `packages/dsh-tauri-turnrewind-ts`（TS 重写，Git 目录模式） | workspace 必须是 Git worktree（**非 Git 目录不支持**）；快照链式存于 `$DSH_HOME/snapshots/<hash>.git`；账本在 `$DSH_HOME/ledger.sqlite`（非本文 §4.1 的 `turnrewind/` 子布局）；容量治理（保留条数 + 仓库超限重建）已落地；单回合 undo + 预览/确认；redo 冻结；子树 undo 未实现 |
+> | **历史实现** | 旧 JS 插件与本文的预算扫描/敏感文件名单描述 | 已删除，相关章节仅作设计过程记录 |
+> | **当前真实状态报告** | `docs/TURN_REWIND_REVIEW_2026-09-03.md`（§1.1/§1.2 修复状态）+ `docs/TURN_REWIND_OPTIMIZATION_SECURITY_AUDIT.md`（§7 统一待办） | 查现状先看这两份 |
+>
+> 本文中与「当前实现」冲突的章节（§4.1 子布局、§5.3 预算扫描、§9.3 非 Git 支持、§14 非 Git 验收行）保留原文但以本横幅为准。
+
 ## 1. 目标与边界
 
 `dsh-tauri-turnrewind` 是一个独立的 DSH 插件：为一次 Agent 对话回合（turn）建立可恢复的文件基线，并允许用户通过 `/undo` 或消息旁的 Undo 操作，把该回合造成的工作区修改撤销。
@@ -445,6 +457,8 @@ SQLite 账本负责：
 
 ### 9.3 非 Git 工作区
 
+> **⚠️ 当前实现（Git 目录模式）不支持本节**：workspace 必须位于 Git worktree，非 Git 目录记为 `TURNREWIND_GIT_REQUIRED` 并不追踪。本节保留为设计目标——若未来恢复非 Git 支持，需先过容量与敏感面评审。
+
 用户项目没有 Git 时，仍通过目录索引发现变化，并把文件导入插件私有 Git 仓库。因此「不依赖 Git」的含义是**不依赖用户项目存在 Git**，而不是完全不使用 Git 实现快照。
 
 ### 9.4 与 `dsh-tauri-worktree` 集成
@@ -606,7 +620,7 @@ Agent 文本回复成功不是「可撤销」的判断标准；只有结算扫�
 | 父 turn 下多个子分支 | 只撤销所选父节点的全部后代 |
 | 子树外 turn 改同一文件 | 显示冲突，不默认覆盖 |
 | 用户手动编辑目标文件 | 显示冲突，可取消/跳过/强制 |
-| 非 Git 目录 | 不依赖用户项目 Git，仍可通过插件私有 Git 快照恢复 |
+| 非 Git 目录 | ⚠️ 当前 Git 目录模式**不支持**（记 `TURNREWIND_GIT_REQUIRED`）；本行为为设计目标 |
 | Git dirty 工作区 | 不改变 index、branch、commit |
 | Worktree 会话 | 只影响该 worktree |
 | Agent 失败/取消 | 最佳努力结算并如实标记可恢复性 |
