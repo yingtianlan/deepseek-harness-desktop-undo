@@ -13,7 +13,7 @@ import { setSubmitLine } from './components/command-view'
 import { TURNREWIND_HTTP_BASE, TURNREWIND_LOCALE_NS } from './constants'
 import { LOCALES } from './locales'
 import { registerCommandView } from './register/command-view'
-import { disposeDialog, pickFreshNotices, showDialog } from './register/dialog'
+import { disposeDialog, listNotices, showDialog } from './register/dialog'
 import { mountCommandViewStyles, mountDialogStyles } from './styles'
 import { parseUndoOutput, resolvePlanStatus } from './utils/parse'
 import { resolveOwnerSessionId } from './utils/session'
@@ -90,11 +90,15 @@ export function apply(ctx: ClientContext): void {
   }, 'turnrewind submit line')
 
   // ————————————————— 不可用工作区弹窗 runner —————————————————
-  // 通过 sessions.list 的投影值读取 Host 注入的 unsupported 提示，
-  // 每条提示在 localStorage 去重——同一浏览器只弹一次。
+  // 通过 sessions.list 的投影值读取 Host 注入的 unsupported 提示。
+  // 「单会话只报一次」：进入会话（或页面加载）时已存在的提示视为历史留档
+  // ——它们已经以会话内消息的形式永久可见，不再重复弹窗（浏览器存储丢
+  // 「已读」也不会重弹）；只有页面存活期间新到达的提示才弹一次。
   const sessions = (ctx as unknown as { get?: (name: string) => unknown }).get?.('sessions') as
     | { list: { getSnapshot: () => unknown, subscribe: (fn: () => void) => () => void } }
     | undefined
+  const knownNoticeIds = new Set<string>()
+  let seededSession: unknown = null
 
   function checkOnce(): void {
     if (!sessions)
@@ -104,10 +108,19 @@ export function apply(ctx: ClientContext): void {
       byId?: Record<string, { projectionValues?: { turnrewind?: unknown } }>
     }
     const summary = state.current !== undefined ? state.byId?.[state.current] : undefined
-    const value = summary?.projectionValues?.turnrewind
-    const fresh = pickFreshNotices(value)
+    const notices = listNotices(summary?.projectionValues?.turnrewind)
+    // 首次观察到当前会话（页面加载/切换会话）：现存提示全部视为已留档历史。
+    if (seededSession !== state.current) {
+      seededSession = state.current
+      for (const notice of notices)
+        knownNoticeIds.add(notice.id)
+      return
+    }
+    const fresh = notices.filter(notice => !knownNoticeIds.has(notice.id))
     if (fresh.length === 0)
       return
+    for (const notice of fresh)
+      knownNoticeIds.add(notice.id)
     console.warn(`[turnrewind] unsupported heads-up visible: ${fresh.map(notice => notice.id).join(', ')}`)
     showDialog(t, fresh)
   }

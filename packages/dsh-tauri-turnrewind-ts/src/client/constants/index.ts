@@ -29,11 +29,5 @@ export const COMMAND_VIEW_EFFECT = 'turnrewind command view'
 /** locale 命名空间（不可用弹窗双语）。 */
 export const TURNREWIND_LOCALE_NS = 'dsh-tauri-turnrewind'
 
-/** 弹窗已读去重的 localStorage key。 */
-export const SEEN_NOTICES_KEY = 'turnrewind.seenUnsupportedNotices'
-
-/** 弹窗去重列表长度上限。 */
-export const MAX_SEEN_NOTICES = 100
-
 /** 同源 HTTP 路由前缀（Host 注册的 /api/turnrewind/*）。 */
 export const TURNREWIND_HTTP_BASE = '/api/turnrewind'
