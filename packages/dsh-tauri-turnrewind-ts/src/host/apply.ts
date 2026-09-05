@@ -52,7 +52,7 @@ import {
 import { planDrift } from './service/planner'
 import { enforceRetention } from './service/retention'
 import { applyUndo, buildPlanEntries, executeUndoRestore, turnRefsExist, workspaceForAgent, workspaceHasActiveTurn, workspaceIssue, workspaceKeyFor } from './service/undo'
-import { withWorkspaceLock, WorkspaceLockBusyError } from './service/workspace-lock'
+import { acquireWorkspaceLockSync, withWorkspaceLock, WorkspaceLockBusyError } from './service/workspace-lock'
 
 /** 插件名（诊断元数据，与 shared/constants 的 TURNREWIND_PLUGIN_NAME 一致）。 */
 export const name = 'dsh-tauri-turnrewind'
@@ -266,11 +266,28 @@ export function apply(ctx: HostApplyContext): void {
         log.warn(`turnrewind: resurrected ${path} in ${workspaceDir} from a crashed restore swap`)
       // 容量治理（P2-4）：workspace 首次触碰是安全点（无活动 turn、无 undo）。
       // 超出保留条数的 turn 标记过期；仓库超限整仓重建（下次 capture 自愈基线）。
-      const retention = enforceRetention(ledger, store)
-      if (retention.expiredByCount > 0)
-        log.warn(`turnrewind: retention expired ${retention.expiredByCount} turn(s) in ${workspaceDir} (kept the most recent ones)`)
-      if (retention.rebuilt)
-        log.warn(`turnrewind: snapshot repository for ${workspaceDir} rebuilt by retention (${retention.repoSizeMb.toFixed(1)} MB over the cap; ${retention.expiredByRebuild} turn(s) archived)`)
+      // 重建/回收是破坏性写，与另一 Host 进程的 capture 互斥：拿一次性跨进程
+      // 锁执行；忙（另一进程正在捕获/恢复/清理）则本轮跳过，绝不让治理与
+      // 捕获并发写同一仓库——治理是内务，不能阻塞或破坏 turn 追踪。
+      try {
+        const retentionLock = acquireWorkspaceLockSync(dataRoot, workspaceDir)
+        try {
+          const retention = enforceRetention(ledger, store)
+          if (retention.expiredByCount > 0)
+            log.warn(`turnrewind: retention expired ${retention.expiredByCount} turn(s) in ${workspaceDir} (kept the most recent ones)`)
+          if (retention.rebuilt)
+            log.warn(`turnrewind: snapshot repository for ${workspaceDir} rebuilt by retention (${retention.repoSizeMb.toFixed(1)} MB over the cap; ${retention.expiredByRebuild} turn(s) archived)`)
+        }
+        finally {
+          retentionLock.release()
+        }
+      }
+      catch (error) {
+        if (error instanceof WorkspaceLockBusyError)
+          log.warn(`turnrewind: workspace busy; snapshot retention skipped this time for ${workspaceDir}`)
+        else
+          log.error(`turnrewind: snapshot retention failed for ${workspaceDir}: ${String(error)}`)
+      }
       runtime = {
         db: ledger,
         store,
@@ -669,7 +686,7 @@ export function apply(ctx: HostApplyContext): void {
   ctx.effect(() => commands.register({
     name: 'undo',
     description: 'Plan or undo file changes made by the latest Agent turn',
-    input: { hint: '[turn-id] [--dry-run|--preview] [--skip-conflicts|--force] | --redo' },
+    input: { hint: '[turn-id] [--dry-run|--preview] [--skip-conflicts|--force]' },
     handler: (invocation: { rawInput: string, agent: { session: { id: string, header?: { cwd?: string } } } }) => {
       const workspaceDir = workspaceForAgent(invocation.agent)
       if (!workspaceDir) {

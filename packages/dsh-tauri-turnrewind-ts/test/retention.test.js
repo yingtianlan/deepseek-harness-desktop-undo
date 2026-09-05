@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict'
 import { Buffer } from 'node:buffer'
+import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'pathe'
 import { afterEach, it } from 'vitest'
-import { createSnapshotStore, workspaceKey } from '../src/host/service/git-snapshot'
+import { captureSnapshot, createSnapshotStore, workspaceKey } from '../src/host/service/git-snapshot'
 import { insertTurn, openLedger, settleTurn } from '../src/host/service/ledger'
 import { enforceRetention } from '../src/host/service/retention'
-import { initGitWorkspace } from './git-test-utils.js'
+import { gitOutput, initGitWorkspace } from './git-test-utils.js'
 
 const cleanups = []
 
@@ -107,5 +108,29 @@ it('keeps everything when under both limits', async () => {
   assert.equal(result.expiredByCount, 0)
   assert.equal(result.rebuilt, false)
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM turns WHERE reversible = 1').get().count, 3)
+  db.close()
+})
+
+it('prunes unreachable loose objects before measuring the size cap', async () => {
+  const root = await makeRoot()
+  const workspace = await makeWorkspace(root, 'ws')
+  const db = openLedger(join(root, 'ledger'))
+  const store = createSnapshotStore(join(root, 'data'), workspace)
+  // A real capture first: the private repository must exist (and the reachable
+  // objects it holds must survive the prune).
+  const seed = await captureSnapshot(store, 'refs/turnrewind/prune-seed', 'seed')
+  // Simulate the disk-content blobs diffAgainstDisk hashes into the repo
+  // during conflict previews: written via hash-object, referenced by nothing.
+  const stray = join(workspace, 'stray.txt')
+  await writeFile(stray, 'unreachable preview content\n')
+  const oid = (await gitOutput(workspace, ['--git-dir', store.repoDir, 'hash-object', '-w', 'stray.txt'])).trim()
+  const loosePath = join(store.repoDir, 'objects', oid.slice(0, 2), oid.slice(2))
+  assert.equal(existsSync(loosePath), true)
+
+  const result = enforceRetention(db, store)
+  assert.equal(result.rebuilt, false)
+  assert.equal(existsSync(loosePath), false, 'unreachable loose object must be pruned')
+  // The reachable snapshot chain is untouched by the prune.
+  assert.equal((await gitOutput(workspace, ['--git-dir', store.repoDir, 'cat-file', '-t', seed.commit])).trim(), 'commit')
   db.close()
 })

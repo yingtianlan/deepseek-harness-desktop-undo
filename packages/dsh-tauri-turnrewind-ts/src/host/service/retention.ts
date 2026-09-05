@@ -19,9 +19,11 @@
 
 import type { SnapshotStore } from '../types'
 import type { Ledger } from './ledger'
-import { readdirSync, rmSync, statSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { existsSync, readdirSync, rmSync, statSync } from 'node:fs'
 import process from 'node:process'
 import { join } from 'pathe'
+import { SYNC_GIT_TIMEOUT_MS } from '../constants'
 import { workspaceKey } from './git-snapshot'
 
 /** 每个 workspace 保留的最近可撤销 turn 数。 */
@@ -84,8 +86,31 @@ function directorySizeMb(dir: string): number {
 }
 
 /**
+ * 回收私有仓库中不可达的 loose object。主要来源是 diffAgainstDisk 把冲突文件
+ * 的当前磁盘内容 `hash-object -w` 进仓库：这些对象没有任何 ref 可达，反复
+ * 预览/冲突 diff 会持续积累，是提前触发整仓重建的主因。prune 只删除不可达
+ * 对象（refs/turnrewind/* 链上的对象不受影响），放在容量测量之前，让上限
+ * 判断基于治理后的真实占用。同步执行：与 git-workspace 的 rev-parse 同级，
+ * 仅在 workspace 首次触碰（每进程每仓库一次）发生。
+ */
+function pruneRepoLooseObjects(repoDir: string): void {
+  if (!existsSync(join(repoDir, 'HEAD')))
+    return
+  try {
+    spawnSync('git', ['--git-dir', repoDir, 'prune', '--expire=now'], {
+      timeout: SYNC_GIT_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
+    })
+  }
+  catch {
+    // 容量治理尽力而为：prune 失败（git 缺失/被击杀）不影响过期与重建逻辑。
+  }
+}
+
+/**
  * 对一个 workspace 执行容量治理。在无活动 turn / 无 undo 的安全点调用
- * （当前唯一调用点：ensureRuntime 的 workspace 首次触碰）。
+ * （当前唯一调用点：ensureRuntime 的 workspace 首次触碰，调用方持跨进程
+ * workspace 锁）。
  */
 export function enforceRetention(db: Ledger, store: SnapshotStore, options: RetentionOptions = {}): RetentionResult {
   const retainTurns = options.retainTurns ?? readPositiveEnv('TURNREWIND_RETAIN_TURNS') ?? DEFAULT_RETAIN_TURNS
@@ -108,8 +133,10 @@ export function enforceRetention(db: Ledger, store: SnapshotStore, options: Rete
   for (const row of excess)
     result.expiredByCount += Number(expire.run(row.turn_id).changes)
 
-  // 2) 容量上限：整仓重建。旧 turn 的 refs 随仓消失，全部如实标记；
+  // 2) 容量上限：先回收不可达 loose object，再测量治理后的真实占用；
+  //    超限即整仓重建——旧 turn 的 refs 随仓消失，全部如实标记，
   //    下一次 capture 经既有自愈路径建立新基线。
+  pruneRepoLooseObjects(store.repoDir)
   result.repoSizeMb = directorySizeMb(store.repoDir)
   if (result.repoSizeMb > maxSnapshotMb) {
     db.prepare(`
