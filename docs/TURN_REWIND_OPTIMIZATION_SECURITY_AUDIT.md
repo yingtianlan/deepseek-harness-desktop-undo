@@ -205,3 +205,44 @@ pnpm exec eslint packages/dsh-tauri-turnrewind-ts
 ## 6. 结论
 
 未发现可直接确认的 Git shell 注入或明显 DOM XSS；当前实现对路径、符号链接、目录删除、计划 claim 和崩溃围栏已有较完整的防御。主要剩余风险不是单个字符串拼接漏洞，而是**文件系统与账本无法天然原子化、TOCTOU 的平台边界、容量重建的并发安全，以及真实集成覆盖不足**。完成 P0/P1 项后，再把插件从“受控 Git worktree 的 MVP 恢复工具”升级为更广泛的生产能力。
+
+## 7. 待办整合与当前状态（2026-09-05）
+
+本报告与 `docs/TURN_REWIND_REVIEW_2026-09-03.md` 的修复状态合并后的统一待办。
+
+### 已完成（本报告核对时确认）
+
+- 报告建议第 1 条：retention 的 typecheck 错误已在 `48ecb96` 前修复，typecheck/test/build/eslint 全绿；
+- legacy JS 同名包已删除（canonical package 唯一）；
+- 弹窗去重已从 localStorage 迁移为「单会话一次」种子逻辑（P2-8 相关 README 漂移同步修复）；
+- P0/P1 主体（递归删除、interrupted 账本、原子事务、redo 冻结、workspace lock、plan 绑定、symlink、mode、TOCTOU 缓解）见 09-03 报告 §1.1。
+
+### 新增待办（按优先级）
+
+**高优先级（正确性/并发）：**
+
+1. needs-recovery 围栏实时化：写入时同步内存集合 + baseline/命令入口/confirm 三处实时查库（P1-6）；
+2. retention 与首触初始化纳入 workspace lock；仓库重建改两阶段 quarantine（P1-1/P1-8）；
+3. SQLite `busy_timeout` + 写事务 `BEGIN IMMEDIATE` + `buildPlanEntries` 有界并发池（P1-7）；
+4. 锁发布竞态：临时文件 fsync 后原子 rename 发布；`EPERM` 视为存活（P1-5）；
+5. 旧格式 plan（NULL 绑定列）从严拒绝、强制重新预览（P1-2 政策收紧）；
+6. HTTP 路由健壮性：`responded` 一次性 guard、请求超时、Content-Type 校验、`nosniff`/`no-store`、planId/sessionId 格式校验（P1-3）；
+7. 路径数/单路径长度/notice 字节/diff 行数硬上限（P1-4）。
+
+**中优先级（工程）：**
+
+8. client sessions 读取改走 `compat(ctx)` 代理，去掉原始 `ctx.get` 绕过（P2-8）；
+9. purge CLI：补 `dist/purge-workspace.js` entry 或修正 README 命令（P2-8，已核实 README 现指向不存在文件）；
+10. 弹窗种子逻辑提取纯函数并测试四种场景；`prepublishOnly` 改 `pnpm build`（P2-8/P2-10）；
+11. 协议常量收敛到 shared + Host/client 路径契约测试；`expandKey` 不再回退到输出摘要（P2-8）；
+12. bak/tmp 所有权校验、applying plan 启动清扫、gitlink 标记 unsupported、`normalizeSnapshotRef` 全边界、sweep 拒绝 junction 递归、FIFO 统一异常捕获（P2-11）；
+13. 请求超时 + Origin allowlist + 405/413/403/坏 JSON 测试；确认/取消请求加 `AbortSignal.timeout`（P2-9/P1-3）。
+
+**低优先级（产品/体验）：**
+
+14. P2-1 subtree undo（先定 DSH turn tree 契约）；P2-2 文档唯一真相源三栏表；P2-4 批量 ls-tree 与元数据缓存；P2-5 结构化事件；P2-6 可访问性（焦点陷阱/Escape/aria）与轮询退避；P2-7 CI lockfile/依赖审计/平台矩阵；
+15. `createLifecycleController` 收敛、HMR 实例 token、`as never` 移除、`CommandViewProps` 入 types、中文文案入 locales（P2-10）；`ctx.logger` 统一。
+
+### 实施顺序建议
+
+采纳本报告第 4 节顺序，其中第 1 条（retention typecheck）已完成，第 2 条（client compat / purge CLI / 种子测试）为下一个开工项。
