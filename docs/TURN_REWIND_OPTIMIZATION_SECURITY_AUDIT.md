@@ -245,4 +245,4 @@ pnpm exec eslint packages/dsh-tauri-turnrewind-ts
 
 ### 实施顺序建议
 
-采纳本报告第 4 节顺序，其中第 1 条（retention typecheck）已完成，第 2 条（client compat / purge CLI / 种子测试）为下一个开工项。
+采纳本报告第 4 节顺序，其中：第 1 条（retention typecheck）已完成（`48ecb96`）；第 2 条（client compat 绕过修复 / purge CLI entry 与 README 修正 / 弹窗种子纯函数化+测试 / prepublishOnly 修复）已完成（`c678750`）。下一个开工项为第 3 条（受控文件系统 bridge 与 recovery 诊断），属平台级工作。
