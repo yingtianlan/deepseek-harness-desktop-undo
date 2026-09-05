@@ -253,6 +253,11 @@ export function UndoCommandView(props: CommandViewProps): React.ReactElement {
     : resultText || (planStatus === 'applied' || pendingWait
       ? '已提交，等待执行结果…'
       : planStatus === 'cancelled' || submitted === 'cancel' ? '已取消' : planStatus === 'gone' ? '该计划已过期，重新执行 /undo 可生成新预览' : '执行将恢复下方文件到本轮改动前')
+  const hintCls = `${TURNREWIND_CLASS_PREFIX}-card-hint${submitError
+    ? ` ${TURNREWIND_CLASS_PREFIX}-card-hint-error`
+    : resultText || planStatus === 'applied' ? ` ${TURNREWIND_CLASS_PREFIX}-card-hint-ok` : ''}`
+  // 提交后的结果（成功/失败/等待中）靠左展示；预览提示跟随按钮右侧。
+  const hintLeft = Boolean(resultText || submitError || submitted !== null || planStatus === 'applied')
   const showFooter = actionable || submitting || resultText !== null || submitError !== null || submitted !== null || planStatus === 'applied'
 
   // 取消/过期折叠为无边框细行。
@@ -262,6 +267,7 @@ export function UndoCommandView(props: CommandViewProps): React.ReactElement {
     }, React.createElement('span', { className: `${TURNREWIND_CLASS_PREFIX}-card-glyph` }, '▸'), React.createElement('span', { className: `${TURNREWIND_CLASS_PREFIX}-card-name` }, node.name || 'undo'), React.createElement('span', { className: `${TURNREWIND_CLASS_PREFIX}-card-dot` }, '·'), React.createElement('span', { className: `${TURNREWIND_CLASS_PREFIX}-card-hint` }, hint))
   }
 
+  const hintSpan = React.createElement('span', { className: hintCls }, hint)
   return React.createElement('div', {
     className: `${TURNREWIND_CLASS_PREFIX}-panel`,
   },
@@ -286,7 +292,7 @@ export function UndoCommandView(props: CommandViewProps): React.ReactElement {
             className: `${TURNREWIND_CLASS_PREFIX}-panel-file`,
           }, React.createElement('span', { className: `${TURNREWIND_CLASS_PREFIX}-panel-file-change` }, file.change), React.createElement('span', null, file.path))))
     : null,
-  // 操作 footer。
+  // 操作 footer：按钮在左；提交后结果贴左，预览提示靠右。
   showFooter
     ? React.createElement('div', {
         className: `${TURNREWIND_CLASS_PREFIX}-card-actions`,
@@ -304,8 +310,6 @@ export function UndoCommandView(props: CommandViewProps): React.ReactElement {
             disabled: submitting || submitted !== null,
             className: `${TURNREWIND_CLASS_PREFIX}-card-cancel${submitted === 'cancel' ? ` ${TURNREWIND_CLASS_PREFIX}-card-cancel-dim` : ''}${submitting ? ` ${TURNREWIND_CLASS_PREFIX}-card-busy` : ''}`,
           }, cancelLabel)
-        : null, React.createElement('span', { className: `${TURNREWIND_CLASS_PREFIX}-card-spacer` }), React.createElement('span', {
-        className: `${TURNREWIND_CLASS_PREFIX}-card-hint${submitError ? ` ${TURNREWIND_CLASS_PREFIX}-card-hint-error` : resultText || planStatus === 'applied' ? ` ${TURNREWIND_CLASS_PREFIX}-card-hint-ok` : ''}`,
-      }, hint))
+        : null, hintLeft ? hintSpan : null, React.createElement('span', { className: `${TURNREWIND_CLASS_PREFIX}-card-spacer` }), hintLeft ? null : hintSpan)
     : null)
 }

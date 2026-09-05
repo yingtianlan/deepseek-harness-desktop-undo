@@ -40,6 +40,8 @@ it('renders command-view styles with explicit px units', () => {
   assert.match(css, /border-radius:\s*10px/u)
   assert.match(css, /font-size:\s*12px/u)
   assert.match(css, /max-height:\s*260px/u)
+  // Hint text stays high-contrast across themes (black on light, white on dark).
+  assert.match(css, /\.dsh-turnrewind-card-hint\s*\{[^}]*--dsw-alias-label-primary/u)
 })
 
 it('renders dialog styles with explicit px units', () => {

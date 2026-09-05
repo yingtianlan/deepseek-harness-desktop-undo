@@ -86,7 +86,8 @@ export function buildCommandViewStyleNodes(cssr: ReturnType<typeof CssRender>) {
       color: 'var(--dsw-alias-label-dimmed, #8b8b8b)',
     }),
     cssr.c(`.${P}-card-hint`, {
-      color: 'var(--dsw-alias-label-dimmed, #8b8b8b)',
+      // 高对比：亮色主题黑、暗色主题白（label-primary 随主题切换）。
+      color: 'var(--dsw-alias-label-primary, #333333)',
       fontSize: '11.5px',
       overflow: 'hidden',
       textOverflow: 'ellipsis',
