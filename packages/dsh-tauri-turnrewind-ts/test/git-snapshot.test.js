@@ -1,11 +1,46 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'pathe'
 import { it } from 'vitest'
 import { captureSnapshot, classifyPathChange, createSnapshotStore, currentState, diffAgainstDisk, gitAvailable, probeWorkspace, restorePath, snapshotDiff, snapshotFileDiff, stateAt } from '../src/host/service/git-snapshot'
 import { completeUndoTransaction, createOperation, getLatestTurn, insertTurn, openLedger, settleInterruptedTurn, settleTurn } from '../src/host/service/ledger'
 import { initGitWorkspace } from './git-test-utils.js'
+
+it('persists entry mode in snapshots and restores the executable bit', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'turnrewind-mode-test-'))
+  const workspace = join(root, 'workspace')
+  try {
+    await initGitWorkspace(workspace)
+    await writeFile(join(workspace, 'run.sh'), '#!/bin/sh\necho hi\n')
+    const store = createSnapshotStore(join(root, 'data'), workspace)
+    const before = await captureSnapshot(store, 'refs/turnrewind/mode-before', 'before')
+    // Windows git (core.filemode=false) always records 100644; POSIX records
+    // the real mode. Both platforms must surface the mode on the state.
+    assert.equal((await stateAt(store, before.commit, 'run.sh')).mode, '100644')
+
+    if (process.platform === 'win32')
+      return
+
+    // POSIX round trip: the turn flips the exec bit — a mode-only change that
+    // must appear in the diff and be restorable with the bit intact.
+    await chmod(join(workspace, 'run.sh'), 0o755)
+    const after = await captureSnapshot(store, 'refs/turnrewind/mode-after', 'after', before.commit)
+    assert.equal((await stateAt(store, after.commit, 'run.sh')).mode, '100755')
+    assert.deepEqual(await snapshotDiff(store, before.commit, after.commit), ['run.sh'])
+
+    // Clear the bit on disk, then restore from the exec snapshot: the mode
+    // comes back with the content.
+    await chmod(join(workspace, 'run.sh'), 0o644)
+    await restorePath(store, after.commit, 'run.sh')
+    const restored = await stat(join(workspace, 'run.sh'))
+    assert.ok((restored.mode & 0o111) !== 0, 'executable bit must be restored')
+    assert.equal(currentState(workspace, 'run.sh').mode, '100755')
+  }
+  finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
 
 it('reports snapshot symlinks as unsupported and refuses to restore them', async () => {
   const root = await mkdtemp(join(tmpdir(), 'turnrewind-symlink-snap-'))

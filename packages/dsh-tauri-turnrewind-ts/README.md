@@ -359,7 +359,7 @@ pnpm --filter dsh-tauri-turnrewind test
 - 快照容量治理：按 turn 数/容量/保留期清理旧 snapshot ref（当前只做断链自愈，不清理历史）；
 - 实现父对话递归 undo；
 - 实现消息旁 Undo 按钮；
-- 明确二进制、重命名、权限位等策略（symlink 已定义：捕获进快照但 undo 标注 `[unsupported]` 并跳过，见下文「符号链接策略」）；
+- 明确重命名与特殊文件（submodule、设备文件）策略（symlink 与 mode/权限位已落地：mode 进快照状态、POSIX 下恢复可执行位，Windows 按 git filemode=false 约定统一 100644）；
 - 重新开放 redo：移除解析层禁用分支、恢复端到端 redo 测试（底层加固已完成，见「已禁用：redo」）。
 
 ### 符号链接策略（P1-3）

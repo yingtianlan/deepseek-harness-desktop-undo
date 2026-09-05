@@ -29,10 +29,10 @@ export interface Snapshot {
   refName: string
 }
 
-/** 文件在某个快照提交里的状态。 */
+/** 文件在某个快照提交里的状态。mode 为 git 条目 mode（'100644'/'100755'）。 */
 export type PathState
   = | { kind: 'absent', digest: null }
-    | { kind: 'file', digest: string }
+    | { kind: 'file', digest: string, mode: string }
     | { kind: 'tooLarge', digest: null }
     | { kind: 'unsupported', digest: null }
 

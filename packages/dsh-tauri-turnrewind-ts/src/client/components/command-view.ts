@@ -118,16 +118,18 @@ export function UndoCommandView(props: CommandViewProps): React.ReactElement {
   const summary = parsed.summary || (state === 'error' ? '失败' : state === 'running' ? '运行中' : '完成')
 
   // 展开状态按命令持久化：用户折叠后刷新不重新展开。
+  // 惰性初始化读取持久化值（node.id 稳定，expandKey 不会在生命周期内变化），
+  // 避免 effect 内同步 setState。
   const expandKey = `turnrewind.expanded.${node.id ?? parsed.planId ?? parsed.summary}`
-  const [expanded, setExpanded] = useState(hasDiff)
-  useEffect(() => {
+  const [expanded, setExpanded] = useState(() => {
     try {
       const stored = globalThis.localStorage.getItem(expandKey)
       if (stored === '0' || stored === '1')
-        setExpanded(stored === '1')
+        return stored === '1'
     }
     catch {}
-  }, [expandKey])
+    return hasDiff
+  })
 
   function toggleExpanded(): void {
     setExpanded((v) => {

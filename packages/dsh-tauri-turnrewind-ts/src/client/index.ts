@@ -10,7 +10,7 @@ import type { ClientContext } from 'dsh-tauri/client'
 import type { LocaleKey } from './locales'
 import { compat } from 'dsh-tauri/client'
 import { setSubmitLine } from './components/command-view'
-import { TURNREWIND_HTTP_BASE, TURNREWIND_LOCALE_NS } from './constants'
+import { TURNREWIND_HTTP_BASE, TURNREWIND_LOCALE_NS, TURNREWIND_POLL_INTERVAL_MS, TURNREWIND_POLL_STOP_MS } from './constants'
 import { LOCALES } from './locales'
 import { registerCommandView } from './register/command-view'
 import { disposeDialog, listNotices, showDialog } from './register/dialog'
@@ -130,8 +130,8 @@ export function apply(ctx: ClientContext): void {
       return () => {}
     const unsubscribe = sessions.list.subscribe(checkOnce)
     // 页面加载时投影帧可能在订阅建立前到达；短暂轮询保证时序不会吞掉提示。
-    const poll = setInterval(checkOnce, 2000)
-    const stopPolling = setTimeout(clearInterval, 120000, poll)
+    const poll = setInterval(checkOnce, TURNREWIND_POLL_INTERVAL_MS)
+    const stopPolling = setTimeout(clearInterval, TURNREWIND_POLL_STOP_MS, poll)
     return () => {
       unsubscribe()
       clearInterval(poll)

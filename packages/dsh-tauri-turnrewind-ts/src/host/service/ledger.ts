@@ -446,13 +446,6 @@ export function failTurn(db: Ledger, turnId: string, error: unknown): void {
     .run(new Date().toISOString(), String(error), turnId)
 }
 
-export function abandonTurn(db: Ledger, turnId: string, reason: string): void {
-  db.prepare(`
-    UPDATE turns SET status = 'abandoned', settled_at = ?, reversible = 0, error = ?
-    WHERE turn_id = ? AND status = 'active'
-  `).run(new Date().toISOString(), reason, turnId)
-}
-
 export function skipTurn(db: Ledger, turn: { turnId: string, sessionId: string, workspaceKey: string, startedAt: string }, reason: string): void {
   db.prepare(`
     INSERT INTO turns(turn_id, session_id, workspace_key, status, started_at, settled_at, reversible, error)

@@ -24,6 +24,7 @@ import { Buffer } from 'node:buffer'
 import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import {
+  chmodSync,
   copyFileSync,
   existsSync,
   lstatSync,
@@ -501,7 +502,7 @@ async function ensureEmptyBlob(store: SnapshotStore): Promise<string> {
 }
 
 async function blobFor(store: SnapshotStore, commit: string, path: string): Promise<string> {
-  if (!await commitEntry(store, commit, path))
+  if (!await commitEntryInfo(store, commit, path))
     return ensureEmptyBlob(store)
   return (await runGit(store.repoDir, store.workspaceDir, ['rev-parse', `${commit}:${path}`])).toString('utf8').trim()
 }
@@ -541,42 +542,28 @@ export async function diffAgainstDisk(store: SnapshotStore, commit: string, path
   return truncateDiff(output.toString('utf8'), maxLines)
 }
 
-async function commitEntry(store: SnapshotStore, commit: string, path: string): Promise<boolean> {
-  const output = await runGit(store.repoDir, store.workspaceDir, ['ls-tree', '-r', '--name-only', '-z', commit, '--', path])
-  return output.toString('utf8').split('\0').includes(path)
+/**
+ * 一次 `ls-tree -l` 读取条目的 mode 与 size：stateAt/restorePath/blobFor
+ * 共用，避免同一路径多次子进程调用。size 为 undefined 表示未知（submodule）。
+ */
+interface CommitEntryInfo {
+  mode: string
+  size: number | undefined
 }
 
-/**
- * Blob size of one committed path, or undefined when absent or unknown.
- * Reading only the size never materializes the blob, so an oversized entry can
- * be surfaced without blowing the output limit.
- */
-async function commitEntrySize(store: SnapshotStore, commit: string, path: string): Promise<number | undefined> {
+async function commitEntryInfo(store: SnapshotStore, commit: string, path: string): Promise<CommitEntryInfo | undefined> {
   const output = await runGit(store.repoDir, store.workspaceDir, ['ls-tree', '-r', '-l', '-z', commit, '--', path])
   for (const line of output.toString('utf8').split('\0')) {
     // mode SP type SP oid TAB size SP path (size is '-' for submodules).
     const tab = line.lastIndexOf('\t')
     if (tab !== -1 && line.slice(tab + 1) === path) {
-      const size = Number(line.slice(0, tab).split(' ').at(-1))
-      return Number.isFinite(size) ? size : undefined
+      const meta = line.slice(0, tab).split(' ')
+      const size = Number(meta.at(-1))
+      return {
+        mode: meta[0] ?? '100644',
+        size: Number.isFinite(size) && meta.at(-1) !== '-' ? size : undefined,
+      }
     }
-  }
-  return undefined
-}
-
-/**
- * Git mode of one committed path ('100644' regular, '100755' executable,
- * '120000' symlink, '160000' submodule), or undefined when absent.
- * P1-3: symlinks are identified here so stateAt/restore can refuse them
- * instead of silently writing the link target as file content.
- */
-async function commitEntryMode(store: SnapshotStore, commit: string, path: string): Promise<string | undefined> {
-  const output = await runGit(store.repoDir, store.workspaceDir, ['ls-tree', '-r', '-z', commit, '--', path])
-  for (const line of output.toString('utf8').split('\0')) {
-    // mode SP type SP oid TAB path
-    const tab = line.lastIndexOf('\t')
-    if (tab !== -1 && line.slice(tab + 1) === path)
-      return line.slice(0, tab).split(' ')[0]
   }
   return undefined
 }
@@ -606,16 +593,17 @@ export async function stateAt(store: SnapshotStore, commit: string, path: string
   // P1-3: a symlink entry ('120000') must not masquerade as a regular file —
   // its blob is just the link target text. Report it as unsupported so the
   // plan flags it and restore refuses, instead of writing wrong content.
-  if ((await commitEntryMode(store, commit, path)) === GIT_SYMLINK_MODE)
-    return { kind: 'unsupported', digest: null }
-  if (!await commitEntry(store, commit, path))
+  const info = await commitEntryInfo(store, commit, path)
+  if (!info)
     return { kind: 'absent', digest: null }
+  if (info.mode === GIT_SYMLINK_MODE)
+    return { kind: 'unsupported', digest: null }
   // Oversized blobs are reported instead of thrown: the caller can mark the
   // entry and continue, so one huge file never aborts a whole undo preview.
-  if ((await commitEntrySize(store, commit, path) ?? 0) > MAX_FILE_BYTES)
+  if ((info.size ?? 0) > MAX_FILE_BYTES)
     return { kind: 'tooLarge', digest: null }
   const bytes = await commitBytes(store, commit, path)
-  return { kind: 'file', digest: digest(bytes) }
+  return { kind: 'file', digest: digest(bytes), mode: info.mode }
 }
 
 export function currentState(workspaceDir: string, path: string): DiskState {
@@ -625,7 +613,12 @@ export function currentState(workspaceDir: string, path: string): DiskState {
   const info = lstatSync(target)
   if (!info.isFile() || info.size > MAX_FILE_BYTES)
     return { kind: 'unsupported', digest: null }
-  return { kind: 'file', digest: digest(readFileSync(target)) }
+  // Windows 无法可靠识别可执行位（git core.filemode=false），统一按 100644 报告；
+  // POSIX 取真实权限位，使 mode 差异能进入冲突可视与恢复路径。
+  const mode = process.platform === 'win32'
+    ? '100644'
+    : `100${(info.mode & 0o777).toString(8).padStart(3, '0')}`
+  return { kind: 'file', digest: digest(readFileSync(target)), mode }
 }
 
 /**
@@ -666,7 +659,8 @@ function rmSyncWithRetry(target: string, attempts: number = 5): void {
  */
 export async function restorePath(store: SnapshotStore, commit: string, path: string): Promise<RestoreResult> {
   const target = assertSafePath(store.workspaceDir, path)
-  if (!await commitEntry(store, commit, path)) {
+  const entry = await commitEntryInfo(store, commit, path)
+  if (!entry) {
     if (existsSync(target)) {
       const info = lstatSync(target)
       if (info.isSymbolicLink() || (!info.isFile() && !info.isDirectory()))
@@ -692,18 +686,21 @@ export async function restorePath(store: SnapshotStore, commit: string, path: st
   // P1-3: a symlink entry must never be "restored" by writing the link target
   // text as a regular file. Fail this one path with a stable code so the undo
   // loop reports it as not restored instead of corrupting the workspace type.
-  if ((await commitEntryMode(store, commit, path)) === GIT_SYMLINK_MODE)
+  if (entry.mode === GIT_SYMLINK_MODE)
     throw new Error(`TURNREWIND_UNSUPPORTED_TARGET: ${path} is a symlink in the snapshot; undo cannot restore symlinks (recreate the link manually if intended)`)
 
   // Restoring an oversized blob would require materializing it through the
   // same output-limited channel. Fail this one path with a stable code so the
   // undo loop can report it as not restored instead of dying mid-plan.
-  if ((await commitEntrySize(store, commit, path) ?? 0) > MAX_FILE_BYTES)
+  if ((entry.size ?? 0) > MAX_FILE_BYTES)
     throw new Error(`TURNREWIND_FILE_TOO_LARGE: ${path} (${MAX_FILE_BYTES}-byte limit) cannot be restored; add it to .gitignore or restore it manually`)
   const bytes = await commitBytes(store, commit, path)
   mkdirSync(dirname(target), { recursive: true })
   const temp = `${target}.turnrewind-${randomUUID()}.tmp`
   writeFileSync(temp, bytes, { flag: 'wx' })
+  // P1-4: restore the snapshot's git mode (executable bit). Windows chmod
+  // only toggles the read-only bit, so this is safe cross-platform.
+  chmodSync(temp, entry.mode === '100755' ? 0o755 : 0o644)
   let bak: string | undefined
   try {
     if (existsSync(target)) {
@@ -803,14 +800,4 @@ export function restoreCrashedSwaps(workspaceDir: string): string[] {
   }
   visit(root)
   return resurrected
-}
-
-export function pathIsSafe(workspaceDir: string, path: string): boolean {
-  try {
-    assertSafePath(workspaceDir, path)
-    return true
-  }
-  catch {
-    return false
-  }
 }
