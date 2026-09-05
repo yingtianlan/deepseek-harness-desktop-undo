@@ -241,7 +241,7 @@ pnpm exec eslint packages/dsh-tauri-turnrewind-ts
 **低优先级（产品/体验）：**
 
 14. P2-1 subtree undo（先定 DSH turn tree 契约）；P2-2 文档唯一真相源三栏表；P2-4 批量 ls-tree 与元数据缓存；P2-5 结构化事件；P2-6 可访问性（焦点陷阱/Escape/aria）与轮询退避；P2-7 CI lockfile/依赖审计/平台矩阵；
-15. `createLifecycleController` 收敛、HMR 实例 token、`as never` 移除（register/command-view.ts 注释说明为结构性必需）、中文文案入 locales（P2-10）；`ctx.logger` 统一。
+15. ~~`createLifecycleController` 收敛、HMR 实例 token、`as never` 移除、`CommandViewProps` 入 types、中文文案入 locales（P2-10）；`ctx.logger` 统一~~ **全部关闭**（`5cc0a36` logger / `a87b91c` types / 本轮前 locales；控制器化与 HMR token 见下；`as never` 经核实为槽位类型联合的结构性必需，保留并注释）。
 
 ### 本轮收尾更新（2026-09-05 晚，复核后修复）
 
@@ -251,6 +251,7 @@ pnpm exec eslint packages/dsh-tauri-turnrewind-ts
 - **防御性小修**：`claimRewindNotices` 的 SELECT 移入 `BEGIN IMMEDIATE` 事务内——读与消费在同一写锁内完成，双 Host 并发 claim 不再可能返回同一批 pending notice（补跨连接不双消费测试）；
 - **文档/文案漂移修正**：README 测试数字（18/97 → 22/118）与「当前限制」中已过时的容量治理条目；命令 hint 移除已冻结的 `--redo`；
 - **中文文案入 locales（待办第 15 条部分关闭）**：undo 卡片全部硬编码中文迁入双语字典（新增 10 个 key），组件经 `setCardTranslator` 注入通道（与 `setSubmitLine` 同一生命周期模式），未注入时回退 zh 字典；提交通道的会话缺失错误同步入字典。剩余：`createLifecycleController` 收敛、HMR 实例 token。
+- **client 生命周期收敛 + HMR 交错防护（待办第 15 条全部关闭）**：弹窗 runner 的订阅/轮询 interval/停轮询 timeout/DOM 卸载全部收敛进 `dsh-tauri/client` 的 `createLifecycleController`（dispose 幂等，`checkOnce` 以 `isDisposed()` 守护在途回调）；`setSubmitLine`/`setCardTranslator` 改 latest-owner-wins（安装返回撤销函数，仅最新所有者生效，HMR 旧实例清理不再清掉新通道，补测试钉住）；弹窗 DOM 安装前清残留 backdrop、两棵样式树挂载改 latest-wins（去掉模块级 cssr 单例，旧实例 unmount 只认自己 capture 的元素）。
 
 ### 实施顺序建议
 
