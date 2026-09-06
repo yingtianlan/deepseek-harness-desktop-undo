@@ -151,6 +151,9 @@ export function UndoCommandView(props: CommandViewProps): React.ReactElement {
   const withDiff = parsed.files.filter(file => file.diff.length > 0)
   const totals = parsed.files.reduce((sum, file) => ({ additions: sum.additions + file.additions, deletions: sum.deletions + file.deletions }), { additions: 0, deletions: 0 })
   const hasDiff = withDiff.length > 0
+  // 无文件清单的输出（--doctor 报告、多行错误说明）走纯文本正文：
+  // 否则这类卡片只剩第一行摘要，报告主体被整个吞掉。
+  const plainLines = parsed.files.length === 0 ? text.replace(/^[^\n]*\n/u, '').split('\n') : []
   const summary = parsed.summary || (state === 'error' ? tr('cardFailed') : state === 'running' ? tr('cardRunning') : tr('cardDone'))
 
   // 展开状态按命令持久化：用户折叠后刷新不重新展开。
@@ -250,7 +253,7 @@ export function UndoCommandView(props: CommandViewProps): React.ReactElement {
   // 无边框细行：cancelled 是用户明确放弃，塌缩成一行「已取消」留痕即可；
   // expired 是留档视图，卡片保留文件清单与 diff 供随时回看。
   const collapsed = planStatus === 'gone' || planStatus === 'cancelled' || submitted === 'cancel'
-  const showBody = expanded && !collapsed && (hasDiff || parsed.files.length > 0)
+  const showBody = expanded && !collapsed && (hasDiff || parsed.files.length > 0 || plainLines.length > 0)
   const actionable = parsed.planId !== undefined && state === 'ok' && !collapsed && (planStatus === null || planStatus === 'pending')
   // ref 防抖：React 状态更新慢一拍，双击会绕过 state-only 检查发两次请求。
   const submittingRef = useRef(false)
@@ -334,16 +337,23 @@ export function UndoCommandView(props: CommandViewProps): React.ReactElement {
   }, '▸'), React.createElement('span', { className: `${TURNREWIND_CLASS_PREFIX}-card-name` }, node.name || 'undo'), React.createElement(NumBadge, { additions: totals.additions, deletions: totals.deletions }), React.createElement('span', {
     className: `${TURNREWIND_CLASS_PREFIX}-card-summary`,
   }, summary)),
-  // 文件清单 / diff 内容。
+  // 文件清单 / diff 内容；无结构化清单时（--doctor、多行错误）渲染纯文本。
   showBody
     ? React.createElement('div', {
         className: `${TURNREWIND_CLASS_PREFIX}-panel-body`,
       }, hasDiff
         ? withDiff.map(file => React.createElement(DiffBlock, { key: file.path, file }))
-        : parsed.files.map(file => React.createElement('div', {
-            key: file.path,
-            className: `${TURNREWIND_CLASS_PREFIX}-panel-file`,
-          }, React.createElement('span', { className: `${TURNREWIND_CLASS_PREFIX}-panel-file-change` }, file.change), React.createElement('span', null, file.path))))
+        : parsed.files.length > 0
+          ? parsed.files.map(file => React.createElement('div', {
+              key: file.path,
+              className: `${TURNREWIND_CLASS_PREFIX}-panel-file`,
+            }, React.createElement('span', { className: `${TURNREWIND_CLASS_PREFIX}-panel-file-change` }, file.change), React.createElement('span', null, file.path)))
+          : plainLines.map((line, index) => React.createElement('div', {
+              // 静态报告行：永不重排/增删，index 即稳定 key。
+              // eslint-disable-next-line react/no-array-index-key
+              key: index,
+              className: `${TURNREWIND_CLASS_PREFIX}-panel-textline`,
+            }, line === '' ? '\u00A0' : line)))
     : null,
   // 操作 footer：按钮在左；提交后结果贴左，预览提示靠右。
   showFooter

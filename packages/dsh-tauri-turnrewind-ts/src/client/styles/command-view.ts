@@ -114,6 +114,15 @@ export function buildCommandViewStyleNodes(cssr: ReturnType<typeof CssRender>) {
       fontFamily: 'var(--ds-font-family-code, monospace)',
       fontSize: '12px',
     }),
+    // 纯文本正文（--doctor 报告、多行错误说明）：等宽 + 保留缩进与换行。
+    cssr.c(`.${P}-panel-textline`, {
+      fontFamily: 'var(--ds-font-family-code, monospace)',
+      fontSize: '12px',
+      lineHeight: '1.5',
+      whiteSpace: 'pre-wrap',
+      wordBreak: 'break-all',
+      color: 'var(--dsw-alias-label-secondary, #cccccc)',
+    }),
     cssr.c(`.${P}-panel-file-change`, {
       color: 'var(--dsw-alias-label-tertiary, #8b8b8b)',
       width: '64px',
