@@ -12,7 +12,7 @@
 
 - 为已领取的 Agent turn 建立私有 Git 快照；
 - 将快照映射记录到 `$DSH_HOME/ledger.sqlite`；
-- **git 子进程模型**：快照、diff、恢复走异步 spawn，不阻塞 Host 事件循环；同一会话的捕获/结算按 FIFO 串行；收到 turn 输入后，before snapshot 通过 `agent/pre-step` barrier 完成后才允许模型和工具执行；同一 workspace 被其他 session 占用时，新 turn 会正常运行但记为 `skipped`，避免共享 snapshot 链互相污染。**仍有两处同步路径**：工作区解析（git-workspace.js 的 rev-parse spawnSync，每次 turn 领取触发数次，单次 <100ms）与冲突检测的磁盘读取（currentState 同步读单个文件，上限 64MB）——超重工作区上可能短暂卡顿，异步化在待办中；
+- **git 子进程模型**：快照、diff、恢复走异步 spawn，不阻塞 Host 事件循环；同一会话的捕获/结算按 FIFO 串行；收到 turn 输入后，before snapshot 通过 `agent/pre-step` barrier 完成后才允许模型和工具执行；同一 workspace 被其他 session 占用时，新 turn 会正常运行但记为 `skipped`，避免共享 snapshot 链互相污染。同步开销已收敛：工作区解析合并为**单次 rev-parse 子进程**并带 60s 缓存（过期后先回缓存值、后台异步刷新），冲突检测的文件读取（上限 64MB）已改异步；
 - **git 可用性探测**：系统没有 git 时，turn 显式记为 `skipped`（原因 `TURNREWIND_GIT_UNAVAILABLE`），而不是静默失败；
 - **快照链自愈**：私有快照仓库被删/损坏后，下一次捕获自动降级重建基线（日志有一条 warning），后续 turn 照常可撤销；被清空前留下来的旧 turn 会在 `/undo` 选目标时自动识别为死快照并标记跳过（`snapshot ref missing`），不会甩出 git 原始报错；
 - **alternates 失效自愈**：私有 repo 通过 alternates 借用源仓库对象，而源仓库 `git gc --prune=now`（amend/rebase 的日常残留）可能删掉被借用且不可达的对象；每次 capture 后做连通性检查（`git rev-list --objects --missing=print`），发现缺对象即降级为自包含存储（不再借用、不再复制源 index）并重建基线，旧 turn 走死快照跳过路径；
@@ -87,6 +87,7 @@
 1. **会话内消息**：插件来源的上下文注入消息，模型和用户都可见、可审计；
 2. **Web UI 弹窗**：宿主端 `turnrewind` 会话投影（`src/host/service/dialog-projection.ts`）把提示折叠进会话列表快照，客户端半（`src/client/register/dialog.ts`）从 `sessions.list` 的 `projectionValues.turnrewind` 读到后弹出模态对话框，按提示 id 在 `localStorage` 去重——同一浏览器每条提示只弹一次，重装/换浏览器会重弹一次。
 
+- **敏感文件提醒**：会话首次追踪一个工作区时做一次浅层启发式扫描（根 + 两层、上限 500 文件、跳过 node_modules），命中 `.env`/密钥类且**未被 ignore** 的文件时发一条一次性 `[Turn rewind privacy notice]`（每会话+工作区一条），列出会被快照的具体文件与退出方式（加 ignore）。扫描失败静默跳过——这是提醒，不是门禁。
 大工作区的取舍：不再做预算预扫描，快照耗时与磁盘占用随仓库规模增长（Git ignore 能排除 `node_modules` 等，但容量/性能风险仍由使用者自行承担）；单文件快照/恢复上限为 64 MB——超限文件仍会被捕获进快照，`/undo` 预览会以 `[too large]` 标注并在执行后单文件报告为「未恢复」，**不会**导致整次 undo 失败，其余文件照常恢复。若项目里有此类大文件且不希望被追踪，请把它们加进源仓库的 ignore 规则。
 
 ### 清理已膨胀的快照数据
@@ -350,7 +351,7 @@ pnpm --filter dsh-tauri-turnrewind typecheck
 pnpm --filter dsh-tauri-turnrewind test
 ```
 
-当前 24 个测试文件、128 个测试，覆盖：Git 快照（增删改恢复、中文路径、CRLF、路径逃逸、工作区根拒绝、absent 路径上的非空目录拒绝与空目录移除、symlink 路径拒绝与快照 symlink 策略、ignore 委托、alternates 复用与自愈）、原子 bak-swap 恢复与崩溃清扫、Git 状态零污染（HEAD/branch/index/status/refs/stash 不变）、linked worktree 隔离、oversized blob 单文件报告、容量治理（保留条数过期、超限两阶段重建、不可达 loose object 回收）、账本生命周期（含 needs-recovery 围栏与跨连接 notice 单次消费、legacy schema 迁移重放、quick_check 拒载与 .bak 还原、恢复面板明细与 acknowledge 终态）、pending plan 原子 claim 与预览绑定漂移校验、interrupted turn、barrier 时序、跨进程 workspace 锁、undo 入口与 redo 冻结、client 纯函数（输出解析/plan 状态判定/会话归属/通道 latest-owner-wins 语义）。
+当前 25 个测试文件、130 个测试，覆盖：Git 快照（增删改恢复、中文路径、CRLF、路径逃逸、工作区根拒绝、absent 路径上的非空目录拒绝与空目录移除、symlink 路径拒绝与快照 symlink 策略、ignore 委托、alternates 复用与自愈）、原子 bak-swap 恢复与崩溃清扫、Git 状态零污染（HEAD/branch/index/status/refs/stash 不变）、linked worktree 隔离、oversized blob 单文件报告、容量治理（保留条数过期、超限两阶段重建、不可达 loose object 回收）、账本生命周期（含 needs-recovery 围栏与跨连接 notice 单次消费、legacy schema 迁移重放、quick_check 拒载与 .bak 还原、恢复面板明细与 acknowledge 终态）、pending plan 原子 claim 与预览绑定漂移校验、interrupted turn、barrier 时序、跨进程 workspace 锁、undo 入口与 redo 冻结、client 纯函数（输出解析/plan 状态判定/会话归属/通道 latest-owner-wins 语义/模态 Escape 与焦点陷阱）、敏感文件扫描过滤与提醒去重。
 
 ## 当前限制
 
