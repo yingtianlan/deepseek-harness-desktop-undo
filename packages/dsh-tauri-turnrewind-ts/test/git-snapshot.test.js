@@ -3,7 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'n
 import { tmpdir } from 'node:os'
 import { join } from 'pathe'
 import { it } from 'vitest'
-import { captureSnapshot, classifyPathChange, createSnapshotStore, currentState, diffAgainstDisk, gitAvailable, probeWorkspace, restorePath, snapshotDiff, snapshotFileDiff, stateAt } from '../src/host/service/git-snapshot'
+import { captureSnapshot, classifyPathChange, createSnapshotStore, currentState, diffAgainstDisk, gitAvailable, probeWorkspace, restorePath, snapshotDiff, snapshotFileDiff, stateAt, workspaceKey } from '../src/host/service/git-snapshot'
 import { completeUndoTransaction, createOperation, getLatestTurn, insertTurn, openLedger, settleInterruptedTurn, settleTurn } from '../src/host/service/ledger'
 import { initGitWorkspace } from './git-test-utils.js'
 
@@ -403,4 +403,12 @@ it('probes git availability once per process', async () => {
   const second = await gitAvailable()
   assert.equal(first, second)
   assert.equal(typeof first, 'boolean')
+})
+
+it('folds path case on case-insensitive platforms only', () => {
+  // Windows and macOS (APFS default) treat the two spellings as one
+  // workspace; Linux keeps them distinct.
+  assert.equal(workspaceKey('C:\Proj\One', 'win32'), workspaceKey('c:\proj\one', 'win32'))
+  assert.equal(workspaceKey('/Users/dev/Proj', 'darwin'), workspaceKey('/Users/dev/proj', 'darwin'))
+  assert.notEqual(workspaceKey('/home/dev/Proj', 'linux'), workspaceKey('/home/dev/proj', 'linux'))
 })

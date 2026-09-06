@@ -339,7 +339,11 @@ export function claimRewindNotices(db: Ledger, sessionId: string, workspaceKey: 
     }))
   }
   catch (error) {
-    db.exec('ROLLBACK')
+    // ROLLBACK 自身失败（如 BEGIN 未生效）不能掩盖原始错误。
+    try {
+      db.exec('ROLLBACK')
+    }
+    catch { /* no active transaction */ }
     throw error
   }
 }

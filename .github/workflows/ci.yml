@@ -69,6 +69,40 @@ jobs:
       - name: Unit test
         run: pnpm run test -- --run
 
+  # turnrewind 插件（packages/dsh-tauri-turnrewind-ts）：测试自包含（mock 宿主），
+  # 可以在三个发布平台上原生运行——POSIX mode 恢复、symlink/junction、大小写
+  # 折叠这些分支只有对应 OS 才真正执行到。
+  turnrewind:
+    name: Turn rewind plugin (${{ matrix.os }})
+    needs: pre_job
+    if: ${{ needs.pre_job.outputs.should_skip != 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js and pnpm
+        uses: ./.github/actions/setup-node-pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check
+        run: pnpm --filter dsh-tauri-turnrewind typecheck
+
+      - name: Lint
+        run: pnpm --filter dsh-tauri-turnrewind exec eslint src test
+
+      - name: Unit test
+        run: pnpm --filter dsh-tauri-turnrewind test
+
+      - name: Build
+        run: pnpm --filter dsh-tauri-turnrewind build
+
   # Rust 单元测试（应用主体逻辑）：
   # 这是 CI 此前完全缺失的部分。仓库里存在大量 #[cfg(windows)] 的 Windows 专属
   # 代码（win_spawn / win_inspector / cli shim / path / MSI 版本处理），只能在

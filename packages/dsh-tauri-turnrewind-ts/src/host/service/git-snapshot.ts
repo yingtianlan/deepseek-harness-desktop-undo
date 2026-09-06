@@ -346,12 +346,13 @@ function assertSafePath(workspaceDir: string, path: string): string {
 
 /**
  * Canonical workspace identity shared by the ledger key, the snapshot repo
- * hash and maintenance purges: case-folded only on case-insensitive platforms,
- * so Unix paths differing in case stay distinct while Windows paths unify.
+ * hash and maintenance purges: case-folded on case-insensitive platforms
+ * (Windows NTFS, macOS APFS default) so one directory cannot spawn two
+ * snapshot domains; Linux stays byte-exact. `platform` is injectable for tests.
  */
-export function workspaceKey(workspaceDir: string): string {
+export function workspaceKey(workspaceDir: string, platform: string = process.platform): string {
   const normalized = resolve(workspaceDir)
-  return process.platform === 'win32' ? normalized.toLowerCase() : normalized
+  return platform === 'win32' || platform === 'darwin' ? normalized.toLowerCase() : normalized
 }
 
 export function workspaceHash(workspaceDir: string): string {
