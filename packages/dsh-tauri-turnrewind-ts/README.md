@@ -25,7 +25,9 @@
 - 注册人类命令 `/undo`；
 - `/undo` 默认处理当前会话最新的单个可恢复 turn，也可指定完整 turn ID；
 - 同一 workspace 的活动 turn 或 undo 操作互斥；
-- 插件重启时将未完成 turn 标记为 abandoned；未完成的 **Undo 与 Redo** operation 会标记为 `needs-recovery`，对应 workspace 在清理前拒绝新的 rewind 操作，避免未知磁盘状态被继续覆盖；当前只能先人工检查 workspace，再停止 Host 并使用 purge 工具（见下文「清理已膨胀的快照数据」）清理该 workspace 的 turnrewind 数据后恢复使用；
+- 插件重启时将未完成 turn 标记为 abandoned；未完成的 **Undo 与 Redo** operation 会标记为 `needs-recovery`，对应 workspace 在清理前拒绝新的 rewind 操作，避免未知磁盘状态被继续覆盖。**恢复面板**：不可用弹窗在 reason 命中恢复围栏时提供「打开恢复面板」入口，可查看被围 workspace 的中断操作明细，并选择「已检查，保留历史并解锁」（operation 转 recovery-acknowledged 终态）或「清除 rewind 数据并解锁」（等价 purge）；
+- `/undo --doctor`：只读诊断——git 可用性、工作区资格、账本规模与围栏、快照仓库健康（refs / alternates）、最近 turn 状态、备份新旧；
+- 账本打开时执行 `PRAGMA quick_check`（损坏显式拒绝加载，`TURNREWIND_LEDGER_CORRUPT`），并每日滚动备份到 `ledger.sqlite.bak`（`VACUUM INTO` 一致性快照），损坏时可按「还原 .bak → 重启」恢复；
 - 每次 Undo 的回退提示独立持久化；下一次模型 step 一次性注入全部 pending notice；
 - 不修改用户项目的 HEAD、分支、index、stash 或提交历史。
 
@@ -348,7 +350,7 @@ pnpm --filter dsh-tauri-turnrewind typecheck
 pnpm --filter dsh-tauri-turnrewind test
 ```
 
-当前 22 个测试文件、120 个测试，覆盖：Git 快照（增删改恢复、中文路径、CRLF、路径逃逸、工作区根拒绝、absent 路径上的非空目录拒绝与空目录移除、symlink 路径拒绝与快照 symlink 策略、ignore 委托、alternates 复用与自愈）、原子 bak-swap 恢复与崩溃清扫、Git 状态零污染（HEAD/branch/index/status/refs/stash 不变）、linked worktree 隔离、oversized blob 单文件报告、容量治理（保留条数过期、超限两阶段重建、不可达 loose object 回收）、账本生命周期（含 needs-recovery 围栏与跨连接 notice 单次消费）、pending plan 原子 claim 与预览绑定漂移校验、interrupted turn、barrier 时序、跨进程 workspace 锁、undo 入口与 redo 冻结、client 纯函数（输出解析/plan 状态判定/会话归属/通道 latest-owner-wins 语义）。
+当前 24 个测试文件、128 个测试，覆盖：Git 快照（增删改恢复、中文路径、CRLF、路径逃逸、工作区根拒绝、absent 路径上的非空目录拒绝与空目录移除、symlink 路径拒绝与快照 symlink 策略、ignore 委托、alternates 复用与自愈）、原子 bak-swap 恢复与崩溃清扫、Git 状态零污染（HEAD/branch/index/status/refs/stash 不变）、linked worktree 隔离、oversized blob 单文件报告、容量治理（保留条数过期、超限两阶段重建、不可达 loose object 回收）、账本生命周期（含 needs-recovery 围栏与跨连接 notice 单次消费、legacy schema 迁移重放、quick_check 拒载与 .bak 还原、恢复面板明细与 acknowledge 终态）、pending plan 原子 claim 与预览绑定漂移校验、interrupted turn、barrier 时序、跨进程 workspace 锁、undo 入口与 redo 冻结、client 纯函数（输出解析/plan 状态判定/会话归属/通道 latest-owner-wins 语义）。
 
 ## 当前限制
 
