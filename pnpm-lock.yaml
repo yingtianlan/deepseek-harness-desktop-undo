@@ -523,6 +523,9 @@ importers:
       dsh-tauri-session:
         specifier: workspace:*
         version: link:../dsh-tauri-session
+      dsh-tauri-turnrewind:
+        specifier: workspace:*
+        version: link:../dsh-tauri-turnrewind-ts
       dsh-tauri-ui:
         specifier: workspace:*
         version: link:../dsh-tauri-ui

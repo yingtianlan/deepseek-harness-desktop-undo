@@ -2,7 +2,7 @@
 
 本地开发中的 DSH turn 回滚插件（**TypeScript 重写版**，位于 `packages/`，遵循 workspace 插件规范；旧 JS 版已移除）。
 
-> 当前 `cordis.patch.yml` 已为本地 debug profile 的实验启用而挂载插件。它仍是原型：恢复路径直接使用 Node/Git，尚未接入受控的宿主 sandbox/Tauri bridge；仅可在可丢弃的测试工作区中启用，不能作为生产功能使用。
+> **分发（2026-09-06 起）**：插件已随桌面构建打包——列入 `dsh-tauri-bundle` 依赖（构建期部署进 `src-tauri/resources/node_modules/`）与 `src-tauri/resources/internal-plugins.json` 预装清单，**下载桌面版即装即用，无需任何手动配置**。定位仍是实验功能：恢复路径直接使用 Node/Git，尚未接入受控的宿主 sandbox/Tauri bridge，请在可丢弃的工作区先行试用。
 >
 > **Git 目录模式（当前形态）**：工作区**必须**位于 Git worktree（OpenCode 风格）。非 Git 目录显式禁用——turn 记为 `skipped`（`TURNREWIND_GIT_REQUIRED`），`/undo` 说明原因，不再为普通目录建快照。ignore 规则（`.gitignore` / `.git/info/exclude` / global excludes / `.gitattributes`）委托给源仓库；私有 snapshot repo 通过 alternates 借用源对象。设计与进度见 `docs/TURN_REWIND_GIT_DIR_PROGRESS.md`。
 
@@ -345,6 +345,8 @@ pnpm --filter dsh-tauri-turnrewind test
 ```
 
 插件通过 `pnpm add` / `dsh plugin add` 安装（debug 桌面端启动时会自动以 `link:` 方式安装全部内部插件）。修改 Host 代码后需要重新 `pnpm --filter dsh-tauri-turnrewind build` 并重启 DSH debug Host 进程；修改 Client 代码后同理（client bundle 在 Host 启动时发现）。
+
+**发布分发**：仓库根的 `pnpm build`（prebuild → `build:plugins`）会把本插件的 `dist/` 部署进 `src-tauri/resources/node_modules/`，安装包启动时按 `internal-plugins.json` 自动预装并激活——终端用户无需 `pnpm`/构建/任何配置。
 
 ## 测试
 
