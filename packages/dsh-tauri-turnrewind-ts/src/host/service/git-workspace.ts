@@ -7,7 +7,8 @@
  */
 
 import type { GitWorkspaceInfo } from '../types'
-import { spawnSync } from 'node:child_process'
+import { Buffer } from 'node:buffer'
+import { spawn, spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import process from 'node:process'
 import { resolve } from 'pathe'
@@ -58,44 +59,118 @@ function runGitSync(workspaceDir: string, args: string[]): GitSyncResult {
 const WORKSPACE_CACHE_TTL_MS = 60 * 1000
 const workspaceCache = new Map<string, { at: number, info: GitWorkspaceInfo | undefined }>()
 
+/**
+ * 单次 rev-parse 同时解析全部元数据：原先每次冷解析要 6 个 spawnSync，
+ * 现在合并为 1 个子进程，输出行序与参数顺序一致。
+ */
+const REV_PARSE_ARGS = [
+  'rev-parse',
+  '--is-inside-work-tree',
+  '--show-toplevel',
+  '--git-dir',
+  '--git-common-dir',
+  '--git-path',
+  'index',
+  '--git-path',
+  'info/exclude',
+]
+
+function resolveInfo(requestedDir: string, stdout: string): GitWorkspaceInfo | undefined {
+  const lines = stdout.split(/\r?\n/u).filter(line => line.trim() !== '')
+  if (lines.length < 6 || lines[0] !== 'true')
+    return undefined
+  const workspaceRoot = resolve(requestedDir, lines[1]!)
+  const resolvedGitDir = resolve(requestedDir, lines[2]!)
+  const resolvedCommonDir = resolve(requestedDir, lines[3]!)
+  const resolvedIndex = resolve(requestedDir, lines[4]!)
+  const resolvedInfoExclude = resolve(requestedDir, lines[5]!)
+  if (!existsSync(workspaceRoot) || !existsSync(resolvedGitDir) || !existsSync(resolvedCommonDir))
+    return undefined
+  return {
+    workspaceDir: workspaceRoot,
+    requestedDir,
+    gitDir: resolvedGitDir,
+    commonDir: resolvedCommonDir,
+    indexPath: resolvedIndex,
+    infoExcludePath: resolvedInfoExclude,
+  }
+}
+
+function evictOldest(): void {
+  if (workspaceCache.size <= 64)
+    return
+  const oldest = [...workspaceCache.entries()].sort((a, b) => a[1].at - b[1].at)[0]
+  workspaceCache.delete(oldest[0])
+}
+
+/** 后台刷新（stale-while-revalidate 的异步半边）：结果直接落缓存。 */
+const refreshInflight = new Map<string, Promise<void>>()
+
+function refreshWorkspaceAsync(requestedDir: string): void {
+  if (refreshInflight.has(requestedDir))
+    return
+  const task = new Promise<GitWorkspaceInfo | undefined>((resolvePromise) => {
+    const child = spawn('git', ['-c', 'core.quotepath=false', ...REV_PARSE_ARGS], {
+      cwd: requestedDir,
+      env: { ...process.env },
+    })
+    const chunks: Buffer[] = []
+    let settled = false
+    const timeout = setTimeout(() => {
+      if (settled)
+        return
+      settled = true
+      child.kill('SIGKILL')
+      resolvePromise(undefined)
+    }, SYNC_GIT_TIMEOUT_MS)
+    child.stdout.on('data', (chunk: Buffer) => chunks.push(chunk))
+    child.on('error', (error: NodeJS.ErrnoException) => {
+      if (settled)
+        return
+      settled = true
+      clearTimeout(timeout)
+      if (error.code === 'ENOENT')
+        gitExecutableMissing = true
+      resolvePromise(undefined)
+    })
+    child.on('close', (code) => {
+      if (settled)
+        return
+      settled = true
+      clearTimeout(timeout)
+      resolvePromise(code === 0
+        ? resolveInfo(requestedDir, Buffer.concat(chunks).toString('utf8'))
+        : undefined)
+    })
+  }).then((info) => {
+    refreshInflight.delete(requestedDir)
+    workspaceCache.set(requestedDir, { at: Date.now(), info })
+  }).catch(() => {
+    refreshInflight.delete(requestedDir)
+  })
+  refreshInflight.set(requestedDir, task)
+}
+
 export function gitWorkspace(workspaceDir: string): GitWorkspaceInfo | undefined {
   const requestedDir = resolve(workspaceDir)
   gitExecutableMissing = false
   const cached = workspaceCache.get(requestedDir)
   if (cached && Date.now() - cached.at < WORKSPACE_CACHE_TTL_MS)
     return cached.info
-  const inside = runGitSync(requestedDir, ['rev-parse', '--is-inside-work-tree'])
-  if (inside.error?.code === 'ENOENT') {
+  if (cached) {
+    // stale-while-revalidate：先回缓存值（元数据短暂陈旧可接受——turn 领取
+    // 路径对同步返回有硬约束），后台异步刷新，不再每个 turn 反复阻塞事件循环。
+    refreshWorkspaceAsync(requestedDir)
+    return cached.info
+  }
+  // 冷未命中：一次同步 rev-parse。
+  const result = runGitSync(requestedDir, REV_PARSE_ARGS)
+  if (result.error?.code === 'ENOENT') {
     gitExecutableMissing = true
     return undefined
   }
-  const top = runGitSync(requestedDir, ['rev-parse', '--show-toplevel'])
-  const gitDir = runGitSync(requestedDir, ['rev-parse', '--git-dir'])
-  const commonDir = runGitSync(requestedDir, ['rev-parse', '--git-common-dir'])
-  const index = runGitSync(requestedDir, ['rev-parse', '--git-path', 'index'])
-  const infoExclude = runGitSync(requestedDir, ['rev-parse', '--git-path', 'info/exclude'])
-  if (!inside.ok || inside.stdout !== 'true' || !top.ok || !gitDir.ok || !commonDir.ok || !index.ok)
-    return undefined
-
-  const workspaceRoot = resolve(requestedDir, top.stdout!)
-  const resolvedGitDir = resolve(requestedDir, gitDir.stdout!)
-  const resolvedCommonDir = resolve(requestedDir, commonDir.stdout!)
-  const resolvedIndex = resolve(requestedDir, index.stdout!)
-  if (!existsSync(workspaceRoot) || !existsSync(resolvedGitDir) || !existsSync(resolvedCommonDir))
-    return undefined
-
-  const info: GitWorkspaceInfo = {
-    workspaceDir: workspaceRoot,
-    requestedDir,
-    gitDir: resolvedGitDir,
-    commonDir: resolvedCommonDir,
-    indexPath: resolvedIndex,
-    infoExcludePath: infoExclude.ok ? resolve(requestedDir, infoExclude.stdout!) : undefined,
-  }
+  const info = result.ok ? resolveInfo(requestedDir, result.stdout ?? '') : undefined
   workspaceCache.set(requestedDir, { at: Date.now(), info })
-  if (workspaceCache.size > 64) {
-    const oldest = [...workspaceCache.entries()].sort((a, b) => a[1].at - b[1].at)[0]
-    workspaceCache.delete(oldest[0])
-  }
+  evictOldest()
   return info
 }

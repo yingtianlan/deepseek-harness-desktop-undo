@@ -35,7 +35,7 @@ it('persists entry mode in snapshots and restores the executable bit', async () 
     await restorePath(store, after.commit, 'run.sh')
     const restored = await stat(join(workspace, 'run.sh'))
     assert.ok((restored.mode & 0o111) !== 0, 'executable bit must be restored')
-    assert.equal(currentState(workspace, 'run.sh').mode, '100755')
+    assert.equal((await currentState(workspace, 'run.sh')).mode, '100755')
   }
   finally {
     await rm(root, { recursive: true, force: true })
@@ -196,7 +196,7 @@ it('does not treat CRLF conversion as a file conflict', async () => {
     await writeFile(join(workspace, 'line-endings.txt'), 'after\nline\n')
     const after = await captureSnapshot(store, 'refs/turnrewind/crlf-after', 'after', before.commit)
     await writeFile(join(workspace, 'line-endings.txt'), 'after\r\nline\r\n')
-    assert.equal(currentState(workspace, 'line-endings.txt').digest, (await stateAt(store, after.commit, 'line-endings.txt')).digest)
+    assert.equal((await currentState(workspace, 'line-endings.txt')).digest, (await stateAt(store, after.commit, 'line-endings.txt')).digest)
   }
   finally {
     await rm(root, { recursive: true, force: true })
@@ -294,7 +294,7 @@ it('rejects paths outside the workspace', async () => {
   const workspace = join(root, 'workspace')
   try {
     await initGitWorkspace(workspace)
-    assert.throws(() => currentState(workspace, '../outside.txt'), /TURNREWIND_PATH_ESCAPE/)
+    await assert.rejects(() => currentState(workspace, '../outside.txt'), /TURNREWIND_PATH_ESCAPE/)
   }
   finally {
     await rm(root, { recursive: true, force: true })
@@ -313,7 +313,7 @@ it('refuses to restore or inspect the workspace root itself', async () => {
     // '.' normalizes to the workspace root; a restore there would delete the
     // whole workspace including .git. Both disk-touching entries must refuse.
     await assert.rejects(restorePath(store, snapshot.commit, '.'), /TURNREWIND_PATH_ESCAPE/)
-    assert.throws(() => currentState(workspace, '.'), /TURNREWIND_PATH_ESCAPE/)
+    await assert.rejects(() => currentState(workspace, '.'), /TURNREWIND_PATH_ESCAPE/)
     assert.equal(await readFile(join(workspace, 'a.txt'), 'utf8'), 'one')
   }
   finally {

@@ -114,7 +114,7 @@ it('refuses dangling symlink workspace paths during inspection and restore', asy
       throw error
     }
     const store = createSnapshotStore(join(root, 'data'), workspace)
-    assert.throws(() => currentState(workspace, 'dangling'), /TURNREWIND_SYMLINK_UNSUPPORTED/)
+    await assert.rejects(() => currentState(workspace, 'dangling'), /TURNREWIND_SYMLINK_UNSUPPORTED/)
     await assert.rejects(
       () => restorePath(store, 'refs/turnrewind/missing', 'dangling'),
       /TURNREWIND_SYMLINK_UNSUPPORTED/,
@@ -142,7 +142,7 @@ it('refuses symlinked workspace paths during inspection and restore', async () =
       throw error
     }
     const store = createSnapshotStore(join(root, 'data'), workspace)
-    assert.throws(() => currentState(workspace, 'linked/secret.txt'), /TURNREWIND_SYMLINK_UNSUPPORTED/)
+    await assert.rejects(() => currentState(workspace, 'linked/secret.txt'), /TURNREWIND_SYMLINK_UNSUPPORTED/)
     const snapshot = await captureSnapshot(store, 'refs/turnrewind/symlink', 'symlink')
     // The snapshot stores the link itself; paths below it are never tracked.
     assert.equal((await stateAt(store, snapshot.commit, 'linked/secret.txt')).kind, 'absent')
@@ -237,7 +237,7 @@ it('refuses Windows junction directories like symlinks', async () => {
     // symlinks — traversal through them must be refused identically (P1-5).
     await symlink(outside, join(workspace, 'junction'), 'junction')
     const store = createSnapshotStore(join(root, 'data'), workspace)
-    assert.throws(() => currentState(workspace, 'junction/secret.txt'), /TURNREWIND_SYMLINK_UNSUPPORTED/)
+    await assert.rejects(() => currentState(workspace, 'junction/secret.txt'), /TURNREWIND_SYMLINK_UNSUPPORTED/)
     const snapshot = await captureSnapshot(store, 'refs/turnrewind/junction', 'junction')
     await assert.rejects(
       () => restorePath(store, snapshot.commit, 'junction/secret.txt'),

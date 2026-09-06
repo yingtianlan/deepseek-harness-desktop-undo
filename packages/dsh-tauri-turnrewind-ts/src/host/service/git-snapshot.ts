@@ -36,6 +36,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs'
+import { readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import process from 'node:process'
 import { dirname, join, relative, resolve, sep } from 'pathe'
@@ -534,7 +535,7 @@ async function hashDiskFile(store: SnapshotStore, workspaceDir: string, path: st
   const info = lstatSync(target)
   if (!info.isFile() || info.size > MAX_FILE_BYTES)
     return undefined
-  const output = await runGitStdin(store.repoDir, store.workspaceDir, ['hash-object', '-w', '--stdin'], readFileSync(target))
+  const output = await runGitStdin(store.repoDir, store.workspaceDir, ['hash-object', '-w', '--stdin'], await readFile(target))
   return output.toString('utf8').trim()
 }
 
@@ -633,7 +634,7 @@ export async function stateAt(store: SnapshotStore, commit: string, path: string
   return { kind: 'file', digest: digest(bytes), mode: info.mode }
 }
 
-export function currentState(workspaceDir: string, path: string): DiskState {
+export async function currentState(workspaceDir: string, path: string): Promise<DiskState> {
   const target = assertSafePath(workspaceDir, path)
   if (!existsSync(target))
     return { kind: 'absent', digest: null }
@@ -641,11 +642,12 @@ export function currentState(workspaceDir: string, path: string): DiskState {
   if (!info.isFile() || info.size > MAX_FILE_BYTES)
     return { kind: 'unsupported', digest: null }
   // Windows 无法可靠识别可执行位（git core.filemode=false），统一按 100644 报告；
-  // POSIX 取真实权限位，使 mode 差异能进入冲突可视与恢复路径。
+  // POSIX 取真实权限位，使 mode 差异能进入冲突可视与恢复路径。文件读取走异步，
+  // 大文件的冲突检测不再阻塞事件循环。
   const mode = process.platform === 'win32'
     ? '100644'
     : `100${(info.mode & 0o777).toString(8).padStart(3, '0')}`
-  return { kind: 'file', digest: digest(readFileSync(target)), mode }
+  return { kind: 'file', digest: digest(await readFile(target)), mode }
 }
 
 /**

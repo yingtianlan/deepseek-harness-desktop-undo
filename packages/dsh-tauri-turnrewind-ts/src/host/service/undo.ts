@@ -72,7 +72,7 @@ async function applyRedo(runtime: WorkspaceRuntime, invocation: UndoInvocation, 
   const conflicts: string[] = []
   for (const path of paths) {
     const expected = await stateAt(runtime.store, turn.before_ref, path)
-    const actual = currentState(workspaceDir, path)
+    const actual = await currentState(workspaceDir, path)
     if (classifyUndo(actual, expected) === 'conflict')
       conflicts.push(path)
   }
@@ -272,7 +272,7 @@ async function safeDiffAgainstDisk(store: SnapshotStore, ref: string, path: stri
 async function diskMatchesSnapshot(runtime: WorkspaceRuntime, workspaceDir: string, ref: string, path: string): Promise<boolean> {
   try {
     const { currentState } = await import('./git-snapshot')
-    return classifyUndo(currentState(workspaceDir, path), await stateAt(runtime.store, ref, path)) !== 'conflict'
+    return classifyUndo(await currentState(workspaceDir, path), await stateAt(runtime.store, ref, path)) !== 'conflict'
   }
   catch {
     return false
