@@ -20,6 +20,7 @@ import { TURNREWIND_API_PREFIX } from '../shared/constants'
 import { MAX_ENDED_TURNS } from './constants'
 import { jsonRoute } from './routes'
 import { createDialogProjection } from './service/dialog-projection'
+import { collectDoctorReport } from './service/doctor'
 import {
   captureSnapshot,
   createSnapshotStore,
@@ -54,7 +55,7 @@ import {
 import { purgeWorkspace } from './service/maintenance'
 import { planDrift } from './service/planner'
 import { enforceRetention } from './service/retention'
-import { applyUndo, buildPlanEntries, executeUndoRestore, turnRefsExist, workspaceForAgent, workspaceHasActiveTurn, workspaceIssue, workspaceKeyFor } from './service/undo'
+import { applyUndo, buildPlanEntries, executeUndoRestore, parseUndoInput, turnRefsExist, workspaceForAgent, workspaceHasActiveTurn, workspaceIssue, workspaceKeyFor } from './service/undo'
 import { acquireWorkspaceLockSync, withWorkspaceLock, WorkspaceLockBusyError } from './service/workspace-lock'
 
 /** 插件名（诊断元数据，与 shared/constants 的 TURNREWIND_PLUGIN_NAME 一致）。 */
@@ -739,8 +740,13 @@ export function apply(ctx: HostApplyContext): void {
   ctx.effect(() => commands.register({
     name: 'undo',
     description: 'Plan or undo file changes made by the latest Agent turn',
-    input: { hint: '[turn-id] [--dry-run|--preview] [--skip-conflicts|--force]' },
+    input: { hint: '[turn-id] [--dry-run|--preview] [--skip-conflicts|--force] | --doctor' },
     handler: (invocation: { rawInput: string, agent: { session: { id: string, header?: { cwd?: string } } } }) => {
+      const parsed = parseUndoInput(invocation.rawInput)
+      // --doctor 在工作区资格判定之前短路：诊断恰恰要在「undo 不可用」时给出
+      // 原因，不能被资格检查挡掉。
+      if (!('error' in parsed) && parsed.doctor)
+        return collectDoctorReport(ledger, dataRoot, invocation.agent).then(text => ({ kind: 'success' as const, text }))
       const workspaceDir = workspaceForAgent(invocation.agent)
       if (!workspaceDir) {
         // The hard guard refused the cwd; report the actual reason when there is one.

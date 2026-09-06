@@ -197,7 +197,7 @@ export interface UndoOutcome {
   text: string
 }
 
-/** 解析 /undo 的输入行（turn id / 预览与冲突策略 / 两阶段 confirm/cancel）。 */
+/** 解析 /undo 的输入行（turn id / 预览与冲突策略 / 两阶段 confirm/cancel / 诊断）。 */
 export function parseUndoInput(rawInput: string): UndoInput | { error: string } {
   const parts = rawInput.trim().split(/\s+/u).filter(Boolean)
   let turnId: string | undefined
@@ -208,6 +208,7 @@ export function parseUndoInput(rawInput: string): UndoInput | { error: string } 
   let redo = false
   let confirm = false
   let cancel = false
+  let doctor = false
   for (const part of parts) {
     if (part === '--dry-run')
       dryRun = true
@@ -223,6 +224,8 @@ export function parseUndoInput(rawInput: string): UndoInput | { error: string } 
       confirm = true
     else if (part === '--cancel')
       cancel = true
+    else if (part === '--doctor')
+      doctor = true
     else if (part === '--subtree')
       return { error: 'Recursive subtree undo is not available in the MVP.' }
     else if (turnId === undefined)
@@ -234,13 +237,15 @@ export function parseUndoInput(rawInput: string): UndoInput | { error: string } 
     return { error: '--skip-conflicts and --force are mutually exclusive.' }
   if (redo && (turnId !== undefined || dryRun || preview || skipConflicts || force || confirm || cancel))
     return { error: '--redo cannot be combined with a turn id or other options.' }
+  if (doctor && (turnId !== undefined || dryRun || preview || skipConflicts || force || redo || confirm || cancel))
+    return { error: 'Usage: /undo --doctor (cannot be combined with other options).' }
   if ((confirm || cancel) && (dryRun || preview || skipConflicts || force))
     return { error: '--confirm/--cancel cannot be combined with preview or conflict-override flags.' }
   if (confirm && cancel)
     return { error: '--confirm and --cancel are mutually exclusive.' }
   if ((confirm || cancel) && turnId === undefined)
     return { error: confirm ? 'Usage: /undo --confirm <plan-id>' : 'Usage: /undo --cancel <plan-id>' }
-  return { turnId, dryRun, preview, skipConflicts, force, redo, confirm, cancel }
+  return { turnId, dryRun, preview, skipConflicts, force, redo, confirm, cancel, doctor }
 }
 
 export function assertSessionOwner(target: TurnRow, agent: { session: { id: string } }): UndoOutcome | undefined {

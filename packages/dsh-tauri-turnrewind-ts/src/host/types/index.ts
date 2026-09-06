@@ -86,6 +86,8 @@ export interface UndoInput {
   redo?: boolean
   confirm?: boolean
   cancel?: boolean
+  /** 只读诊断：/undo --doctor（不能与其他选项组合）。 */
+  doctor: boolean
 }
 
 /** 命令/路由共用的执行结果形状。 */

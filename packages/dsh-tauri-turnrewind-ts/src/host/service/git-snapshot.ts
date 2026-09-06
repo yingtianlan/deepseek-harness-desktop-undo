@@ -127,7 +127,8 @@ export function runGit(
   })
 }
 
-async function runGitText(repoDir: string, workspaceDir: string, args: string[], extraEnv: Record<string, string> = {}): Promise<string> {
+/** 导出给 doctor 等只读诊断使用（与 runGit 同一击杀/超时语义）。 */
+export async function runGitText(repoDir: string, workspaceDir: string, args: string[], extraEnv: Record<string, string> = {}): Promise<string> {
   const output = await runGit(repoDir, workspaceDir, args, extraEnv)
   return output.toString('utf8')
 }
