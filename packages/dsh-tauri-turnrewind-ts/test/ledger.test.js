@@ -1,9 +1,25 @@
 import assert from 'node:assert/strict'
+import { copyFileSync, existsSync, writeFileSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'pathe'
 import { it } from 'vitest'
-import { acknowledgeRecovery, claimPendingPlan, claimRewindNotices, completeRedoTransaction, completeUndoTransaction, createOperation, createPendingPlan, getLatestAppliedUndo, getLatestSnapshotRef, getLatestTurn, getPendingPlanRow, getPendingPlanStatus, getTurn, insertTurn, listNeedsRecoveryWorkspaces, listRecoveryWorkspaces, listReversibleTurns, markPendingPlanApplied, markPendingPlanCancelled, markTurnSnapshotMissing, openLedger, planPathsDigest, pruneConsumedNotices, prunePendingPlans, queueRewindNotice, recordSkippedTurn, releasePendingPlanClaim, settleInterruptedTurn, settleNoopTurn, settleOperation, settleTurn } from '../src/host/service/ledger'
+import { acknowledgeRecovery, backupLedger, claimPendingPlan, claimRewindNotices, completeRedoTransaction, completeUndoTransaction, createOperation, createPendingPlan, getLatestAppliedUndo, getLatestSnapshotRef, getLatestTurn, getPendingPlanRow, getPendingPlanStatus, getTurn, insertTurn, listNeedsRecoveryWorkspaces, listRecoveryWorkspaces, listReversibleTurns, markPendingPlanApplied, markPendingPlanCancelled, markTurnSnapshotMissing, openLedger, planPathsDigest, pruneConsumedNotices, prunePendingPlans, queueRewindNotice, recordSkippedTurn, releasePendingPlanClaim, settleInterruptedTurn, settleNoopTurn, settleOperation, settleTurn } from '../src/host/service/ledger'
+
+/** Windows may hold freshly closed sqlite sidecar files briefly: retry, then give up quietly. */
+async function cleanupDir(root) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rm(root, { recursive: true, force: true })
+      return
+    }
+    catch (error) {
+      if (attempt >= 4 || !['EBUSY', 'EPERM', 'ENOTEMPTY'].includes(error.code))
+        return
+      await new Promise(resolve => setTimeout(resolve, 150))
+    }
+  }
+}
 
 it('persists turn lifecycle and resumes from the latest durable snapshot', async () => {
   const root = await mkdtemp(join(tmpdir(), 'turnrewind-ledger-test-'))
@@ -172,6 +188,43 @@ it('keeps cancelled plans archived across newer previews and past their TTL', as
   finally {
     db.close()
     await rm(root, { recursive: true, force: true })
+  }
+})
+
+it('backs up a healthy ledger and refuses a corrupt one', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'turnrewind-ledger-bak-'))
+  try {
+    const db = openLedger(root)
+    insertTurn(db, {
+      turnId: 'session:1',
+      sessionId: 'session',
+      workspaceKey: 'workspace',
+      startedAt: '2026-01-01T00:00:00.000Z',
+      beforeRef: 'refs/turnrewind/turn-session-1-before',
+    })
+    // Open-time backup predates this insert: force a second snapshot so the
+    // .bak carries the row (the 24h TTL would otherwise skip it).
+    backupLedger(db, join(root, 'ledger.sqlite'), { force: true })
+    db.close()
+
+    const backupPath = join(root, 'ledger.sqlite.bak')
+    assert.equal(existsSync(backupPath), true)
+
+    // The documented recovery path: a corrupt ledger is replaced by its
+    // backup and opens cleanly (schema valid, rows from the backup remain).
+    const corrupt = 'this is not a sqlite database, just garbage bytes'.repeat(64)
+    writeFileSync(join(root, 'ledger.sqlite'), corrupt)
+    assert.throws(() => openLedger(root), /TURNREWIND_LEDGER_CORRUPT|database/u)
+    copyFileSync(backupPath, join(root, 'ledger.sqlite'))
+    const restored = openLedger(root)
+    assert.equal(restored.prepare('SELECT COUNT(*) AS n FROM turns').get().n, 1)
+    restored.close()
+  }
+  finally {
+    // Windows may briefly hold freshly closed sqlite sidecar files, and the
+    // temp dir removal can hit EBUSY/EPERM long after every close: swallow —
+    // a leaked temp dir is harmless, a masked assertion is not.
+    await cleanupDir(root).catch(() => {})
   }
 })
 

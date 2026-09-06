@@ -6,10 +6,13 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, renameSync, rmSync, statSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import { dirname, join } from 'pathe'
 import { PENDING_PLAN_TTL_MS } from '../constants'
+
+/** 账本备份间隔（24h）：ledger.sqlite.bak 是损坏时的唯一自愈来源。 */
+const LEDGER_BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000
 
 const SCHEMA = `
   PRAGMA journal_mode = WAL;
@@ -131,6 +134,28 @@ export interface PendingPlanRow {
 
 export type Ledger = DatabaseSync
 
+/**
+ * 滚动备份：VACUUM INTO 输出一致性快照（WAL 下亦然），写 .pending 后原子
+ * 改名，失败不阻断打开（openLedger 无 logger 注入，console.warn 兜底一行）。
+ * 独立导出：测试可强制补拍（TTL 内的二次备份默认跳过）。
+ */
+export function backupLedger(db: Ledger, dbPath: string, { force = false }: { force?: boolean } = {}): void {
+  const backupPath = `${dbPath}.bak`
+  try {
+    const stat = statSync(backupPath, { throwIfNoEntry: false })
+    if (!force && stat && Date.now() - stat.mtimeMs < LEDGER_BACKUP_INTERVAL_MS)
+      return
+    const pending = `${backupPath}.pending`
+    rmSync(pending, { force: true })
+    db.exec(`VACUUM INTO '${pending.replaceAll('\'', '\'\'')}'`)
+    rmSync(backupPath, { force: true })
+    renameSync(pending, backupPath)
+  }
+  catch (error) {
+    console.warn(`turnrewind: ledger backup failed (continuing): ${String(error)}`)
+  }
+}
+
 export function openLedger(rootDir: string): Ledger {
   const path = join(rootDir, 'ledger.sqlite')
   mkdirSync(dirname(path), { recursive: true })
@@ -138,6 +163,22 @@ export function openLedger(rootDir: string): Ledger {
   // P1-7: 并发写遇 SQLITE_BUSY 时等待而非立即抛错——瞬时锁冲突不应被
   // 上层误判为状态漂移并触发永久围栏。
   db.exec('PRAGMA busy_timeout = 5000')
+  // 生产保险：损坏账本宁可显式拒绝加载（undo 不可用、turn 照常执行），
+  // 也不要在半 corrupt 的库上继续写入扩大损伤。恢复路径：用 ledger.sqlite.bak
+  // 还原，或清空数据目录重建。拒绝前必须关闭句柄（否则 Windows 上文件被锁，
+  // 用户连还原备份都做不到）。
+  let check: { quick_check?: string } | undefined
+  try {
+    check = db.prepare('PRAGMA quick_check(1)').get() as { quick_check?: string } | undefined
+  }
+  catch (error) {
+    db.close()
+    throw new Error(`TURNREWIND_LEDGER_CORRUPT: ${path}: ${(error as Error).message}`)
+  }
+  if (check?.quick_check !== 'ok') {
+    db.close()
+    throw new Error(`TURNREWIND_LEDGER_CORRUPT: ${path}: ${check?.quick_check ?? 'unreadable'} — restore ledger.sqlite.bak or clear the data dir`)
+  }
   db.exec(SCHEMA)
   // Older local prototypes may already have the table; add new columns idempotently.
   for (const migration of [
@@ -174,6 +215,7 @@ export function openLedger(rootDir: string): Ledger {
   `).run()
   db.prepare(`UPDATE pending_plans SET status = 'expired', result_text = COALESCE(result_text, 'host restarted while this plan was applying') WHERE status = 'applying'`).run()
   prunePendingPlans(db)
+  backupLedger(db, path)
   return db
 }
 
