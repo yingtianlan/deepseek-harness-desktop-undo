@@ -18,7 +18,7 @@
 - **alternates 失效自愈**：私有 repo 通过 alternates 借用源仓库对象，而源仓库 `git gc --prune=now`（amend/rebase 的日常残留）可能删掉被借用且不可达的对象；每次 capture 后做连通性检查（`git rev-list --objects --missing=print`），发现缺对象即降级为自包含存储（不再借用、不再复制源 index）并重建基线，旧 turn 走死快照跳过路径；
 - **工作区资格守卫（Git 目录模式）**：会话 cwd 必须位于 Git worktree（子目录自动归并到 worktree 根，共享同一快照域）；家目录、家目录祖先、盘根等系统目录直接拒绝；非 Git 目录记为 `TURNREWIND_GIT_REQUIRED`，不再做全目录预算扫描（见「工作区资格」）；
 - **不可用弹窗**：客户端半（`src/client/`）通过 `turnrewind` 会话投影检测到不可用提示时，在 Web UI 内弹出模态对话框（中英双语、跟随应用主题）。**单会话只报一次**：提示以会话内消息形式永久留档可查，弹窗只对页面存活期间新到达的提示触发，历史提示（重启后重新进入会话）不会重复弹窗；
-- **两阶段 `/undo`**：先出预览卡（红绿 diff + `+x -y` 徽标 + 文件清单），卡内 ✓/✗ 按钮确认执行或取消——不看预览就不会误执行；计划 5 分钟过期，过期/取消的 plan **永久留档**：卡片保留文件清单与 diff 供随时回看（过期只锁执行、不抹记录），确认时二次校验磁盘与预览绑定；
+- **两阶段 `/undo`**：先出预览卡（红绿 diff + `+x -y` 徽标 + 文件清单），卡内 ✓/✗ 按钮确认执行或取消——不看预览就不会误执行；计划 5 分钟过期。**过期与取消都只锁执行、不抹账本记录**：过期的 plan 卡片保留文件清单与 diff 供随时回看（归档视图）；取消的 plan 是用户主动放弃，卡片塌缩为一行「已取消」留痕。确认时二次校验磁盘与预览绑定；
 - 恢复前比较当前文件与 turn 完成时的快照，发现变化则拒绝覆盖，并给出「turn 产物 → 当前磁盘」的冲突 diff；
 - 冲突可用 `--skip-conflicts`（只恢复无冲突文件）或 `--force`（强制覆盖）直接执行；
 - `/undo --redo`（重做最近一次已应用的 undo）**已禁用**：入口在解析层直接拒绝，底层恢复路径加固代码保留但未开放（见「已禁用：redo」）；
@@ -63,6 +63,7 @@
 
 ```text
 /undo --cancel <plan-id>    # 取消一个待确认的预览计划
+/undo --doctor              # 只读诊断报告（不能与其他选项组合）
 ```
 
 当前不支持 / 已禁用：
@@ -85,7 +86,7 @@
 被拒绝的 turn 仍正常执行，只是不提供 undo。同时该会话会收到一条一次性提示（`[Turn rewind unavailable]`），说明工作区被拒绝的原因；每个会话只提示一次，后续 turn 不再重复打扰。提示会以两种形态呈现：
 
 1. **会话内消息**：插件来源的上下文注入消息，模型和用户都可见、可审计；
-2. **Web UI 弹窗**：宿主端 `turnrewind` 会话投影（`src/host/service/dialog-projection.ts`）把提示折叠进会话列表快照，客户端半（`src/client/register/dialog.ts`）从 `sessions.list` 的 `projectionValues.turnrewind` 读到后弹出模态对话框，按提示 id 在 `localStorage` 去重——同一浏览器每条提示只弹一次，重装/换浏览器会重弹一次。
+2. **Web UI 弹窗**：宿主端 `turnrewind` 会话投影（`src/host/service/dialog-projection.ts`）把提示折叠进会话列表快照，客户端半（`src/client/register/dialog.ts`）从 `sessions.list` 的 `projectionValues.turnrewind` 读到后弹出模态对话框。去重不在浏览器存储里做（localStorage 会因换端口/清存储丢「已读」）：按「单会话一次」种子逻辑，进入会话时已存在的提示视为历史留档（会话内消息永久可见）不弹，只有页面存活期间新到达的提示弹一次。
 
 - **敏感文件提醒**：会话首次追踪一个工作区时做一次浅层启发式扫描（根 + 两层、上限 500 文件、跳过 node_modules），命中 `.env`/密钥类且**未被 ignore** 的文件时发一条一次性 `[Turn rewind privacy notice]`（每会话+工作区一条），列出会被快照的具体文件与退出方式（加 ignore）。扫描失败静默跳过——这是提醒，不是门禁。
 大工作区的取舍：不再做预算预扫描，快照耗时与磁盘占用随仓库规模增长（Git ignore 能排除 `node_modules` 等，但容量/性能风险仍由使用者自行承担）；单文件快照/恢复上限为 64 MB——超限文件仍会被捕获进快照，`/undo` 预览会以 `[too large]` 标注并在执行后单文件报告为「未恢复」，**不会**导致整次 undo 失败，其余文件照常恢复。若项目里有此类大文件且不希望被追踪，请把它们加进源仓库的 ignore 规则。
@@ -102,6 +103,8 @@ node packages\dsh-tauri-turnrewind-ts\purge-workspace.mjs "C:\Users\<user>\Deskt
 （需先 `pnpm --filter dsh-tauri-turnrewind build` 产出 `dist/`——CLI 从构建产物导入引擎。）
 
 该命令删除该工作区对应的私有快照仓库（`$DSH_HOME/snapshots/<hash>.git`）及其全部账本记录（turns / operations / notices / plans / workspaces），其他工作区的数据不受影响。workspace 被运行中的 Host 占用时命令会拒绝执行（workspace lock），请先停止对应 Host 进程。
+
+注意：这个 CLI 只在两种场景需要——①账本损坏前的彻底清理，②命令行批量操作。**解除恢复围栏的日常路径已产品化**：在「打开恢复面板」里选「清除 rewind 数据并解锁」即可（同一 purge 逻辑、同一把 workspace 锁，占用时在 UI 内报 409），见「当前状态」的恢复面板条目。
 
 ## Undo 的工作区范围
 
@@ -321,13 +324,15 @@ commit history
 
 **如果不希望秘密文件进入快照**：把它们加进源仓库的 ignore 规则（对 git 和本插件同时生效）。也可以在 `/undo --dry-run` 的文件清单里核对实际被追踪的范围。插件仍是实验原型，不应把它当作秘密信息保护工具。
 
+辅助提示：会话首次追踪一个工作区时，插件会对未被 ignore 的疑似秘密文件发一次性 `[Turn rewind privacy notice]`（见「工作区资格」的敏感文件提醒）——它是提醒而非保护。
+
 ### 已禁用：redo（功能冻结）
 
 `/undo --redo` 已在解析层禁用：任何包含 `--redo` 的输入都会得到「temporarily disabled」错误，不会触发快照校验或文件恢复。
 
 禁用原因（2026-09-03 审查报告 P0-4）：redo 的执行段此前未接入 operation 记录与失败回滚，执行中任一文件恢复失败会留下「部分 redo」状态，无 `needs-recovery` 围栏。
 
-底层加固已经完成并保留（未开放）：redo 现在与 undo 共用同一套机制——`createOperation` 登记 applying operation → 单路径失败计入 `notRestored` 明细 → `completeRedoTransaction` 在单事务内结算旧 undo operation / turn / 新 operation / notice，事务失败时 redo operation 落 `needs-recovery` 由启动围栏拦截。重新开放只需移除 `parseUndoInput` 中的 `--redo` 拒绝分支并恢复对应测试。
+底层加固已经完成并保留（未开放）：redo 现在与 undo 共用同一套机制——`createOperation` 登记 applying operation → 单路径失败计入 `notRestored` 明细 → `completeRedoTransaction` 在单事务内结算旧 undo operation / turn / 新 operation / notice，事务失败时 redo operation 落 `needs-recovery` 由启动围栏拦截。重新开放只需移除 `applyUndo` 中的 redo 冻结闸门（`parsed.redo` 分支）并恢复对应测试。
 
 ## Debug 安装
 
@@ -346,12 +351,12 @@ pnpm --filter dsh-tauri-turnrewind test
 运行插件 lint 与测试：
 
 ```powershell
-pnpm --filter dsh-tauri-turnrewind exec eslint src
+pnpm --filter dsh-tauri-turnrewind exec eslint src test
 pnpm --filter dsh-tauri-turnrewind typecheck
 pnpm --filter dsh-tauri-turnrewind test
 ```
 
-当前 25 个测试文件、130 个测试，覆盖：Git 快照（增删改恢复、中文路径、CRLF、路径逃逸、工作区根拒绝、absent 路径上的非空目录拒绝与空目录移除、symlink 路径拒绝与快照 symlink 策略、ignore 委托、alternates 复用与自愈）、原子 bak-swap 恢复与崩溃清扫、Git 状态零污染（HEAD/branch/index/status/refs/stash 不变）、linked worktree 隔离、oversized blob 单文件报告、容量治理（保留条数过期、超限两阶段重建、不可达 loose object 回收）、账本生命周期（含 needs-recovery 围栏与跨连接 notice 单次消费、legacy schema 迁移重放、quick_check 拒载与 .bak 还原、恢复面板明细与 acknowledge 终态）、pending plan 原子 claim 与预览绑定漂移校验、interrupted turn、barrier 时序、跨进程 workspace 锁、undo 入口与 redo 冻结、client 纯函数（输出解析/plan 状态判定/会话归属/通道 latest-owner-wins 语义/模态 Escape 与焦点陷阱）、敏感文件扫描过滤与提醒去重。
+当前 25 个测试文件、130 个测试，覆盖：Git 快照（增删改恢复、中文路径、CRLF、路径逃逸、工作区根拒绝、absent 路径上的非空目录拒绝与空目录移除、symlink 路径拒绝与快照 symlink 策略、ignore 委托、alternates 复用与自愈）、原子 bak-swap 恢复与崩溃清扫、Git 状态零污染（HEAD/branch/index/status/refs/stash 不变）、linked worktree 隔离、oversized blob 单文件报告、容量治理（保留条数过期、超限两阶段重建、不可达 loose object 回收）、账本生命周期（含 needs-recovery 围栏与跨连接 notice 单次消费、legacy schema 迁移重放、quick_check 拒载与 .bak 还原、恢复面板明细与 acknowledge 终态）、`/undo --doctor` 报告、pending plan 原子 claim 与预览绑定漂移校验、interrupted turn、barrier 时序、跨进程 workspace 锁、undo 入口与 redo 冻结、client 纯函数（输出解析/plan 状态判定/会话归属/通道 latest-owner-wins 语义/模态 Escape 与焦点陷阱）、敏感文件扫描过滤与提醒去重。
 
 ## 当前限制
 
@@ -363,6 +368,7 @@ pnpm --filter dsh-tauri-turnrewind test
 - 实现父对话递归 undo；
 - 实现消息旁 Undo 按钮；
 - 明确重命名与特殊文件（submodule、设备文件）策略（symlink 与 mode/权限位已落地：mode 进快照状态、POSIX 下恢复可执行位，Windows 按 git filemode=false 约定统一 100644）；
+- 设置面（retention / TTL / 逐 workspace 开关）尚未提供，调优走 `TURNREWIND_RETAIN_TURNS` / `TURNREWIND_MAX_SNAPSHOT_MB` 环境变量；
 - 重新开放 redo：移除解析层禁用分支、恢复端到端 redo 测试（底层加固已完成，见「已禁用：redo」）。
 
 ### 符号链接策略（P1-3）

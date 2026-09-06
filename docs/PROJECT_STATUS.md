@@ -1,18 +1,18 @@
 # 项目进展与交接备忘
 
-> 更新于 2026-09-05。用途：换设备/换会话时快速接续 turn-rewind 插件开发。
+> 更新于 2026-09-06。用途：换设备/换会话时快速接续 turn-rewind 插件开发。
 > 详细设计见 `docs/TURN_REWIND.md`，用户文档见 `packages/dsh-tauri-turnrewind-ts/README.md`。
 > 审查与待办的唯一真相源：`docs/TURN_REWIND_REVIEW_2026-09-03.md`（§1.1/§1.2）+ `docs/TURN_REWIND_OPTIMIZATION_SECURITY_AUDIT.md`（§7 统一待办）。
 
 ## 一句话状态
 
-turn-rewind TS 重写（`packages/dsh-tauri-turnrewind-ts`，v0.2.0-beta.1，Git 目录模式）已完成 **09-03 审查报告的全部 P0/P1/P2 修复**与安全审计（`TURN_REWIND_OPTIMIZATION_SECURITY_AUDIT.md`）实施顺序第 1、2 条：20 个测试文件、115 个测试全绿；typecheck/eslint（0 problems）/build 全绿。旧 JS 版已删除。剩余待办见上述 §7 与下文「下一步」。
+turn-rewind TS 重写（`packages/dsh-tauri-turnrewind-ts`，v0.2.0-beta.1，Git 目录模式）已完成 **09-03 审查报告全部 P0/P1/P2 修复**、**09-05 安全审计高/中优先级全部关闭**，以及 **09-06 生产化加固批次**（恢复面板、账本 quick_check + 每日 .bak、`/undo --doctor`、legacy schema 迁移重放、敏感文件一次性提醒、同步路径异步化、模态可访问性、三平台 CI job）：25 个测试文件、130 个测试全绿；typecheck/eslint（0 problems）/build 全绿。旧 JS 版已删除。回溯锚点：tag `turnrewind-pre-production-hardening`（加固批次前）。
 
 ## 仓库拓扑
 
 | 仓库 | 位置/远程 | 用途 | 当前位置 |
 | --- | --- | --- | --- |
-| 桌面开发仓库（TS 分支） | 本机 `Desktop/dsh-git-rewind-ts` ↔ `origin`（我的 fork） | 插件开发 + 真机验证 | `dsh/turnrewind-ts` @ `0e55e92`+ |
+| 桌面开发仓库（TS 分支） | 本机 `Desktop/dsh-git-rewind-ts` ↔ `origin`（我的 fork） | 插件开发 + 真机验证 | `dsh/turnrewind-ts` @ `8eaefeb`+ |
 | 桌面仓库 fork | github.com/yingtianlan/deepseek-harness-desktop-undo | 备份/PR | `dsh/turnrewind-ts` 已推送远程 |
 | 官方插件参考源码 | 本机 `Desktop/dsh/source/dsh-tauri-plugins` | 只读参考（packages 插件规范） | 本地 clone |
 | 旧 JS 实验分支 | 同 fork `dsh/turnrewind-git-dir-undo` | 历史存档（JS 版 Git 模式原型） | 不再演进 |
@@ -27,13 +27,19 @@ turn-rewind TS 重写（`packages/dsh-tauri-turnrewind-ts`，v0.2.0-beta.1，Git
 - **容量治理（P2-4）**：`TURNREWIND_RETAIN_TURNS`（默认 50，超出标记过期）+ `TURNREWIND_MAX_SNAPSHOT_MB`（默认 1024，超限整仓重建自愈基线）。
 - **留档可查**：过期/取消/被替换的 plan 转 `expired` 永久保留（卡片可回看 diff，仅锁执行）；unsupported 提示**单会话只报一次**（历史提示以会话内消息永久可见，重启/清浏览器存储不重弹）。
 - **redo 已冻结**：入口拒绝，底层加固保留（一行重开）。
+- **恢复面板（09-06）**：needs-recovery 围栏可在 UI 内闭环——查看被围 workspace 的中断操作明细，acknowledge（转 `recovery-acknowledged` 终态保留审计）或 purge 解锁；路由 `/api/turnrewind/recovery[/resolve]`。
+- **账本保险（09-06）**：openLedger `PRAGMA quick_check`（损坏拒载，先关句柄）+ 每日 `VACUUM INTO` 滚动备份 `ledger.sqlite.bak`。
+- **`/undo --doctor`（09-06）**：只读诊断（git/工作区/账本/围栏/快照仓库/备份新旧），在资格判定之前短路。
+- **隐私提醒（09-06）**：会话首触工作区时浅层扫描未 ignore 的疑似秘密文件，一次性 `[Turn rewind privacy notice]`（`git check-ignore` 过滤，扫描失败静默）。
+- **性能与健壮（09-06）**：工作区解析 6 次 spawnSync → 单命令 rev-parse + stale-while-revalidate 缓存；冲突检测读文件异步化；空目录恢复 rmdirSync 修复；notice claim 事务化；retention 持锁 + 两阶段 quarantine；模态 Escape + 焦点陷阱（共用 `bindModalA11y`）。
 
-## 本轮已完成（09-03 审查 → 09-05）
+## 本轮已完成（09-03 审查 → 09-06）
 
 - 审查报告（09-03）P0×5 + P1×5 + P2×3 全部修复或关闭，详见报告 §1.1/§1.2；
-- 安全审计报告（09-05）实施顺序第 1、2 条完成：client compat 解析修复、purge CLI（`purge-workspace.mjs`）、弹窗种子纯函数化 + 测试、prepublishOnly 修复；
-- UI 修复：css-render 裸数字 px 根因、dialog/-card 类名冲突、提示高对比与对齐；
-- 20 个测试文件、115 个测试全绿。
+- 安全审计报告（09-05）高/中优先级全部关闭（§7 待办第 1–15 条，除壳侧依赖项）；
+- 09-05/06 用户反馈批次：取消塌缩、对齐时机、CRLF 幽灵 diff（`--ignore-cr-at-eol`）、取消持久化、空目录 EISDIR；
+- 09-06 生产化批次：恢复面板 / 账本保险 / --doctor / 迁移重放 + CI 矩阵 / 敏感提醒 / 异步化 / 可访问性；
+- 25 个测试文件、130 个测试全绿。
 
 ## 换设备环境搭建
 
@@ -45,14 +51,15 @@ turn-rewind TS 重写（`packages/dsh-tauri-turnrewind-ts`，v0.2.0-beta.1，Git
 
 ## 下一步待办（优先级序）
 
-统一待办见 `TURN_REWIND_OPTIMIZATION_SECURITY_AUDIT.md` §7，当前优先级序：
+插件侧待办只剩：
 
-1. 真实 DSH lifecycle 集成测试（agent-loop claim → baseline → tool write 时序）；
-2. P2-1 子树 undo（先定 DSH turn tree 契约，接入 parentTurnId + planner）；
-3. P2-4 后续：retention 并发安全（纳入 workspace lock + quarantine 两阶段重建）；
-4. P2-8 剩余：协议常量收敛 + Host/client 路径契约测试、`expandKey` 稳定化、`as never` 移除、文案入 locales；
-5. 消息旁 Undo 按钮、设置页回退模式；干净安装冒烟；
-6. redo 重开（一行闸门，需产品拍板）。
+1. 设置面（retention / TTL / 逐 workspace 开关的 UI；先调研宿主 settings API 形态）；
+2. 消息旁 Undo 按钮；
+3. 子树 undo（`parent_turn_id` 列与 planner 聚合已就位，差 turn tree 契约调研）；
+4. redo 重开（一行闸门，需产品拍板）；
+5. 版本动作（beta.1 → beta.2 + changelog）。
+
+平台级（依赖桌面壳，插件侧无法独立完成）：受控 sandbox/Tauri bridge（审计 P0-1）、真实 DSH lifecycle 集成测试。CI 已具备三平台矩阵 job（push main / PR→main 触发）。
 
 ## 踩坑备忘（血泪浓缩）
 

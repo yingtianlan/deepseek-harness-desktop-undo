@@ -206,6 +206,8 @@ operation_paths(operation_id, path, expected_current_digest,
 
 ### 4.4 保留策略
 
+> **现状（2026-09-06）**：已落地两级治理 + 回收——`TURNREWIND_RETAIN_TURNS`（默认 50，超出标过期）与 `TURNREWIND_MAX_SNAPSHOT_MB`（默认 1024，超限走两阶段 quarantine 整仓重建），执行前 `git prune` 回收不可达 loose object；治理在 workspace 首触安全点、持跨进程锁执行。本节其余为设计期愿望清单（按保留天数清理、引用计数删除对象等尚未实现）。
+
 内容备份可能变大，因此需有配置与可见状态：
 
 - 默认最大存储容量；
@@ -370,6 +372,8 @@ Undo 必须分为：
 
 ### 7.4 原子性与故障恢复
 
+> **现状（2026-09-06）**：本节策略已实现并超出设计——原子 bak-swap（崩溃窗口由启动清扫复活）、单事务账本结算（失败落 `needs-recovery` 围栏）、跨进程 workspace 锁、以及**恢复面板**（围栏工作区可在 UI 内查看明细并选择 acknowledge / purge 解锁）；账本打开时 quick_check + 每日 .bak 备份。`partial_failure` 语义由「单路径失败计入 notRestored 明细 + 事务回滚回滚已写路径」承担。
+
 文件系统跨多路径不能真正全局原子，因此采用「尽量全成或可恢复」策略：
 
 1. 获取 workspace 锁；
@@ -393,6 +397,8 @@ Undo 必须分为：
 /undo --subtree <id>  # 指定父节点及子树
 /undo --dry-run ...   # 只显示计划
 ```
+
+> **现状（2026-09-06）**：已实现 `/undo`、`<turn-id>`、`--dry-run`、`--preview`、`--skip-conflicts`、`--force`、`--confirm/--cancel <plan-id>`（两阶段卡片）与 `/undo --doctor`（只读诊断）；`--subtree` 未实现（入口显式拒绝），`--redo` 冻结（入口拒绝）。命令由 Host 注册，Agent 不可自主调用。
 
 若 DSH 的输入架构不支持 Client 本地拦截，则由 Host 注册一个窄 `undo_turn` 工具或命令服务，并在 system prompt 中说明它只用于用户明确发出的撤销请求。不可让 Agent 自主调用 undo。
 
