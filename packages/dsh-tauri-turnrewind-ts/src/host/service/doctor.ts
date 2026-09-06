@@ -121,6 +121,6 @@ export async function collectDoctorReport(db: Ledger, dataRoot: string, agent: {
     lines.push(`ledger backup: error — ${String((error as Error).message ?? error)}`)
   }
 
-  // 顶层行统一加「- 」列表符号；围栏明细等缩进子行保留原缩进。
-  return lines.map(line => line.startsWith('  ') ? line : `- ${line}`).join('\n')
+  // 首行是标题不加符号；其余顶层行统一加「- 」，缩进子行保留原缩进。
+  return lines.map((line, index) => index === 0 || line.startsWith('  ') ? line : `- ${line}`).join('\n')
 }

@@ -40,7 +40,7 @@ it('collects a full read-only doctor report for an eligible workspace', async ()
     settleTurn(db, 'session:1', 'refs/turnrewind/doctor-after')
 
     const report = await collectDoctorReport(db, dataRoot, { session: { id: 'session', header: { cwd: workspace } } })
-    assert.match(report, /^- Turn rewind doctor$/mu)
+    assert.match(report, /^Turn rewind doctor$/mu)
     assert.match(report, /git: available/u)
     assert.match(report, /workspace: .+ \(git worktree, eligible\)/u)
     assert.match(report, /ledger: healthy \(opened with quick_check\) — 1 turn\(s\)/u)
