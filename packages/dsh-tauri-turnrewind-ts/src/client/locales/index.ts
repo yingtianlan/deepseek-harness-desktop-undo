@@ -24,6 +24,14 @@ export type LocaleKey
     | 'planGoneHint'
     | 'previewHint'
     | 'sessionMissing'
+    | 'recoveryTitle'
+    | 'recoveryIntro'
+    | 'recoveryOpen'
+    | 'recoveryAcknowledge'
+    | 'recoveryPurge'
+    | 'recoveryClose'
+    | 'recoveryActionFailed'
+    | 'recoveryEmpty'
 
 const DICT_ZH: Record<LocaleKey, string> = {
   dialogTitle: 'Turn 撤销不可用',
@@ -47,6 +55,14 @@ const DICT_ZH: Record<LocaleKey, string> = {
   planGoneHint: '该计划不存在（可能已被清理或来自旧版本数据）',
   previewHint: '执行将恢复下方文件到本轮改动前',
   sessionMissing: '无法确定该卡片所属的会话，请刷新页面后重试',
+  recoveryTitle: 'Turn 撤销恢复',
+  recoveryIntro: '以下工作区有被中断的撤销操作，文件状态未知，已暂停新的撤销。请先自行检查工作区文件，然后选择保留历史解锁，或清除该工作区的 rewind 数据。',
+  recoveryOpen: '打开恢复面板',
+  recoveryAcknowledge: '已检查，保留历史并解锁',
+  recoveryPurge: '清除 rewind 数据并解锁',
+  recoveryClose: '关闭',
+  recoveryActionFailed: '操作失败：',
+  recoveryEmpty: '当前没有需要恢复的工作区。',
 }
 
 const DICT_EN: Record<LocaleKey, string> = {
@@ -71,6 +87,14 @@ const DICT_EN: Record<LocaleKey, string> = {
   planGoneHint: 'This plan no longer exists (it may have been purged or comes from older data)',
   previewHint: 'Applying restores the files below to their state before this turn',
   sessionMissing: 'Cannot determine the session this card belongs to; refresh the page and try again',
+  recoveryTitle: 'Turn Rewind Recovery',
+  recoveryIntro: 'These workspaces had an interrupted undo; the file state is unknown and new rewind work is paused. Inspect the workspace files yourself, then either keep the history acknowledged or clear the workspace\'s rewind data.',
+  recoveryOpen: 'Open recovery panel',
+  recoveryAcknowledge: 'Inspected — keep history and unlock',
+  recoveryPurge: 'Clear rewind data and unlock',
+  recoveryClose: 'Close',
+  recoveryActionFailed: 'The action failed: ',
+  recoveryEmpty: 'No workspaces need recovery right now.',
 }
 
 export const LOCALES = { zh: DICT_ZH, en: DICT_EN }

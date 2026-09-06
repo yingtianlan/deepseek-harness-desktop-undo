@@ -39,3 +39,17 @@ export interface CommandViewProps {
 
 /** locale 取词函数：apply 装配层按当前活跃语言注入，组件层消费。 */
 export type Translate = (key: LocaleKey) => string
+
+/** 恢复面板行（host GET /api/turnrewind/recovery 的 workspaces 条目）。 */
+export interface RecoveryWorkspaceInfo {
+  workspace_key: string
+  workspace_path: string | null
+  operations: {
+    operation_id: string
+    kind: string
+    target_turn_id: string
+    requested_at: string
+    settled_at: string | null
+    error: string | null
+  }[]
+}

@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'pathe'
 import { it } from 'vitest'
-import { claimPendingPlan, claimRewindNotices, completeRedoTransaction, completeUndoTransaction, createOperation, createPendingPlan, getLatestAppliedUndo, getLatestSnapshotRef, getLatestTurn, getPendingPlanRow, getPendingPlanStatus, getTurn, insertTurn, listNeedsRecoveryWorkspaces, listReversibleTurns, markPendingPlanApplied, markPendingPlanCancelled, markTurnSnapshotMissing, openLedger, planPathsDigest, pruneConsumedNotices, prunePendingPlans, queueRewindNotice, recordSkippedTurn, releasePendingPlanClaim, settleInterruptedTurn, settleNoopTurn, settleOperation, settleTurn } from '../src/host/service/ledger'
+import { acknowledgeRecovery, claimPendingPlan, claimRewindNotices, completeRedoTransaction, completeUndoTransaction, createOperation, createPendingPlan, getLatestAppliedUndo, getLatestSnapshotRef, getLatestTurn, getPendingPlanRow, getPendingPlanStatus, getTurn, insertTurn, listNeedsRecoveryWorkspaces, listRecoveryWorkspaces, listReversibleTurns, markPendingPlanApplied, markPendingPlanCancelled, markTurnSnapshotMissing, openLedger, planPathsDigest, pruneConsumedNotices, prunePendingPlans, queueRewindNotice, recordSkippedTurn, releasePendingPlanClaim, settleInterruptedTurn, settleNoopTurn, settleOperation, settleTurn } from '../src/host/service/ledger'
 
 it('persists turn lifecycle and resumes from the latest durable snapshot', async () => {
   const root = await mkdtemp(join(tmpdir(), 'turnrewind-ledger-test-'))
@@ -168,6 +168,48 @@ it('keeps cancelled plans archived across newer previews and past their TTL', as
     prunePendingPlans(db)
     assert.equal(getPendingPlanStatus(db, planA, 'session')?.status, 'cancelled')
     assert.equal(getPendingPlanStatus(db, planB, 'session')?.status, 'expired')
+  }
+  finally {
+    db.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+it('lists fenced workspaces for recovery and lifts the fence on acknowledgement', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'turnrewind-recovery-'))
+  const db = openLedger(root)
+  try {
+    // A turn whose undo landed needs-recovery (transaction failure path).
+    insertTurn(db, {
+      turnId: 'session:1',
+      sessionId: 'session',
+      workspaceKey: 'c:\\proj\\one',
+      startedAt: '2026-01-01T00:00:00.000Z',
+      beforeRef: 'refs/turnrewind/turn-session-1-before',
+    })
+    settleTurn(db, 'session:1', 'refs/turnrewind/turn-session-1-after')
+    createOperation(db, { operationId: 'op-one', kind: 'undo', targetTurnId: 'session:1', requestedAt: '2026-01-01T00:01:00.000Z' })
+    // The transaction-failure path leaves the operation needs-recovery.
+    settleOperation(db, 'op-one', 'needs-recovery', 'test: interrupted')
+    // Account for the workspace so the recovery row carries its path.
+    db.prepare(`INSERT INTO workspaces(workspace_key, workspace_path, snapshot_repo, created_at) VALUES ('c:\\proj\\one', 'C:\\Proj\\One', 'repo.git', '2026-01-01T00:00:00.000Z')`).run()
+
+    const fenced = listRecoveryWorkspaces(db)
+    assert.equal(fenced.length, 1)
+    assert.equal(fenced[0].workspace_key, 'c:\\proj\\one')
+    assert.equal(fenced[0].workspace_path, 'C:\\Proj\\One')
+    assert.equal(fenced[0].operations.length, 1)
+    assert.equal(fenced[0].operations[0].operation_id, 'op-one')
+
+    // Acknowledgement is a terminal rewrite: the fence queries (which only
+    // match needs-recovery) stop matching, and the audit row stays annotated.
+    assert.equal(acknowledgeRecovery(db, 'c:\\proj\\one'), 1)
+    assert.deepEqual(listRecoveryWorkspaces(db), [])
+    const row = db.prepare(`SELECT outcome, error FROM operations WHERE operation_id = 'op-one'`).get()
+    assert.equal(row.outcome, 'recovery-acknowledged')
+    assert.match(row.error, /recovery acknowledged at /u)
+    // Repeat acknowledgement is a no-op (already terminal).
+    assert.equal(acknowledgeRecovery(db, 'c:\\proj\\one'), 0)
   }
   finally {
     db.close()

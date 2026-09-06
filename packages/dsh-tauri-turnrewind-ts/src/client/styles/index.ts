@@ -89,6 +89,20 @@ export function buildDialogStyleNodes(cssr: ReturnType<typeof CssRender>) {
     cssr.c(`.${p}-dialog-button:hover`, {
       background: 'var(--dsw-alias-button-primary-hover, #4338ca)',
     }),
+    // 恢复面板入口（默认 display:none，data-visible 控制展示）。
+    cssr.c(`.${p}-dialog-recovery`, {
+      display: 'none',
+      background: 'transparent',
+      color: 'var(--dsw-alias-label-primary, #111111)',
+      border: '1px solid var(--dsw-alias-border-l2, #e5e5e5)',
+      borderRadius: '8px',
+      padding: '6px 14px',
+      fontSize: '13px',
+      cursor: 'pointer',
+    }),
+    cssr.c(`.${p}-dialog-recovery[data-visible='true']`, {
+      display: 'inline-block',
+    }),
   ])
 }
 
@@ -99,6 +113,118 @@ export function mountDialogStyles(): () => void {
     return () => {}
   document.getElementById(styleId)?.remove()
   const style = buildDialogStyleNodes(CssRender())
+  style.mount({ id: styleId, head: true })
+  return () => style.unmount({ id: styleId })
+}
+
+/** 构建恢复面板样式节点（独立导出供测试断言）。 */
+export function buildRecoveryStyleNodes(cssr: ReturnType<typeof CssRender>) {
+  const p = TURNREWIND_CLASS_PREFIX
+  return cssr.c([
+    cssr.c(`.${p}-recovery-backdrop`, {
+      display: 'none',
+      position: 'fixed',
+      inset: 0,
+      zIndex: 2147483000,
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: 'var(--dsw-alias-bg-mask-1, rgba(0, 0, 0, 0.45))',
+    }),
+    cssr.c(`.${p}-recovery-backdrop[data-visible='true']`, {
+      display: 'flex',
+    }),
+    cssr.c(`.${p}-recovery-card`, {
+      maxWidth: '620px',
+      width: 'calc(100vw - 48px)',
+      boxSizing: 'border-box',
+      maxHeight: '80vh',
+      overflowY: 'auto',
+      background: 'var(--dsw-alias-bg-layer-1, #ffffff)',
+      color: 'var(--dsw-alias-label-primary, #111111)',
+      border: '1px solid var(--dsw-alias-border-l2, #e5e5e5)',
+      borderRadius: '12px',
+      padding: '20px 22px',
+      fontFamily: 'inherit',
+      fontSize: '13px',
+      lineHeight: 1.6,
+      boxShadow: '0 20px 50px rgba(0, 0, 0, 0.25)',
+    }),
+    cssr.c(`.${p}-recovery-title`, {
+      fontSize: '15px',
+      fontWeight: '600',
+      marginBottom: '10px',
+      color: 'var(--dsw-alias-state-error-primary, #d03050)',
+    }),
+    cssr.c(`.${p}-recovery-intro`, {
+      color: 'var(--dsw-alias-label-secondary, #333333)',
+      marginBottom: '12px',
+    }),
+    cssr.c(`.${p}-recovery-empty`, {
+      color: 'var(--dsw-alias-label-tertiary, #8b8b8b)',
+    }),
+    cssr.c(`.${p}-recovery-workspace`, {
+      border: '1px solid var(--dsw-alias-border-l2, #e5e5e5)',
+      borderRadius: '8px',
+      padding: '10px 12px',
+      marginBottom: '10px',
+    }),
+    cssr.c(`.${p}-recovery-path`, {
+      fontFamily: 'monospace',
+      fontSize: '12px',
+      wordBreak: 'break-all',
+      marginBottom: '6px',
+    }),
+    cssr.c(`.${p}-recovery-op`, {
+      color: 'var(--dsw-alias-label-secondary, #333333)',
+      fontSize: '12px',
+      wordBreak: 'break-all',
+      marginBottom: '4px',
+    }),
+    cssr.c(`.${p}-recovery-error`, {
+      display: 'none',
+      marginTop: '10px',
+      padding: '8px 10px',
+      borderRadius: '8px',
+      background: 'var(--dsw-alias-state-error-bg, #fdecef)',
+      color: 'var(--dsw-alias-state-error-primary, #d03050)',
+      wordBreak: 'break-all',
+      whiteSpace: 'pre-wrap',
+    }),
+    cssr.c(`.${p}-recovery-error[data-visible='true']`, {
+      display: 'block',
+    }),
+    cssr.c(`.${p}-recovery-actions`, {
+      marginTop: '10px',
+      display: 'flex',
+      gap: '8px',
+      justifyContent: 'flex-end',
+    }),
+    cssr.c(`.${p}-recovery-btn`, {
+      background: 'var(--dsw-alias-button-primary-fill, #4f46e5)',
+      color: 'var(--dsw-alias-label-primary-foreground, #ffffff)',
+      border: 'none',
+      borderRadius: '8px',
+      padding: '6px 14px',
+      fontSize: '13px',
+      cursor: 'pointer',
+    }),
+    cssr.c(`.${p}-recovery-btn:disabled`, {
+      opacity: 0.6,
+      cursor: 'default',
+    }),
+    cssr.c(`.${p}-recovery-btn-danger`, {
+      background: 'var(--dsw-alias-state-error-primary, #d03050)',
+    }),
+  ])
+}
+
+/** 挂载恢复面板样式（latest-wins，见文件头），返回 disposer。 */
+export function mountRecoveryStyles(): () => void {
+  const styleId = `${TURNREWIND_STYLE_ID}-recovery`
+  if (typeof document === 'undefined')
+    return () => {}
+  document.getElementById(styleId)?.remove()
+  const style = buildRecoveryStyleNodes(CssRender())
   style.mount({ id: styleId, head: true })
   return () => style.unmount({ id: styleId })
 }

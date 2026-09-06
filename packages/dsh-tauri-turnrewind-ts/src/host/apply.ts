@@ -28,6 +28,7 @@ import {
   snapshotDiff,
 } from './service/git-snapshot'
 import {
+  acknowledgeRecovery,
   claimPendingPlan,
   claimRewindNotices,
   failTurn,
@@ -37,6 +38,7 @@ import {
   getTurn,
   hasNeedsRecoveryWorkspace,
   insertTurn,
+  listRecoveryWorkspaces,
   markPendingPlanApplied,
   markPendingPlanCancelled,
   openLedger,
@@ -49,6 +51,7 @@ import {
   settleTurn,
   skipTurn,
 } from './service/ledger'
+import { purgeWorkspace } from './service/maintenance'
 import { planDrift } from './service/planner'
 import { enforceRetention } from './service/retention'
 import { applyUndo, buildPlanEntries, executeUndoRestore, turnRefsExist, workspaceForAgent, workspaceHasActiveTurn, workspaceIssue, workspaceKeyFor } from './service/undo'
@@ -585,6 +588,37 @@ export function apply(ctx: HostApplyContext): void {
       return [200, { ok: true, message: 'Pending undo cancelled.' }]
     }
 
+    // ——— 恢复面板路由：被围 workspace 的查询与解锁（acknowledge | purge） ———
+
+    function recoveryRoute(): [number, unknown] {
+      return [200, { workspaces: listRecoveryWorkspaces(ledger) }]
+    }
+
+    function recoveryResolveRoute(body: Record<string, unknown>): [number, unknown] {
+      const workspaceKey = String(body.workspaceKey ?? '')
+      const mode = String(body.mode ?? '')
+      if ((mode !== 'acknowledge' && mode !== 'purge') || workspaceKey === '' || workspaceKey.length > 500)
+        return [400, { error: 'workspaceKey and mode (acknowledge|purge) are required' }]
+      const fenced = listRecoveryWorkspaces(ledger).find(workspace => workspace.workspace_key === workspaceKey)
+      if (fenced === undefined)
+        return [404, { error: 'this workspace is not under recovery' }]
+      if (mode === 'acknowledge') {
+        const acknowledged = acknowledgeRecovery(ledger, workspaceKey)
+        return [200, { ok: true, acknowledged }]
+      }
+      try {
+        // purgeWorkspace 自带跨进程锁，workspace 被占用时拒绝。传 workspace_key
+        // 而非客户端输入的路径：它正是 purge 哈希与账本行使用的规范输入。
+        const summary = purgeWorkspace(dataRoot, workspaceKey)
+        return [200, { ok: true, purged: summary }]
+      }
+      catch (error) {
+        if (error instanceof WorkspaceLockBusyError)
+          return [409, { error: `${(error as Error).message} — stop the host process using this workspace first` }]
+        throw error
+      }
+    }
+
     function statusRoute(_body: Record<string, unknown>, req: { url?: string }): [number, unknown] {
       const url = new URL(req.url ?? '/', 'http://localhost')
       const planId = String(url.searchParams.get('planId') ?? '')
@@ -603,6 +637,8 @@ export function apply(ctx: HostApplyContext): void {
       jsonRoute(`${TURNREWIND_API_PREFIX}/confirm`, confirmRoute, { mutate: true }),
       jsonRoute(`${TURNREWIND_API_PREFIX}/cancel`, cancelRoute, { mutate: true }),
       jsonRoute(`${TURNREWIND_API_PREFIX}/status`, statusRoute, { methods: ['GET'] }),
+      jsonRoute(`${TURNREWIND_API_PREFIX}/recovery`, recoveryRoute, { methods: ['GET'] }),
+      jsonRoute(`${TURNREWIND_API_PREFIX}/recovery/resolve`, recoveryResolveRoute, { mutate: true }),
     ]
     const disposers = routes.map(route => ctx.webServer.register(route))
     return () => disposers.map(dispose => dispose())
@@ -716,7 +752,7 @@ export function apply(ctx: HostApplyContext): void {
       }
       const workspaceIdentity = workspaceKeyFor(workspaceDir)
       if (hasNeedsRecoveryWorkspace(ledger, workspaceIdentity))
-        return { kind: 'error', text: 'Undo is unavailable because a previous undo or redo was interrupted. Inspect the workspace, then purge its turnrewind data before retrying.' }
+        return { kind: 'error', text: 'Undo is unavailable because a previous undo or redo was interrupted. Open the recovery panel (from the "Turn rewind unavailable" notice) to inspect the workspace, keep the history acknowledged, or clear its rewind data.' }
       const issue = workspaceIssue(workspaceDir)
       if (issue)
         return { kind: 'error', text: `Undo is unavailable for this workspace. ${issue}` }

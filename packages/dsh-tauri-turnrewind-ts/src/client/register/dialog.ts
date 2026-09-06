@@ -23,10 +23,13 @@ interface DialogElements {
   intro: HTMLDivElement
   reasonLabel: HTMLDivElement
   reasonBox: HTMLDivElement
+  recoveryButton: HTMLButtonElement
   button: HTMLButtonElement
 }
 
 let dialog: DialogElements | undefined
+/** 恢复面板入口（apply() 注入）：reason 命中恢复围栏时展示。 */
+let recoveryOpener: (() => void) | null = null
 
 // ------------------------------------------------------------------
 // 弹窗 DOM：所有颜色走 CSS variable（随主题实时切换），fallback 到硬编码值。
@@ -63,10 +66,19 @@ function ensureDialog(): DialogElements {
 
   const actions = document.createElement('div')
   actions.className = `${TURNREWIND_CLASS_PREFIX}-dialog-actions`
+  // 恢复面板入口：默认隐藏，showDialog 按 reason 决定是否展示。
+  const recoveryButton = document.createElement('button')
+  recoveryButton.type = 'button'
+  recoveryButton.className = `${TURNREWIND_CLASS_PREFIX}-dialog-recovery`
+  recoveryButton.dataset.visible = 'false'
+  recoveryButton.addEventListener('click', () => {
+    hide()
+    recoveryOpener?.()
+  })
   const button = document.createElement('button')
   button.type = 'button'
   button.className = `${TURNREWIND_CLASS_PREFIX}-dialog-button`
-  actions.appendChild(button)
+  actions.append(recoveryButton, button)
 
   card.append(title, intro, reasonLabel, reasonBox, actions)
   backdrop.appendChild(card)
@@ -81,7 +93,7 @@ function ensureDialog(): DialogElements {
       hide()
   })
 
-  dialog = { backdrop, title, intro, reasonLabel, reasonBox, button }
+  dialog = { backdrop, title, intro, reasonLabel, reasonBox, recoveryButton, button }
   return dialog
 }
 
@@ -93,7 +105,16 @@ export function disposeDialog(): void {
   dialog = undefined
 }
 
-/** 用当前活跃语言填充并显示弹窗。 */
+/** 注入恢复面板入口（apply() 装配层调用）：latest-owner-wins，返回撤销函数。 */
+export function setRecoveryOpener(next: (() => void) | null): () => void {
+  recoveryOpener = next
+  return () => {
+    if (recoveryOpener === next)
+      recoveryOpener = null
+  }
+}
+
+/** 用当前活跃语言填充并显示弹窗；reason 命中恢复围栏时附「恢复面板」入口。 */
 export function showDialog(t: (key: LocaleKey) => string, notices: UnsupportedNotice[]): void {
   const el = ensureDialog()
   el.title.textContent = t('dialogTitle')
@@ -101,6 +122,10 @@ export function showDialog(t: (key: LocaleKey) => string, notices: UnsupportedNo
   el.reasonLabel.textContent = t('dialogReason')
   el.reasonBox.textContent = notices.map(notice => notice.reason || notice.id).join('\n')
   el.button.textContent = t('dialogConfirm')
+  const underRecovery = notices.some(notice => notice.reason?.includes('TURNREWIND_RECOVERY_REQUIRED'))
+  el.recoveryButton.dataset.visible = underRecovery ? 'true' : 'false'
+  if (underRecovery)
+    el.recoveryButton.textContent = t('recoveryOpen')
   el.backdrop.dataset.visible = 'true'
 }
 

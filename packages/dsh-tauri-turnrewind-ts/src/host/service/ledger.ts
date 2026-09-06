@@ -311,6 +311,66 @@ export function listNeedsRecoveryWorkspaces(db: Ledger): string[] {
   `).all() as { workspace_key: string }[]).map(row => row.workspace_key)
 }
 
+/** 恢复面板行：一个被围 workspace 的 needs-recovery 操作明细。 */
+export interface RecoveryWorkspace {
+  workspace_key: string
+  workspace_path: string | null
+  operations: {
+    operation_id: string
+    kind: string
+    target_turn_id: string
+    requested_at: string
+    settled_at: string | null
+    error: string | null
+  }[]
+}
+
+/** 恢复面板数据源：按 workspace 分组的围栏明细（供 UI 与 recover 路由）。 */
+export function listRecoveryWorkspaces(db: Ledger): RecoveryWorkspace[] {
+  const rows = db.prepare(`
+    SELECT o.operation_id AS operation_id, o.kind AS kind, o.target_turn_id AS target_turn_id,
+           o.requested_at AS requested_at, o.settled_at AS settled_at, o.error AS error,
+           t.workspace_key AS workspace_key, w.workspace_path AS workspace_path
+    FROM operations o
+    JOIN turns t ON t.turn_id = o.target_turn_id
+    LEFT JOIN workspaces w ON w.workspace_key = t.workspace_key
+    WHERE o.outcome = 'needs-recovery'
+    ORDER BY COALESCE(o.settled_at, o.requested_at) DESC
+  `).all() as unknown as (RecoveryWorkspace['operations'][number] & { workspace_key: string, workspace_path: string | null })[]
+  const byWorkspace = new Map<string, RecoveryWorkspace>()
+  for (const row of rows) {
+    let entry = byWorkspace.get(row.workspace_key)
+    if (!entry) {
+      entry = { workspace_key: row.workspace_key, workspace_path: row.workspace_path, operations: [] }
+      byWorkspace.set(row.workspace_key, entry)
+    }
+    entry.operations.push({
+      operation_id: row.operation_id,
+      kind: row.kind,
+      target_turn_id: row.target_turn_id,
+      requested_at: row.requested_at,
+      settled_at: row.settled_at,
+      error: row.error,
+    })
+  }
+  return [...byWorkspace.values()]
+}
+
+/**
+ * 用户确认「已人工检查该 workspace」后解除恢复围栏：该 workspace 的全部
+ * needs-recovery 操作转为 recovery-acknowledged 终态。账本行保留审计；
+ * 围栏查询只认 needs-recovery，改写即解锁，重启清扫也不再触碰（它只扫
+ * applying）。返回改写行数。
+ */
+export function acknowledgeRecovery(db: Ledger, workspaceKey: string): number {
+  return Number(db.prepare(`
+    UPDATE operations SET outcome = 'recovery-acknowledged',
+      error = COALESCE(error, '') || ' [recovery acknowledged at ' || ? || ']'
+    WHERE outcome = 'needs-recovery'
+      AND target_turn_id IN (SELECT turn_id FROM turns WHERE workspace_key = ?)
+  `).run(new Date().toISOString(), workspaceKey).changes)
+}
+
 /**
  * P1-6：实时围栏查询。needs-recovery 可能发生在任意时刻（账本事务失败的
  * catch 路径），启动时加载的内存集合会过期——围栏判定一律查库。

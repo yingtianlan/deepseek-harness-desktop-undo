@@ -13,8 +13,9 @@ import { setCardTranslator, setSubmitLine } from './components/command-view'
 import { TURNREWIND_HTTP_BASE, TURNREWIND_LOCALE_NS, TURNREWIND_POLL_INTERVAL_MS, TURNREWIND_POLL_STOP_MS } from './constants'
 import { LOCALES } from './locales'
 import { registerCommandView } from './register/command-view'
-import { disposeDialog, listNotices, showDialog } from './register/dialog'
-import { mountCommandViewStyles, mountDialogStyles } from './styles'
+import { disposeDialog, listNotices, setRecoveryOpener, showDialog } from './register/dialog'
+import { disposeRecoveryDialog, openRecoveryDialog } from './register/recovery'
+import { mountCommandViewStyles, mountDialogStyles, mountRecoveryStyles } from './styles'
 import { createHeadsUpTracker, resolveSessionsService } from './utils/heads-up'
 import { parseUndoOutput, resolvePlanStatus } from './utils/parse'
 import { resolveOwnerSessionId } from './utils/session'
@@ -40,12 +41,16 @@ export function apply(ctx: ClientContext): void {
   // 样式挂载：css-render 对象树，apply 生命周期内挂载/卸载。
   ctx.effect(() => mountDialogStyles(), 'turnrewind dialog styles')
   ctx.effect(() => mountCommandViewStyles(), 'turnrewind command-view styles')
+  ctx.effect(() => mountRecoveryStyles(), 'turnrewind recovery styles')
 
   const t = (key: LocaleKey): string => {
     const active = locale.getLocale().active
     const dict = LOCALES[(active as 'zh' | 'en') in LOCALES ? (active as 'zh' | 'en') : 'zh']
     return dict[key]
   }
+
+  // 恢复面板入口：不可用弹窗在 reason 命中恢复围栏时展示「打开恢复面板」。
+  ctx.effect(() => setRecoveryOpener(() => openRecoveryDialog(t)), 'turnrewind recovery opener')
 
   // ————————————————— 命令卡片 slot 注册 —————————————————
   ctx.effect(() => registerCommandView(ctx), 'turnrewind command view')
@@ -134,6 +139,7 @@ export function apply(ctx: ClientContext): void {
     // 稳定后停掉轮询只留订阅驱动。
     controller.timeout(controller.interval(checkOnce, TURNREWIND_POLL_INTERVAL_MS), TURNREWIND_POLL_STOP_MS)
     controller.add(disposeDialog)
+    controller.add(disposeRecoveryDialog)
     return () => controller.dispose()
   }, 'turnrewind dialog runner')
 }
