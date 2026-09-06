@@ -10,9 +10,11 @@
 
 import type { RecoveryWorkspaceInfo, Translate } from '../types'
 import { TURNREWIND_CLASS_PREFIX, TURNREWIND_HTTP_BASE } from '../constants'
+import { bindModalA11y } from '../utils/modal-a11y'
 
 interface RecoveryElements {
   backdrop: HTMLDivElement
+  card: HTMLDivElement
   title: HTMLDivElement
   intro: HTMLDivElement
   list: HTMLDivElement
@@ -21,7 +23,7 @@ interface RecoveryElements {
 }
 
 let recovery: RecoveryElements | undefined
-let escapeHandler: ((event: KeyboardEvent) => void) | undefined
+let a11y: ReturnType<typeof bindModalA11y> | undefined
 
 function ensureRecoveryDialog(): RecoveryElements {
   if (recovery)
@@ -71,23 +73,20 @@ function ensureRecoveryDialog(): RecoveryElements {
     if (event.target === backdrop)
       hide()
   })
-  // P2-6（第一步）：Escape 关闭。listener 随 dispose 移除。
-  escapeHandler = (event: KeyboardEvent) => {
-    if (event.key === 'Escape' && backdrop.dataset.visible === 'true')
-      hide()
-  }
-  document.addEventListener('keydown', escapeHandler)
 
-  recovery = { backdrop, title, intro, list, error, closeButton }
+  recovery = { backdrop, card, title, intro, list, error, closeButton }
+  a11y = bindModalA11y(
+    () => recovery?.card ?? null,
+    () => recovery?.backdrop.dataset.visible === 'true',
+    hide,
+  )
   return recovery
 }
 
-/** 插件 stop/HMR 时整个子树与 Escape listener 一并移除。 */
+/** 插件 stop/HMR 时整个子树与 a11y listener 一并移除。 */
 export function disposeRecoveryDialog(): void {
-  if (escapeHandler) {
-    document.removeEventListener('keydown', escapeHandler)
-    escapeHandler = undefined
-  }
+  a11y?.release()
+  a11y = undefined
   if (!recovery)
     return
   recovery.backdrop.remove()
@@ -183,6 +182,7 @@ export function openRecoveryDialog(t: Translate): void {
   el.closeButton.textContent = t('recoveryClose')
   el.error.dataset.visible = 'false'
   el.backdrop.dataset.visible = 'true'
+  a11y?.takeFocus()
   void load(t, el.list).catch((error: unknown) => {
     showActionError(t, String((error as Error)?.message ?? error))
   })

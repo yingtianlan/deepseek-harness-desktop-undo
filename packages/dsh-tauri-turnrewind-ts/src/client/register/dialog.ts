@@ -11,6 +11,7 @@
 
 import type { LocaleKey } from '../locales'
 import { TURNREWIND_CLASS_PREFIX, TURNREWIND_STYLE_ID } from '../constants'
+import { bindModalA11y } from '../utils/modal-a11y'
 
 export interface UnsupportedNotice {
   id: string
@@ -25,9 +26,11 @@ interface DialogElements {
   reasonBox: HTMLDivElement
   recoveryButton: HTMLButtonElement
   button: HTMLButtonElement
+  card: HTMLDivElement
 }
 
 let dialog: DialogElements | undefined
+let a11y: ReturnType<typeof bindModalA11y> | undefined
 /** 恢复面板入口（apply() 注入）：reason 命中恢复围栏时展示。 */
 let recoveryOpener: (() => void) | null = null
 
@@ -93,12 +96,22 @@ function ensureDialog(): DialogElements {
       hide()
   })
 
-  dialog = { backdrop, title, intro, reasonLabel, reasonBox, recoveryButton, button }
+  const elements: DialogElements = { backdrop, title, intro, reasonLabel, reasonBox, recoveryButton, button, card }
+  a11y = bindModalA11y(
+    () => dialog?.card ?? null,
+    () => dialog?.backdrop.dataset.visible === 'true',
+    () => {
+      backdrop.dataset.visible = 'false'
+    },
+  )
+  dialog = elements
   return dialog
 }
 
 /** 插件 stop/HMR 时整个 backdrop 子树移除——listener 全部随之释放。 */
 export function disposeDialog(): void {
+  a11y?.release()
+  a11y = undefined
   if (!dialog)
     return
   dialog.backdrop.remove()
@@ -127,6 +140,7 @@ export function showDialog(t: (key: LocaleKey) => string, notices: UnsupportedNo
   if (underRecovery)
     el.recoveryButton.textContent = t('recoveryOpen')
   el.backdrop.dataset.visible = 'true'
+  a11y?.takeFocus()
 }
 
 /**
