@@ -154,6 +154,8 @@ export function UndoCommandView(props: CommandViewProps): React.ReactElement {
   // 无文件清单的输出（--doctor 报告、多行错误说明）走纯文本正文：
   // 否则这类卡片只剩第一行摘要，报告主体被整个吞掉。
   const plainLines = parsed.files.length === 0 ? text.replace(/^[^\n]*\n/u, '').split('\n') : []
+  // 静态报告行：永不重排/增删；id 预计算，避免 JSX key 直接引用数组下标。
+  const plainRows = plainLines.map((line, index) => ({ id: `${index}:${line}`, line }))
   const summary = parsed.summary || (state === 'error' ? tr('cardFailed') : state === 'running' ? tr('cardRunning') : tr('cardDone'))
 
   // 展开状态按命令持久化：用户折叠后刷新不重新展开。
@@ -348,12 +350,10 @@ export function UndoCommandView(props: CommandViewProps): React.ReactElement {
               key: file.path,
               className: `${TURNREWIND_CLASS_PREFIX}-panel-file`,
             }, React.createElement('span', { className: `${TURNREWIND_CLASS_PREFIX}-panel-file-change` }, file.change), React.createElement('span', null, file.path)))
-          : plainLines.map((line, index) => React.createElement('div', {
-              // 静态报告行：永不重排/增删，index 即稳定 key。
-              // eslint-disable-next-line react/no-array-index-key
-              key: index,
+          : plainRows.map(row => React.createElement('div', {
+              key: row.id,
               className: `${TURNREWIND_CLASS_PREFIX}-panel-textline`,
-            }, line === '' ? '\u00A0' : line)))
+            }, row.line === '' ? '\u00A0' : row.line)))
     : null,
   // 操作 footer：按钮在左；提交后结果贴左，预览提示靠右。
   showFooter
