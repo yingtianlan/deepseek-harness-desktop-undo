@@ -402,7 +402,7 @@ export interface NoticeMessage {
   source: {
     kind: 'plugin'
     plugin: string
-    form: 'rewind-notice' | 'undo-unavailable-notice'
+    form: 'rewind-notice' | 'undo-unavailable-notice' | 'rewind-privacy-notice'
     sections: { name: string, text: string }[]
   }
 }
@@ -428,6 +428,28 @@ function createRewindNoticeMessage(notice: { notice_id: string, kind?: string, t
   }
 }
 
+function createSensitiveNoticeMessage(notice: { notice_id: string, paths: string[] }): NoticeMessage {
+  const paths = notice.paths.map(path => `- ${path}`).join('\n')
+  const text = [
+    '[Turn rewind privacy notice]',
+    'These sensitive-looking files are NOT ignored by the repository\'s ignore rules, so they are captured into the private snapshot repo and restored by /undo:',
+    paths,
+    '',
+    'If that is not intended, add them to .gitignore or .git/info/exclude — the snapshot scope follows the repository\'s ignore rules on every capture.',
+  ].join('\n')
+  return {
+    id: `turnrewind-notice-${notice.notice_id}`,
+    role: 'user',
+    content: [{ type: 'text', text }],
+    source: {
+      kind: 'plugin',
+      plugin: PLUGIN_NAME,
+      form: 'rewind-privacy-notice',
+      sections: [{ name: PLUGIN_NAME, text }],
+    },
+  }
+}
+
 function createUnsupportedNoticeMessage(notice: { notice_id: string, reason: string | null }): NoticeMessage {
   const text = `[Turn rewind unavailable]\nUndo is disabled for this workspace.\nReason: ${notice.reason}\n\nTurns here still run normally, but their file changes are not recorded, so /undo cannot revert them. Move this session to a normal project directory if you want undoable turns.`
   return {
@@ -444,6 +466,8 @@ function createUnsupportedNoticeMessage(notice: { notice_id: string, reason: str
 }
 
 export function createNoticeMessage(notice: { notice_id: string, kind?: string, reason?: string | null, turns?: string[], target_turn_id?: string | null, paths?: string[] }): NoticeMessage {
+  if (notice.kind === 'sensitive-files')
+    return createSensitiveNoticeMessage({ notice_id: notice.notice_id, paths: notice.paths ?? [] })
   if (notice.kind === 'unsupported')
     return createUnsupportedNoticeMessage({ notice_id: notice.notice_id, reason: notice.reason ?? '' })
   return createRewindNoticeMessage({

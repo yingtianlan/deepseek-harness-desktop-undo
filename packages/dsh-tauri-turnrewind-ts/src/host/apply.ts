@@ -38,12 +38,14 @@ import {
   getPendingPlanStatus,
   getTurn,
   hasNeedsRecoveryWorkspace,
+  hasSensitiveNotice,
   insertTurn,
   listRecoveryWorkspaces,
   markPendingPlanApplied,
   markPendingPlanCancelled,
   openLedger,
   pruneConsumedNotices,
+  queueSensitiveNotice,
   recordSkippedTurn,
   registerWorkspace,
   releasePendingPlanClaim,
@@ -55,6 +57,7 @@ import {
 import { purgeWorkspace } from './service/maintenance'
 import { planDrift } from './service/planner'
 import { enforceRetention } from './service/retention'
+import { findUnignoredSensitiveFiles } from './service/sensitive'
 import { applyUndo, buildPlanEntries, executeUndoRestore, parseUndoInput, turnRefsExist, workspaceForAgent, workspaceHasActiveTurn, workspaceIssue, workspaceKeyFor } from './service/undo'
 import { acquireWorkspaceLockSync, withWorkspaceLock, WorkspaceLockBusyError } from './service/workspace-lock'
 
@@ -438,6 +441,18 @@ export function apply(ctx: HostApplyContext): void {
         if (disposed || runtime.disposed) {
           settleDeferred(baseline, { ok: false, reason: 'turnrewind plugin disposed during baseline capture' })
           return
+        }
+        // 敏感文件一次性提醒（P2-5 隐私面）：不持锁（扫描 + check-ignore 是
+        // 纯读），每会话+工作区只扫一次——已有提醒的会话直接跳过扫描。
+        if (!disposed && !runtime.disposed && !hasSensitiveNotice(ledger, sessionId, runtime.workspaceKey)) {
+          try {
+            const sensitive = await findUnignoredSensitiveFiles(runtime.workspaceDir)
+            if (sensitive.length > 0)
+              queueSensitiveNotice(ledger, sessionId, runtime.workspaceKey, sensitive)
+          }
+          catch (scanError) {
+            log.warn(`turnrewind: sensitive-file scan failed (ignored): ${String(scanError)}`)
+          }
         }
         settleDeferred(baseline, { ok: true })
       }

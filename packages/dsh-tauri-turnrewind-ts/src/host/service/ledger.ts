@@ -357,6 +357,42 @@ export function listNeedsRecoveryWorkspaces(db: Ledger): string[] {
   `).all() as { workspace_key: string }[]).map(row => row.workspace_key)
 }
 
+/**
+ * 敏感文件提醒的去重查询：每会话+工作区只发一条（kind 'sensitive-files'）。
+ * 独立导出：baselineTask 用它避免每 turn 都跑扫描。
+ */
+export function hasSensitiveNotice(db: Ledger, sessionId: string, workspaceKey: string): boolean {
+  return db.prepare(`
+    SELECT 1 FROM rewind_notices
+    WHERE session_id = ? AND workspace_key = ? AND kind = 'sensitive-files'
+    LIMIT 1
+  `).get(sessionId, workspaceKey) !== undefined
+}
+
+/** 写入敏感文件提醒（kind 'sensitive-files'，reason 携带文件清单）；重复为 no-op。 */
+export function queueSensitiveNotice(db: Ledger, sessionId: string, workspaceKey: string, files: string[]): boolean {
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    if (hasSensitiveNotice(db, sessionId, workspaceKey)) {
+      db.exec('COMMIT')
+      return false
+    }
+    db.prepare(`
+      INSERT INTO rewind_notices(notice_id, session_id, workspace_key, target_turn_id, turns_json, paths_json, kind, reason, status, created_at)
+      VALUES (?, ?, ?, 'workspace-sensitive', '[]', ?, 'sensitive-files', ?, 'pending', ?)
+    `).run(randomUUID(), sessionId, workspaceKey, JSON.stringify(capNoticePaths(files)), files.join('; '), new Date().toISOString())
+    db.exec('COMMIT')
+    return true
+  }
+  catch (error) {
+    try {
+      db.exec('ROLLBACK')
+    }
+    catch { /* no active transaction */ }
+    throw error
+  }
+}
+
 /** 恢复面板行：一个被围 workspace 的 needs-recovery 操作明细。 */
 export interface RecoveryWorkspace {
   workspace_key: string
