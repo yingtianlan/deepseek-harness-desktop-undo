@@ -10,8 +10,8 @@ import { COMMAND_VIEW_ID, COMMAND_VIEW_KEY, COMMAND_VIEW_SLOT } from '../constan
 
 interface SlotHost {
   slots: {
-    inject(slot: string, factory: () => () => void): () => void
-    register(options: { name: string, id: string, key: string }, component: unknown): () => void
+    inject: (slot: string, factory: () => () => void) => () => void
+    register: (options: { name: string, id: string, key: string }, component: unknown) => () => void
   }
 }
 

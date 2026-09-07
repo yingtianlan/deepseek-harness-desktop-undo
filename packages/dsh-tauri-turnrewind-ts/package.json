@@ -32,8 +32,8 @@
   "files": [
     "README.md",
     "cordis.patch.yml",
-    "purge-workspace.mjs",
-    "dist"
+    "dist",
+    "purge-workspace.mjs"
   ],
   "dsh": {
     "runtime": "host",

@@ -10,6 +10,9 @@
  *
  * 运行前请先停止对应的 DSH Host 进程；workspace 被占用时本命令会拒绝执行。
  */
+
+import process from 'node:process'
+// eslint-disable-next-line antfu/no-import-dist -- 本 CLI 的引擎就在构建产物里
 import { purgeWorkspace, resolveRootDir, WorkspaceLockBusyError } from './dist/index.js'
 
 const [target, ...args] = process.argv.slice(2)
@@ -22,12 +25,12 @@ const rootDir = resolveRootDir(homeIndex !== -1 ? args[homeIndex + 1] : undefine
 
 try {
   const summary = purgeWorkspace(rootDir, target)
-  console.log(`rootDir:    ${summary.rootDir}`)
-  console.log(`repoDir:    ${summary.repoDir} (${summary.repoExisted ? 'removed' : 'not present'})`)
+  console.warn(`rootDir:    ${summary.rootDir}`)
+  console.warn(`repoDir:    ${summary.repoDir} (${summary.repoExisted ? 'removed' : 'not present'})`)
   if (summary.ledger) {
-    console.log('ledger rows removed:')
+    console.warn('ledger rows removed:')
     for (const [table, count] of Object.entries(summary.ledger))
-      console.log(`  ${table}: ${count}`)
+      console.warn(`  ${table}: ${count}`)
   }
 }
 catch (error) {
