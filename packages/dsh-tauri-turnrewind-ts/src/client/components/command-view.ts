@@ -320,7 +320,8 @@ export function UndoCommandView(props: CommandViewProps): React.ReactElement {
   // P2-11 恢复面板可达性：/undo 错误里命中恢复围栏时，卡片直接给出
   // 「打开恢复面板」入口——弹窗种子逻辑会让历史提示不再重弹，如果只在
   // 弹窗里放入口，被围的用户可能永远到不了面板。
-  const underRecovery = state === 'error' && text.includes('TURNREWIND_RECOVERY_REQUIRED')
+  const underRecovery = (state === 'error' && text.includes('TURNREWIND_RECOVERY_REQUIRED'))
+    || Boolean(submitError?.includes('TURNREWIND_RECOVERY_REQUIRED'))
   const showFooter = actionable || submitting || resultText !== null || submitError !== null || submitted !== null || planStatus === 'applied' || planStatus === 'expired' || planStatus === 'cancelled' || underRecovery
 
   // 取消/过期折叠为无边框细行。
