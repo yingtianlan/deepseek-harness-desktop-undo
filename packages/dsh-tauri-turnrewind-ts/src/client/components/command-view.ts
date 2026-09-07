@@ -302,6 +302,11 @@ export function UndoCommandView(props: CommandViewProps): React.ReactElement {
     : tr('cancelAction')
   // plan 提交即置 applying：提示行不等轮询返回就切到等待态。
   const pendingWait = submitting || submitted === 'confirm' || planStatus === 'applying'
+  // P2-11 恢复面板可达性：/undo 错误里命中恢复围栏时，卡片直接给出
+  // 「打开恢复面板」入口——弹窗种子逻辑会让历史提示不再重弹，如果只在
+  // 弹窗里放入口，被围的用户可能永远到不了面板。
+  const underRecovery = (state === 'error' && text.includes('TURNREWIND_RECOVERY_REQUIRED'))
+    || Boolean(submitError?.includes('TURNREWIND_RECOVERY_REQUIRED'))
   const hint = submitError
     ? `${tr('confirmFailed')}${submitError}`
     : resultText || (planStatus === 'applied' || pendingWait
@@ -310,18 +315,15 @@ export function UndoCommandView(props: CommandViewProps): React.ReactElement {
         ? tr('planExpiredHint')
         : planStatus === 'gone'
           ? tr('planGoneHint')
-          : planStatus === 'cancelled' || submitted === 'cancel' ? tr('cancelled') : tr('previewHint'))
+          : planStatus === 'cancelled' || submitted === 'cancel'
+            ? tr('cancelled')
+            : underRecovery ? tr('recoveryHint') : tr('previewHint'))
   // 执行结果（成功/失败）靠左展示；「已提交，等待执行结果」与预览提示一样
   // 贴 footer 右缘——等执行结果落地（resultText/applied）再切到左侧。
   const hintLeft = Boolean(resultText || submitError || planStatus === 'applied')
   const hintCls = `${TURNREWIND_CLASS_PREFIX}-card-hint${submitError
     ? ` ${TURNREWIND_CLASS_PREFIX}-card-hint-error`
     : resultText || planStatus === 'applied' ? ` ${TURNREWIND_CLASS_PREFIX}-card-hint-ok` : ''}${hintLeft ? '' : ` ${TURNREWIND_CLASS_PREFIX}-card-hint-right`}`
-  // P2-11 恢复面板可达性：/undo 错误里命中恢复围栏时，卡片直接给出
-  // 「打开恢复面板」入口——弹窗种子逻辑会让历史提示不再重弹，如果只在
-  // 弹窗里放入口，被围的用户可能永远到不了面板。
-  const underRecovery = (state === 'error' && text.includes('TURNREWIND_RECOVERY_REQUIRED'))
-    || Boolean(submitError?.includes('TURNREWIND_RECOVERY_REQUIRED'))
   const showFooter = actionable || submitting || resultText !== null || submitError !== null || submitted !== null || planStatus === 'applied' || planStatus === 'expired' || planStatus === 'cancelled' || underRecovery
 
   // 取消/过期折叠为无边框细行。
