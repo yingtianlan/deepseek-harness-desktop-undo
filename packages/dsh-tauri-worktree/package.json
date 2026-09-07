@@ -35,10 +35,12 @@
     "client": {
       "inject": [
         "@deepseek-ai/dsh-client-ui-layout",
-        "dsh-tauri"
+        "dsh-tauri",
+        "dsh-tauri-ui"
       ],
       "external": [
-        "dsh-tauri/client"
+        "dsh-tauri/client",
+        "dsh-tauri-ui/client"
       ],
       "platform": "web"
     },
@@ -55,8 +57,10 @@
   },
   "dependencies": {
     "dsh-tauri": "workspace:*",
+    "dsh-tauri-ui": "workspace:*",
     "hookable": "catalog:utils",
-    "pathe": "catalog:utils"
+    "pathe": "catalog:utils",
+    "simple-git": "catalog:utils"
   },
   "devDependencies": {
     "dsh-tauri-tsdown": "workspace:*",

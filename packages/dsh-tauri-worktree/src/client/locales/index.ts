@@ -42,6 +42,7 @@ const DICT_ZH = {
   progressViewLogs: '日志',
   progressThinking: '正在思考…',
   progressError: '工作树处理失败',
+  progressDeleting: '正在删除工作树',
   branchPlaceholder: 'dsh/feature-xyz',
   logEmpty: '暂无创建日志',
   sessionWorkingTreeBadge: '工作树',
@@ -74,6 +75,7 @@ const DICT_EN: Record<LocaleKey, string> = {
   progressViewLogs: 'Logs',
   progressThinking: 'Thinking…',
   progressError: 'Worktree processing failed',
+  progressDeleting: 'Deleting worktree',
   branchPlaceholder: 'dsh/feature-xyz',
   logEmpty: 'No creation log yet',
   sessionWorkingTreeBadge: 'Worktree',
@@ -89,7 +91,7 @@ export const localeRev = createExternalStore({ rev: 0 })
  * 在 apply 里安装：注册本插件的双语字典，并桥接 locale 变更到 rev。
  * @param ctx - 客户端根上下文（须已注入 locale 服务）。
  */
-export function installLocale(ctx: ClientContext): void {
+export function registerLocale(ctx: ClientContext): void {
   activeLocale = ctx.locale.getLocale().active
   ctx.locale.register(NS, 'zh', DICT_ZH)
   ctx.locale.register(NS, 'en', DICT_EN)

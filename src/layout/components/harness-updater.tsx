@@ -11,14 +11,16 @@ export function HarnessUpdater() {
   useWatch([updateInfo, updating], () => {
     if (!updateInfo || updating)
       return
-    // 高于 rc.2 时先弹破坏性更改确认，取消则不提示更新（不进入下载）
-    void showAfterConfirm(updateInfo.tag)
+    // 仅提示新版本，不打断用户；破坏性更改确认推迟到点击「立即更新」时（见 handleUpdate）
+    store.harnessUpdater.showToast(() => handleUpdate())
   }, { immediate: true })
 
-  async function showAfterConfirm(tag: string) {
-    if (!(await confirmCoreBreaking(tag)))
+  /** 点击「立即更新」：目标版本高于 rc.2 时先弹破坏性更改确认，取消则中止更新 */
+  async function handleUpdate() {
+    const info = store.harnessUpdater.updateInfo
+    if (!info || !(await confirmCoreBreaking(info.tag)))
       return
-    store.harnessUpdater.showToast()
+    await store.harnessUpdater.handleUpdate()
   }
 
   return holder

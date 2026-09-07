@@ -1,6 +1,6 @@
 [package]
 name = "deepseek-harness-desktop"
-version = "0.10.2"
+version = "0.11.0-beta.5"
 description = "Desktop application for DeepSeek Harness (dsh)"
 authors = [ "deepseek-harness-desktop contributors" ]
 edition = "2021"
@@ -23,13 +23,13 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [
   "tray-icon",
   "image-png",
-  "devtools"
+  "devtools",
+  "macos-private-api"
 ] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-store = "2"
-tauri-plugin-clipboard-manager = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-autostart = "2"
 image = { version = "0.25", default-features = false, features = [ "png" ] }
@@ -54,6 +54,7 @@ reqwest = { version = "0.12", features = [
   "json",
   "stream"
 ] }
+rdev = "0.5.3"
 zip = "0.6"
 futures-util = "0.3"
 flate2 = "1"
@@ -74,6 +75,12 @@ objc2-foundation = { version = "=0.3.2", default-features = false, features = [
   "NSObject",
   "NSProcessInfo",
 ] }
+# CGEventTap 直监听：绕开 rdev 0.5.3 在 macOS 上对 KeyPress 事件无条件调
+# TSMGetInputSourceProperty（必须 main queue）导致的 dispatch_assert_queue SIGTRAP。
+# 见 issue #397。core-graphics / core-foundation 在 rdev 传递依赖里已有，
+# 不引入新的下载源。
+core-graphics = "0.25"
+core-foundation = "0.9"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -89,8 +96,11 @@ windows-sys = { version = "0.61", features = [
   "Win32_Security",
   "Win32_Storage_FileSystem",
   "Win32_System_Environment",
+  "Win32_System_IO",
+  "Win32_System_Ioctl",
   "Win32_System_Pipes",
   "Win32_System_Registry",
+  "Win32_System_SystemServices",
   "Win32_System_Threading",
   "Win32_System_Time",
   "Win32_UI_WindowsAndMessaging",

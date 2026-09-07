@@ -5,13 +5,13 @@
  * turn/end（apply 里的 session:turn-end 钩子），保证 seed 是完整会话日志。
  */
 
-import type { HostContext, PendingHandoff, PluginConfig } from '../types/index.js'
+import type { HostContext, PendingHandoff, PluginConfig } from '../types'
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join } from 'pathe'
-import { checkoutToLocal, ensureWorktree } from '../service/operation.js'
-import { resolveProjectPath } from '../service/session.js'
-import { loadBindingSync } from '../storage/index.js'
+import { checkoutToLocal, ensureWorktree } from '../service/operation'
+import { resolveProjectPath } from '../service/session'
+import { loadBindingSync } from '../storage'
 
 /** 文本渲染助手：渲染成模型可见文本。 */
 function textBlock(text: string): Array<{ type: 'text', text: string }> {

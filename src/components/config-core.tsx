@@ -9,6 +9,7 @@ import { If } from 'react-if-lite'
 import { useCoreBreakingConfirm } from '@/hooks/use-core-breaking-confirm'
 import { store } from '@/store'
 import { compareVersions } from '@/utils/core-version'
+import { silence } from '@/utils/silence'
 import { toast } from '@/utils/toast'
 import { useDshCores } from '../hooks/use-dsh-cores'
 import { DownloadCoreDialog } from './download-core-dialog'
@@ -106,7 +107,8 @@ export function ConfigCore() {
         ),
       })
     }
-    catch {
+    catch (e) {
+      silence(e, 'core switch: dialog cancelled')
       return
     }
     try {
@@ -122,8 +124,8 @@ export function ConfigCore() {
         await store.harness.restart()
         toast.close(key)
       }
-      catch {
-        // 重启失败已由应用错误态呈现，这里静默吞掉以免重复弹错。
+      catch (e) {
+        silence(e, 'core switch: restart failure already shown by app error state')
       }
     }
     catch (err) {
@@ -183,7 +185,8 @@ export function ConfigCore() {
         confirmText: t('core.uninstall'),
       })
     }
-    catch {
+    catch (e) {
+      silence(e, 'core switch: dialog cancelled')
       return
     }
     try {

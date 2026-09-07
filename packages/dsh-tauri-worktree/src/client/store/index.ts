@@ -2,26 +2,25 @@ import type {
   WorktreeSessionState,
   WorktreeUiState,
 } from '../types'
-import { createExternalStore, createLocalStorage } from 'dsh-tauri/client'
+import { createExternalStore, createStorage, localStorageDriver } from 'dsh-tauri/client'
 /**
  * store/index.ts — dsh-tauri-worktree 的共享客户端状态（per-session 工作树状态 + 偏好）。
  *
  * 桌面壳四个注册条目（select / surface / dialog / session）是同一
  * 插件的多个独立槽位，凭一个模块级 SnapshotStore 共享按会话缓存的工作树状态。
- * 任何条目把某会话的 state 写入 store，其余条目订阅渲染；所有后端调用集中在
- * apis/client.ts（ofetch 客户端，/api/dsh-worktree/*），与宿主侧的 HTTP 路由一一对应。
+ * 变更动作（检出/放弃 + job 轮询）在 service/actions.ts，自动交接编排在
+ * service/handoff.ts；本文件只保留状态源、订阅与偏好持久化。
  *
- * 新会话偏好（local/pending）经 dsh-tauri/client 的 createLocalStorage（unstorage
+ * 新会话偏好（local/pending）经 dsh-tauri/client 的 createStorage + localStorageDriver（unstorage
  * localStorage driver，base 拼 `base:` 前缀防串扰，兼容旧 key）持久化，apply 时
  * hydrate 一次缓存到模块级；写入即改即存。客户端依赖统一由 dsh-tauri 加载，本包
  * 不再直接 import unstorage。
  */
 import { useSyncExternalStore } from 'react'
 import { WORKTREE_PLUGIN_NAME } from '../../shared/constants'
-import { checkoutWorktree, discardWorktree } from '../apis'
 
-/** 偏好存储（unstorage localStorage driver，base 由 driver 拼 `base:` 前缀防串扰，兼容旧 key）。 */
-const prefsStorage = createLocalStorage(WORKTREE_PLUGIN_NAME)
+/** 插件范围内 key-value 存储（unstorage localStorage driver，base 由 driver 拼 `base:` 前缀防串扰，兼容旧 key）。 */
+const storage = createStorage({ driver: localStorageDriver({ base: WORKTREE_PLUGIN_NAME }) })
 
 const PREFERRED_MODE_KEY = 'preferred-mode'
 /** 模块级偏好缓存；未被 hydrate 前保持官方默认「本地」。 */
@@ -34,7 +33,7 @@ export async function hydratePreferredMode(): Promise<void> {
     return
   prefsHydrated = true
   try {
-    preferredMode = (await prefsStorage.getItem(PREFERRED_MODE_KEY)) === 'pending' ? 'pending' : 'local'
+    preferredMode = (await storage.getItem(PREFERRED_MODE_KEY)) === 'pending' ? 'pending' : 'local'
   }
   catch {
     /* 存储不可用（隐私模式等）不影响会话功能 */
@@ -48,21 +47,8 @@ export function preferredNewSessionMode(): 'local' | 'pending' {
 
 export function rememberNewSessionMode(mode: 'local' | 'pending'): void {
   preferredMode = mode
-  void prefsStorage.setItem(PREFERRED_MODE_KEY, mode).catch(() => {})
+  void storage.setItem(PREFERRED_MODE_KEY, mode).catch(() => {})
 }
-
-/** 从 unknown 错误里取可展示文本。 */
-function errMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
-
-export {
-  attachWorktreeSession,
-  checkoutWorktree,
-  createWorktree,
-  discardWorktree,
-  fetchStatus,
-} from '../apis'
 
 /** 无绑定会话的初始状态。 */
 export function blankState(): WorktreeSessionState {
@@ -121,57 +107,4 @@ export function useWorktreeSession(sessionId: string | undefined): WorktreeSessi
   )
 }
 
-// ---------------------------------------------------------------------------
-// 变更动作（rpc + store 合并语义）
-// ---------------------------------------------------------------------------
-
-/** 检出本地（弹窗确认后调用）。 */
-export async function applyCheckout(
-  sessionId: string,
-  worktreeHashDirname: string,
-  branchName: string,
-): Promise<{ ok: boolean, error?: string, targetSessionId?: string }> {
-  try {
-    const result = await checkoutWorktree(sessionId, worktreeHashDirname, branchName)
-    patchSession(sessionId, {
-      mode: 'local',
-      phase: 'idle',
-      loadingLabel: '',
-      log: [],
-      worktreeKey: '',
-      checkoutOpen: false,
-      error: '',
-    })
-    return { ok: true, targetSessionId: result.targetSessionId }
-  }
-  catch (error) {
-    patchSession(sessionId, { error: errMessage(error) })
-    return { ok: false, error: errMessage(error) }
-  }
-}
-
-/** 放弃更改（弹窗确认后调用）。 */
-export async function applyDiscard(
-  sessionId: string,
-  worktreeHashDirname: string,
-): Promise<{ ok: boolean, error?: string }> {
-  try {
-    await discardWorktree(sessionId, worktreeHashDirname)
-    patchSession(sessionId, {
-      mode: 'local',
-      phase: 'idle',
-      loadingLabel: '',
-      log: [],
-      worktreeKey: '',
-      abandonOpen: false,
-      error: '',
-    })
-    return { ok: true }
-  }
-  catch (error) {
-    patchSession(sessionId, { error: errMessage(error) })
-    return { ok: false, error: errMessage(error) }
-  }
-}
-
-export type { WorktreeCheckout, WorktreeCreate, WorktreeStatus, WorktreeUiState } from '../types'
+export type { WorktreeCheckout, WorktreeCreate, WorktreeDiscard, WorktreeStatus, WorktreeUiState } from '../types'

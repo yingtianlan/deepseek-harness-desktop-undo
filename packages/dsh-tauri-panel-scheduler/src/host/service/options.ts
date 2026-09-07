@@ -9,7 +9,7 @@
  * 能力探测约定：所有可选服务「探测后调用」，缺失即返回空，绝不断言存在。
  */
 
-import type { HostContext, ModelCatalogFailure, ModelOption, PermissionOption, SchedulerOptions } from '../types/index.js'
+import type { HostContext, ModelCatalogFailure, ModelOption, PermissionOption, SchedulerOptions } from '../types'
 
 /** 收集工作区列表：遍历 workspaceRegistry 的记录（id + path）。无法枚举时返回空数组。 */
 async function collectWorkspaces(ctx: HostContext): Promise<SchedulerOptions['workspaces']> {
@@ -21,8 +21,8 @@ async function collectWorkspaces(ctx: HostContext): Promise<SchedulerOptions['wo
     if (!Array.isArray(records))
       return []
     return records
-      .filter((record: unknown): record is { id?: unknown, path?: unknown, title?: unknown } =>
-        typeof record === 'object' && record !== null && typeof record.id === 'string')
+      .filter((record: unknown): record is { id: string, path?: unknown, title?: unknown } =>
+        typeof record === 'object' && record !== null && 'id' in record && typeof record.id === 'string')
       .map(record => ({
         id: record.id,
         path: typeof record.path === 'string' ? record.path : record.id,
@@ -49,7 +49,7 @@ function collectPermissions(ctx: HostContext): { permissions: PermissionOption[]
     const names = Array.isArray(presets?.names) ? presets.names : []
     if (names.length === 0)
       return { permissions: [], defaultPermission: 'read-only' }
-    const permissions = names.map(name => presets.optionOf?.(name) ?? { value: name, name })
+    const permissions = names.map(name => presets?.optionOf?.(name) ?? { value: name, name })
     const defaultPermission = typeof presets?.defaultPreset === 'string' && presets.defaultPreset
       ? presets.defaultPreset
       : (names[0] ?? 'read-only')
@@ -131,7 +131,7 @@ async function collectModels(ctx: HostContext): Promise<{ models: ModelOption[],
         })
       }
     }
-    const defaultModel = current === null
+    const defaultModel = current == null
       ? (found[0] ?? null)
       : (found.find(item => item.provider === current.provider && item.model === current.model) ?? found[0] ?? null)
     return { models: found, failures, defaultModel }

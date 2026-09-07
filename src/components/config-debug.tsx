@@ -97,11 +97,17 @@ export function ConfigDebug() {
     }
   }
 
-  /** 「存在新版本」：先按 rc.2 破坏性更改确认（高于 rc.2 则先拦截），再展示更新提示 */
-  async function handleShowNewVersion() {
-    if (updateInfo && !(await confirmCoreBreaking(updateInfo.tag)))
+  /** 「存在新版本」：直接展示更新提示；破坏性更改确认推迟到点击「立即更新」时 */
+  function handleShowNewVersion() {
+    store.harnessUpdater.showToast(() => handleUpdate())
+  }
+
+  /** 点击「立即更新」：目标版本高于 rc.2 时先弹破坏性更改确认，取消则中止更新 */
+  async function handleUpdate() {
+    const info = store.harnessUpdater.updateInfo
+    if (!info || !(await confirmCoreBreaking(info.tag)))
       return
-    store.harnessUpdater.showToast()
+    await store.harnessUpdater.handleUpdate()
   }
 
   const { mutate: onClearLogs } = useMutation({
@@ -376,8 +382,8 @@ export function ConfigDebug() {
             </Select.Trigger>
             <Select.Popover className="rounded-md">
               <ListBox>
-                <ListBox.Item className="rounded-md min-h-8!" id="zh-CN" textValue="中文">中文</ListBox.Item>
-                <ListBox.Item className="rounded-md min-h-8!" id="en-US" textValue="English">English</ListBox.Item>
+                <ListBox.Item className="rounded-md min-h-8!" id="zh-CN" textValue={t('ui.languages.zh')}>{t('ui.languages.zh')}</ListBox.Item>
+                <ListBox.Item className="rounded-md min-h-8!" id="en-US" textValue={t('ui.languages.en')}>{t('ui.languages.en')}</ListBox.Item>
               </ListBox>
             </Select.Popover>
           </Select>

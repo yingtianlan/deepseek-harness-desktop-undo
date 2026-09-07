@@ -2,8 +2,8 @@
  * utils/schedule.ts — 计划描述与下次运行时间的展示格式化（纯函数）。
  *
  * 时间格式化委托 date-fns（format / differenceIn*），替换手写的 Intl 与差值算法；
- * 单位文案仍走 t() 以支持 zh/en 双语。date-fns 由 dsh-tauri/client 承载导出，
- * 本插件 client 不直接 import 外部依赖（见 AGENTS.plugins.md 客户端依赖约定）。
+ * 单位文案仍走 t() 以支持 zh/en 双语。date-fns 由 dsh-tauri/client 承载并在构建期
+ * 按使用导出 tree-shake 内联，本插件 client 不直接 import 外部依赖。
  */
 
 import type { ScheduleForm, Translate, Weekday } from '../types'
@@ -22,10 +22,18 @@ const WEEKDAY_LABELS: Record<Weekday, string> = {
 /** 把计划渲染成人类可读描述（与 ASCII 卡片一致：每天 09:00 / 间隔 30 分 / 工作日 09:00 / 星期五 09:00）。 */
 export function describeSchedule(schedule: ScheduleForm, t: Translate): string {
   switch (schedule.kind) {
+    case 'once':
+      return `${t('scheduleOnce')} ${formatLocalTime(schedule.at) ?? schedule.at}`
+    case 'hourly':
+      return `${t('scheduleHourly')} :${String(schedule.minute).padStart(2, '0')}`
     case 'daily':
       return `${t('scheduleDaily')} ${schedule.time}`
     case 'interval':
       return `${t('scheduleInterval')} ${schedule.everyMinutes}${t('minuteShort')}`
+    case 'monthly':
+      return `${t('scheduleMonthly')} ${schedule.day} ${schedule.time}`
+    case 'custom':
+      return `${t('scheduleCustom')} ${schedule.everyDays}${t('dayShort')} ${schedule.time}`
     case 'workdays':
       return `${t('scheduleWorkdays')} ${schedule.time}`
     case 'weekly':

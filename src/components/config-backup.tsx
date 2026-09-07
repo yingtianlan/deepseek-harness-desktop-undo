@@ -6,6 +6,7 @@ import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { If } from 'react-if-lite'
 import { store } from '@/store'
+import { silence } from '@/utils/silence'
 import { toast } from '@/utils/toast'
 import { useBackups } from '../hooks/use-backup'
 import { Item } from './item'
@@ -22,7 +23,8 @@ function formatSize(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)}`
 }
 
-/** 轮询 health check 确认 DSH 服务已真正停止，避免文件锁冲突。
+/**
+ * 轮询 health check 确认 DSH 服务已真正停止，避免文件锁冲突。
  *  - 使用剩余 timeout 约束 in-flight 的 probe，防止无限挂起
  *  - 仅当 health check 明确失败（非 transient 错误）时才视为已停止
  *  - 超时后继续执行（shutdown 可能仍在进行中）
@@ -80,7 +82,8 @@ export function ConfigBackup({ onBack }: ConfigBackupProps) {
         ),
       })
     }
-    catch {
+    catch (e) {
+      silence(e, 'backup: dialog cancelled')
       return
     }
     // 先停止 DSH 服务（释放 profile 目录的文件锁）
@@ -129,7 +132,8 @@ export function ConfigBackup({ onBack }: ConfigBackupProps) {
         ),
       })
     }
-    catch {
+    catch (e) {
+      silence(e, 'backup: dialog cancelled')
       return
     }
     try {
@@ -155,7 +159,8 @@ export function ConfigBackup({ onBack }: ConfigBackupProps) {
         confirmText: t('backup.delete'),
       })
     }
-    catch {
+    catch (e) {
+      silence(e, 'backup: dialog cancelled')
       return
     }
     try {

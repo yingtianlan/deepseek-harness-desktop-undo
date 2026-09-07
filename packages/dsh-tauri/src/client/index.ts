@@ -4,7 +4,8 @@
  * 共享工具（供各插件 client 导入 `dsh-tauri/client`）：
  *   - compat / resolveStartSession：Alpha ↔ rc.2 服务布局适配；
  *   - store：框架无关 SnapshotStore（uSES 安全）；
- *   - http：ofetch 统一 JSON 客户端（requestJson / createJsonClient）；
+ *   - fetch：ofetch 统一 JSON 客户端（错误解析内置，唯一导出）；
+ *   - storage：unstorage createStorage / localStorageDriver；
  *   - controller：hookable 生命周期控制器（observer/timer/listener 收敛）；
  *   - CssRender：css-render 样式树（各插件 mount*Styles 使用）。
  */
@@ -19,18 +20,17 @@ export const inject = PLUGIN_INJECT
 export * from './apis'
 export { apply } from './apply'
 export * from './controller'
+export { invokeBridgedTauri } from './service/invoke'
 export * from './storage'
 export * from './store'
+
 export type * from './types'
 
 export type { ClientContext } from './types'
 export { compat, resolveStartSession } from './utils/compat'
 export { CssRender } from 'css-render'
 
-/**
- * date-fns（客户端时间格式化）由 dsh-tauri 承载并内联进其 client bundle；
- * 插件 client 禁止直接 import 'date-fns'，一律从本 barrel（`dsh-tauri/client`）导入。
- */
+/** 仅构建期 tree-shake 内联所用导出；date-fns 不进入 release production 资源闭包。 */
 export { differenceInDays, differenceInHours, differenceInMinutes, format } from 'date-fns'
 
 export { createHooks } from 'hookable'

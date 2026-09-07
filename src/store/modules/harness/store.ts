@@ -465,6 +465,32 @@ export const harness = defineStore({
       this.fail(error.message, undefined, undefined, undefined, !result.notOwned)
     },
 
+    /**
+     * iframe 内官方 boot 失败页上报（dsh://plugin-boot:failed）：
+     * 立即把壳层切到错误界面并展示失败页文本（如 `web boot: 1 entry did not
+     * activate`），同时尝试从日志定位问题插件弹出修复界面。
+     */
+    async handleIframeBootFailure(detail?: string) {
+      const message = detail && detail.includes('Failed to load plugins')
+        ? detail
+        : i18next.t('errors.client_boot_failed')
+      const error = await attachStartupDiagnostics(new Error(message))
+      // 失败页文本是最直接的证据，优先作为日志行参与插件定位（pending 行正则
+      // 可命中 `dsh-tauri-rightclick: pending (waiting for service: remote.session)`）
+      const lines = [
+        ...(detail ? detail.split(/\n/) : []),
+        ...(error.logLines ?? error.logs ?? []),
+      ]
+      await this.reviewStartupRecovery(lines)
+      this.fail(
+        error.message,
+        error.logs,
+        error.pluginConflictHint,
+        error.inotifyLimitHint,
+        this.serviceRunning,
+      )
+    },
+
     /** 安装进度流：只前进不后退，供首次安装/手动更新共用 */
     async listenInstallProgress(): Promise<UnlistenFn> {
       return listen<InstallProgress>('install-progress', (e) => {
@@ -816,8 +842,10 @@ export const harness = defineStore({
       }
     },
 
-    /** 从快照还原并继续检测：优先用单插件快照还原问题插件（优先级高于卸载）；
-     * 仅对传入的（确有快照的）插件还原，单项失败不阻断其它项。还原成功后重启并重新检测。 */
+    /**
+     * 从快照还原并继续检测：优先用单插件快照还原问题插件（优先级高于卸载）；
+     * 仅对传入的（确有快照的）插件还原，单项失败不阻断其它项。还原成功后重启并重新检测。
+     */
     async restoreAndRedetect(ids: readonly string[]) {
       if (this.recovery.busy || ids.length === 0)
         return
@@ -880,6 +908,26 @@ export const harness = defineStore({
           this.busyAction = null
         }
       })
+    },
+
+    /**
+     * 进入安全模式：切到 safe 档案（仅核心 bundles、无用户插件）并重启服务。
+     * 启动失败的插件（如 pending waiting for service）被隔离，应用先恢复可用；
+     * 用户在档案列表切回原档案即退出安全模式。
+     */
+    async enterSafeMode() {
+      if (this.busyAction)
+        return
+      try {
+        await invoke('enter_safe_mode')
+      }
+      catch (err) {
+        console.error('[Harness] enter safe mode failed:', err)
+        const error = await attachStartupDiagnostics(err)
+        this.fail(error.message, error.logs, error.pluginConflictHint, error.inotifyLimitHint)
+        return
+      }
+      await this.restart()
     },
 
     /** 停止服务并回到停止态界面 */

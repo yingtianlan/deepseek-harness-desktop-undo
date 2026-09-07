@@ -88,10 +88,20 @@ const MAX_ALLOW_LIST_RETRIES: usize = 8;
 /// 一次随机失败就让整个安装放弃——`link:` 依赖没有写入 profile `package.json`，
 /// 下次启动又判定 `dep_ok=false` 而重装，形成不可恢复的启动死循环（issue #264）。
 /// 该失败是「刚重建的 reparse point 落定 / 实时杀软扫刚写入路径」的瞬时态，重跑
-/// 同一 `dsh plugin add`（间隔 [`TRANSIENT_FS_RETRY_DELAY`]）即可越过。
-const TRANSIENT_FS_RETRIES: usize = 3;
-/// 瞬时文件系统错误的重试间隔：等待 reparse point 落定、杀软结束扫描后再重试。
-const TRANSIENT_FS_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
+/// 同一 `dsh plugin add` 即可越过。首启期间杀软可能持续占用新文件，短暂的固定重试
+/// 窗口不足以覆盖扫描时间，因此使用指数退避扩大到约两分钟的恢复窗口。
+const TRANSIENT_FS_RETRIES: usize = 8;
+/// 瞬时文件系统错误的首次重试延迟；后续延迟按指数增长，最多 64 秒。
+const TRANSIENT_FS_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
+fn transient_fs_retry_delay(retry: usize) -> std::time::Duration {
+    let seconds = TRANSIENT_FS_RETRY_DELAY
+        .as_secs()
+        .checked_shl(retry.saturating_sub(1) as u32)
+        .unwrap_or(64)
+        .min(64);
+    std::time::Duration::from_secs(seconds)
+}
 
 pub async fn install(app_handle: &AppHandle, ids: &[String]) -> Result<(), String> {
     install_with_cancel(app_handle, ids, None, new_process_owner()).await
@@ -124,6 +134,7 @@ async fn install_with_cancel(
         presets.iter().map(|p| (p.id.as_str(), p)).collect();
 
     let mut specs = Vec::with_capacity(ids.len());
+    let mut needs_git = false;
     for id in ids {
         let preset = preset_map
             .get(id.as_str())
@@ -150,7 +161,26 @@ async fn install_with_cancel(
             preset,
             bundled_dir_of(app_handle, preset),
         )?);
+        // 规范化后 `git+...` 前缀即 git 托管依赖：pnpm 安装时需要实际可用的 git
+        // （见下方预检）；npm 包名（如 `dshmarket`）与 `link:` 本地依赖无需 git。
+        if raw.starts_with("git+") {
+            needs_git = true;
+        }
         specs.push(shell_quote_spec(&raw));
+    }
+
+    // git 托管插件安装前预检（issue #369）：Linux/macOS 完全依赖系统 git（不在
+    // 空白 Windows 自动配置范围，`config::git_runtime_ready` 非 Windows 恒真），
+    // 系统缺 git 时 `pnpm spawn git` 直接 ENOENT，用户只看到裸错误 + 误导性的
+    // allowBuilds 提示。启动子进程前实际探测 git 可执行能否运行，缺失时给出
+    // 可读失败原因与修复指引，而不是等 pnpm 装到一半才失败。
+    if needs_git && !env::git_available(app_handle) {
+        return Err(
+            "GIT_NOT_FOUND: selected plugins include git-hosted dependencies, but no usable git \
+             was found on this system. Install git (e.g. Debian/Ubuntu: `sudo apt install git`; \
+             macOS: `brew install git`) or uncheck those plugins and retry."
+                .to_string(),
+        );
     }
 
     // 确保 pnpm/dsh shim 存在
@@ -439,9 +469,10 @@ async fn run_plugin_install_with_transient_retry(
             && is_transient_fs_install_failure(exit_code, &output)
         {
             attempt += 1;
+            let delay = transient_fs_retry_delay(attempt);
             log::warn!(
                 "dsh plugin {action} hit a transient filesystem error (exit code {exit_code}); \
-                 retrying ({attempt}/{TRANSIENT_FS_RETRIES})"
+                 retrying ({attempt}/{TRANSIENT_FS_RETRIES}) after {delay:?}"
             );
             let _ = window.emit(
                 PREINSTALL_LOG_EVENT,
@@ -451,7 +482,7 @@ async fn run_plugin_install_with_transient_retry(
                     ),
                 },
             );
-            tokio::time::sleep(TRANSIENT_FS_RETRY_DELAY).await;
+            tokio::time::sleep(delay).await;
             continue;
         }
         return Ok((exit_code, output));
@@ -509,6 +540,13 @@ mod tests {
         assert!(is_transient_fs_install_failure(1, output));
         // `[unknown]` / `unknown error` 大小写不敏感
         assert!(is_transient_fs_install_failure(1, &output.to_ascii_lowercase()));
+    }
+
+    #[test]
+    fn transient_fs_retry_delay_uses_exponential_backoff() {
+        assert_eq!(transient_fs_retry_delay(1), std::time::Duration::from_secs(1));
+        assert_eq!(transient_fs_retry_delay(2), std::time::Duration::from_secs(2));
+        assert_eq!(transient_fs_retry_delay(8), std::time::Duration::from_secs(64));
     }
 
     #[test]
