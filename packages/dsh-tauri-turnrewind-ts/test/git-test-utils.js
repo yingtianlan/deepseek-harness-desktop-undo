@@ -1,6 +1,17 @@
 import { Buffer } from 'node:buffer'
 import { spawn } from 'node:child_process'
+import { realpathSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
+import { resolve } from 'pathe'
+
+/**
+ * macOS 上 /var → /private/var 的 symlink 导致 mkdtemp 返回的路径与
+ * git --show-toplevel 返回的路径不同。测试比较路径时统一走 realpath
+ * + pathe resolve 归一化。
+ */
+export function resolvedRealPath(p) {
+  return resolve(realpathSync(p))
+}
 
 export function runGit(cwd, args) {
   return new Promise((resolvePromise, rejectPromise) => {

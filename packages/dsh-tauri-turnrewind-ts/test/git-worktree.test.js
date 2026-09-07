@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'pathe'
 import { it } from 'vitest'
 import { captureSnapshot, createSnapshotStore, gitRef, restorePath, stateAt } from '../src/host/service/git-snapshot'
-import { commitAll, gitOutput, initGitWorkspace, runGit } from './git-test-utils.js'
+import { commitAll, gitOutput, initGitWorkspace, resolvedRealPath, runGit } from './git-test-utils.js'
 
 it('isolates linked worktrees of one repository into separate snapshot stores', async () => {
   const root = await mkdtemp(join(tmpdir(), 'turnrewind-worktree-test-'))
@@ -23,8 +23,8 @@ it('isolates linked worktrees of one repository into separate snapshot stores', 
 
     // Two worktrees of one repository are two snapshot domains, not one.
     assert.notEqual(mainStore.repoDir, linkedStore.repoDir)
-    assert.equal(mainStore.workspaceDir, resolve(main))
-    assert.equal(linkedStore.workspaceDir, resolve(linked))
+    assert.equal(mainStore.workspaceDir, resolvedRealPath(main))
+    assert.equal(linkedStore.workspaceDir, resolvedRealPath(linked))
 
     const beforeStatus = await gitOutput(main, ['status', '--porcelain=v1', '-z'])
     const beforeLinkedStatus = await gitOutput(linked, ['status', '--porcelain=v1', '-z'])

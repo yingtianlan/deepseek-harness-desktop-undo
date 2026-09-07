@@ -5,7 +5,7 @@ import { join } from 'pathe'
 import { it } from 'vitest'
 import { captureSnapshot, classifyPathChange, createSnapshotStore, currentState, diffAgainstDisk, gitAvailable, probeWorkspace, restorePath, snapshotDiff, snapshotFileDiff, stateAt, workspaceKey } from '../src/host/service/git-snapshot'
 import { completeUndoTransaction, createOperation, getLatestTurn, insertTurn, openLedger, settleInterruptedTurn, settleTurn } from '../src/host/service/ledger'
-import { initGitWorkspace } from './git-test-utils.js'
+import { initGitWorkspace, resolvedRealPath } from './git-test-utils.js'
 
 it('persists entry mode in snapshots and restores the executable bit', async () => {
   const root = await mkdtemp(join(tmpdir(), 'turnrewind-mode-test-'))
@@ -360,7 +360,7 @@ it('accepts Git worktrees and rejects ordinary directories', async () => {
     await mkdir(plain, { recursive: true })
     const tracked = probeWorkspace(workspace)
     assert.equal(tracked.ok, true)
-    assert.equal(tracked.workspaceDir, workspace)
+    assert.equal(tracked.workspaceDir, resolvedRealPath(workspace))
     const rejected = probeWorkspace(plain)
     assert.equal(rejected.ok, false)
     assert.match(rejected.reason, /GIT_REQUIRED/u)

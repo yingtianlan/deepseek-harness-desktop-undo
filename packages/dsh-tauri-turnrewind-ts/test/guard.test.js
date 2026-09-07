@@ -5,7 +5,7 @@ import { dirname, join, parse, resolve } from 'pathe'
 import { it } from 'vitest'
 import { createSnapshotStore, probeWorkspace } from '../src/host/service/git-snapshot'
 import { isSystemSensitiveWorkspace } from '../src/host/service/guard'
-import { initGitWorkspace } from './git-test-utils.js'
+import { initGitWorkspace, resolvedRealPath } from './git-test-utils.js'
 
 it('refuses the home directory, its ancestors, and drive roots', () => {
   assert.equal(isSystemSensitiveWorkspace(homedir()), true)
@@ -39,7 +39,7 @@ it('accepts an ordinary Git worktree', async () => {
     await writeFile(join(workspace, 'a.txt'), 'a')
     const probe = probeWorkspace(workspace)
     assert.equal(probe.ok, true)
-    assert.equal(probe.workspaceDir, resolve(workspace))
+    assert.equal(probe.workspaceDir, resolvedRealPath(workspace))
   }
   finally {
     await rm(root, { recursive: true, force: true })
@@ -59,7 +59,7 @@ it('canonicalizes a session cwd below the worktree root to the Git root', async 
     // worktree: it must not become a second snapshot domain.
     const probe = probeWorkspace(nested)
     assert.equal(probe.ok, true)
-    assert.equal(probe.workspaceDir, resolve(workspace))
+    assert.equal(probe.workspaceDir, resolvedRealPath(workspace))
 
     const nestedStore = createSnapshotStore(join(root, 'data'), nested)
     const rootStore = createSnapshotStore(join(root, 'data'), workspace)

@@ -9,7 +9,7 @@
 import type { GitWorkspaceInfo } from '../types'
 import { Buffer } from 'node:buffer'
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
 import process from 'node:process'
 import { resolve } from 'pathe'
 import { SYNC_GIT_TIMEOUT_MS } from '../constants'
@@ -75,13 +75,29 @@ const REV_PARSE_ARGS = [
   'info/exclude',
 ]
 
+/** realpathSync 安全包装：路径不存在时原样返回。macOS 上 /var → /private/var 的 symlink 在这里归一。pathe resolve 统一正斜杠。 */
+function safeRealpath(p: string): string {
+  try {
+    return resolve(realpathSync(p))
+  }
+  catch {
+    return resolve(p)
+  }
+}
+
 function resolveInfo(requestedDir: string, stdout: string): GitWorkspaceInfo | undefined {
   const lines = stdout.split(/\r?\n/u).filter(line => line.trim() !== '')
   if (lines.length < 6 || lines[0] !== 'true')
     return undefined
-  const workspaceRoot = resolve(requestedDir, lines[1]!)
-  const resolvedGitDir = resolve(requestedDir, lines[2]!)
-  const resolvedCommonDir = resolve(requestedDir, lines[3]!)
+  // P2-11: macOS 上 /var → /private/var 的 symlink 会让两次调用（一次用
+  // mkdtemp 路径、一次用 realpath 后的 store.workspaceDir）产生不同字符串
+  // 的 gitDir —— ensureRepository 的恒等检查会永远失败。所有绝对路径统一
+  // 通过 realpathSync 归一化 symlink 差异，保证同一 workspace 的两次调用
+  // 产生完全一致的路径。--git-dir 等 relative path 以 requestedDir（git
+  // 运行的 CWD）为 base 解析。
+  const workspaceRoot = safeRealpath(resolve(requestedDir, lines[1]!))
+  const resolvedGitDir = safeRealpath(resolve(requestedDir, lines[2]!))
+  const resolvedCommonDir = safeRealpath(resolve(requestedDir, lines[3]!))
   const resolvedIndex = resolve(requestedDir, lines[4]!)
   const resolvedInfoExclude = resolve(requestedDir, lines[5]!)
   if (!existsSync(workspaceRoot) || !existsSync(resolvedGitDir) || !existsSync(resolvedCommonDir))

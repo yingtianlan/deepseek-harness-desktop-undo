@@ -46,7 +46,7 @@ it('expires turns beyond the retention count, keeping the most recent', async ()
   const workspace = await makeWorkspace(root, 'ws')
   const db = openLedger(join(root, 'ledger'))
   const store = createSnapshotStore(join(root, 'data'), workspace)
-  seedTurns(db, workspaceKey(workspace), 5)
+  seedTurns(db, workspaceKey(store.workspaceDir), 5)
   process.env.TURNREWIND_RETAIN_TURNS = '3'
 
   const result = enforceRetention(db, store, { maxSnapshotMb: 1024 })
@@ -70,7 +70,7 @@ it('rebuilds the snapshot repository when it exceeds the size cap', async () => 
   const workspace = await makeWorkspace(root, 'ws')
   const db = openLedger(join(root, 'ledger'))
   const store = createSnapshotStore(join(root, 'data'), workspace)
-  seedTurns(db, workspaceKey(workspace), 2)
+  seedTurns(db, workspaceKey(store.workspaceDir), 2)
   // Simulate a bloated snapshot repo (the size walk reads the real directory).
   await mkdir(join(store.repoDir, 'objects'), { recursive: true })
   await writeFile(join(store.repoDir, 'objects', 'blob'), Buffer.alloc(2 * 1024 * 1024, 1))
@@ -106,7 +106,7 @@ it('keeps everything when under both limits', async () => {
   const workspace = await makeWorkspace(root, 'ws')
   const db = openLedger(join(root, 'ledger'))
   const store = createSnapshotStore(join(root, 'data'), workspace)
-  seedTurns(db, workspaceKey(workspace), 3)
+  seedTurns(db, workspaceKey(store.workspaceDir), 3)
   process.env.TURNREWIND_RETAIN_TURNS = '10'
   process.env.TURNREWIND_MAX_SNAPSHOT_MB = '1024'
 
