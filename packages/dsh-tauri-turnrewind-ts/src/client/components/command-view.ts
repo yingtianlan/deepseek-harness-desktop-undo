@@ -11,6 +11,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { TURNREWIND_CLASS_PREFIX, TURNREWIND_HTTP_BASE, TURNREWIND_POLL_INTERVAL_MS } from '../constants'
 import { LOCALES } from '../locales'
 import { parseUndoOutput, resolvePlanStatus } from '../utils/parse'
+import { openRecoveryPanel } from '../utils/recovery-opener'
 import { resolveOwnerSessionId } from '../utils/session'
 
 // ------------------------------------------------------------------
@@ -316,7 +317,11 @@ export function UndoCommandView(props: CommandViewProps): React.ReactElement {
   const hintCls = `${TURNREWIND_CLASS_PREFIX}-card-hint${submitError
     ? ` ${TURNREWIND_CLASS_PREFIX}-card-hint-error`
     : resultText || planStatus === 'applied' ? ` ${TURNREWIND_CLASS_PREFIX}-card-hint-ok` : ''}${hintLeft ? '' : ` ${TURNREWIND_CLASS_PREFIX}-card-hint-right`}`
-  const showFooter = actionable || submitting || resultText !== null || submitError !== null || submitted !== null || planStatus === 'applied' || planStatus === 'expired' || planStatus === 'cancelled'
+  // P2-11 恢复面板可达性：/undo 错误里命中恢复围栏时，卡片直接给出
+  // 「打开恢复面板」入口——弹窗种子逻辑会让历史提示不再重弹，如果只在
+  // 弹窗里放入口，被围的用户可能永远到不了面板。
+  const underRecovery = state === 'error' && text.includes('TURNREWIND_RECOVERY_REQUIRED')
+  const showFooter = actionable || submitting || resultText !== null || submitError !== null || submitted !== null || planStatus === 'applied' || planStatus === 'expired' || planStatus === 'cancelled' || underRecovery
 
   // 取消/过期折叠为无边框细行。
   if (collapsed) {
@@ -356,17 +361,25 @@ export function UndoCommandView(props: CommandViewProps): React.ReactElement {
             }, row.line === '' ? '\u00A0' : row.line)))
     : null,
   // 操作 footer：按钮在左；提交后结果贴左，预览提示靠右。
+  // 恢复围栏态（错误输出含 TURNREWIND_RECOVERY_REQUIRED）：footer 只放
+  // 「打开恢复面板」入口，指向宿主注入的恢复面板。
   showFooter
     ? React.createElement('div', {
         className: `${TURNREWIND_CLASS_PREFIX}-card-actions`,
-      }, actionable || submitting
+      }, underRecovery
+        ? React.createElement('button', {
+            type: 'button',
+            onClick: () => { openRecoveryPanel() },
+            className: `${TURNREWIND_CLASS_PREFIX}-card-confirm`,
+          }, tr('recoveryOpen'))
+        : null, (!underRecovery && (actionable || submitting))
         ? React.createElement('button', {
             type: 'button',
             onClick: () => { void submit('confirm') },
             disabled: submitting || submitted !== null,
             className: `${TURNREWIND_CLASS_PREFIX}-card-confirm${submitting ? ` ${TURNREWIND_CLASS_PREFIX}-card-busy` : ''}`,
           }, confirmLabel)
-        : null, actionable || submitting
+        : null, (!underRecovery && (actionable || submitting))
         ? React.createElement('button', {
             type: 'button',
             onClick: () => { void submit('cancel') },
