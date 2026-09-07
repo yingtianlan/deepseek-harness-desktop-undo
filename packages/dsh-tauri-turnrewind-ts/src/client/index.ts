@@ -19,6 +19,7 @@ import { mountCommandViewStyles, mountDialogStyles, mountRecoveryStyles } from '
 import { setRecoveryOpener } from './utils/recovery-opener'
 import { createHeadsUpTracker, resolveSessionsService } from './utils/heads-up'
 import { parseUndoOutput, resolvePlanStatus } from './utils/parse'
+import { setRecoveryOpener } from './utils/recovery-opener'
 import { resolveOwnerSessionId } from './utils/session'
 
 export { TURNREWIND_API_PREFIX } from '../shared/constants'
