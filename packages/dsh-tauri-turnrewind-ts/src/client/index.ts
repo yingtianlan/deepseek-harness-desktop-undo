@@ -54,7 +54,9 @@ export function apply(ctx: ClientContext): void {
   ctx.effect(() => setRecoveryOpener(() => openRecoveryDialog(t)), 'turnrewind recovery opener')
 
   // ————————————————— 命令卡片 slot 注册 —————————————————
-  ctx.effect(() => registerCommandView(ctx), 'turnrewind command view')
+  // ctx 的类型是 ClientContext（结构上满足 SlotHost 但类型系统可能看不到
+  // slots 属性——cordis 版本差异），运行时 guarantee slots 存在。
+  ctx.effect(() => registerCommandView(ctx as unknown as Parameters<typeof registerCommandView>[0]), 'turnrewind command view')
 
   // ————————————————— locale 安装 —————————————————
   ctx.effect(() => {
