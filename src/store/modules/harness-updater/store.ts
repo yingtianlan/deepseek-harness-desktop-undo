@@ -22,9 +22,9 @@ export const harnessUpdater = defineStore({
     async checkForUpdate() {
       try {
         const info = await invoke<DshUpdateInfo | null>('check_dsh_update')
-        if (info) {
-          this.updateInfo = info
-        }
+        // 后端返回 null 表示没有可推送的更新（包括高于推荐版本的最新版本），
+        // 必须清空旧提示，避免调试页继续显示已经被策略拦截的更新。
+        this.updateInfo = info
       }
       catch (err) {
         console.warn('[Harness] update check skipped:', err)
@@ -79,7 +79,12 @@ export const harnessUpdater = defineStore({
       this.updateInfo = null
     },
 
-    showToast() {
+    /**
+     * 展示「发现新版本」提示条。
+     * onUpdate 由调用方（持有破坏性更改确认弹窗的组件）注入：点击「立即更新」时
+     * 先确认（高于 rc.2 则弹框），确认后才真正安装；未注入时回退为直接更新。
+     */
+    showToast(onUpdate?: () => void) {
       if (!this.updateInfo)
         return
       toast(t('update.available', { tag: this.updateInfo.tag }), {
@@ -87,7 +92,10 @@ export const harnessUpdater = defineStore({
           children: t('update.now'),
           onPress: () => {
             toast.clear()
-            void this.handleUpdate()
+            if (onUpdate)
+              void onUpdate()
+            else
+              void this.handleUpdate()
           },
           variant: 'tertiary',
         },

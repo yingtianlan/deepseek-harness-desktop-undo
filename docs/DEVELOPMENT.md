@@ -33,9 +33,9 @@ cargo check
 cargo test
 ```
 
-For Developer ID signing, notarization, and the required GitHub Actions secrets, see [macOS signing and notarization](./MACOS_SIGNING.md).
+For Developer ID signing, notarization, and the required GitHub Actions secrets, see [macOS signing and notarization](./spec/MACOS_SIGNING.md).
 
-To add a new built-in (internal) plugin bundled with the app, see [Built-in (Internal) Plugins](./BUILTIN_PLUGINS.md).
+To add a new built-in (internal) plugin bundled with the app, see [Built-in (Internal) Plugins](./spec/BUILTIN_PLUGINS.md).
 
 ## Tips
 

@@ -39,10 +39,11 @@ fn windows_drag_browser_args() -> &'static str {
 
 /// setup app
 pub fn setup(app_handle: tauri::AppHandle) {
-    // 升级清理：内部插件资源已迁至 resources/internal-plugins；旧安装可能保留
-    // resources/preset-plugins 目录。仅删除旧目录，失败告警并继续启动。
+    // 升级清理：内置插件已迁至 resources/node_modules（pnpm deploy 产物）；旧安装
+    // 可能残留 resources/preset-plugins 与 resources/internal-plugins 目录。仅删除
+    // 旧目录，失败告警并继续启动（查找回退见 preset::find_bundled_in_root）。
     if let Err(e) = crate::service::plugin::remove_legacy_bundled_plugins(&app_handle) {
-        log::warn!("legacy preset plugins cleanup skipped: {e}");
+        log::warn!("legacy bundled plugins cleanup skipped: {e}");
     }
 
     // 启动前清扫上次崩溃残留的孤儿 Harness（端口/PID 双重确认，见
@@ -65,6 +66,11 @@ pub fn setup(app_handle: tauri::AppHandle) {
     if let Err(e) = crate::service::migrate::heal_stale_pnpm_metadata(&dsh_home) {
         log::warn!("pnpm modules metadata self-heal skipped: {e}");
     }
+
+    // 首装档案引导：桌面端首次安装时，在任何 dsh 启动/插件操作之前新建独立的
+    // Desktop 档案并切换（与 CLI 用户既有插件/补丁隔离，见 service::profile）。
+    // 必须先于 scheduler/auto_start：引导失败时它们回落 web 档案的老行为。
+    crate::service::profile::ensure_first_run_desktop_profile(&app_handle);
 
     // 启动进程监控（tick 检测 dsh 服务状态）
     crate::service::scheduler::start(&app_handle);
@@ -221,6 +227,13 @@ pub fn install_macos_menu(app: &tauri::AppHandle<Wry>) -> tauri::Result<()> {
         true,
         None::<&str>,
     )?;
+    let restart = MenuItem::with_id(
+        app,
+        "desktop-restart",
+        crate::config::i18n::t("menu.restart"),
+        true,
+        None::<&str>,
+    )?;
     let check_update = MenuItem::with_id(
         app,
         "desktop-check-update",
@@ -241,7 +254,7 @@ pub fn install_macos_menu(app: &tauri::AppHandle<Wry>) -> tauri::Result<()> {
         "desktop-help-menu",
         crate::config::i18n::t("menu.help"),
         true,
-        &[&run_logs, &check_update, &help_separator, &about],
+        &[&run_logs, &restart, &check_update, &help_separator, &about],
     )?;
 
     // 编辑菜单：macOS 设置了主菜单后，⌘X/⌘C/⌘V/⌘A 等组合键会先经菜单的
@@ -359,7 +372,11 @@ pub fn build_main_window(app: &tauri::AppHandle<Wry>) -> tauri::Result<tauri::We
             directory
         })
         // WebView2 原生非客户区可直接接收触摸输入；同时禁用会抢占手势的弹性滚动。
-        .additional_browser_args(windows_drag_browser_args());
+        .additional_browser_args(windows_drag_browser_args())
+        // Windows 任务栏图标来源：窗口 .icon() > 可执行文件嵌入资源 > 系统默认。
+        // 未调用 .icon() 时任务栏显示系统默认图标；显式设置 default_window_icon
+        // 以在任务栏呈现与应用品牌一致的图标（macOS 用 TitleBar 无需此设置）。
+        .icon(app.default_window_icon().unwrap().clone())?;
 
     // macOS 保留原生交通灯：绿色按钮由 AppKit 进入独立 Space 的原生全屏，
     // 同时用 Overlay 让 44px 壳层导航栏继续与窗口 chrome 融合。其他平台
@@ -499,6 +516,7 @@ pub fn handler() -> impl Fn(Invoke<Wry>) -> bool + Send + Sync + 'static {
         crate::bridge::launch_harness,
         crate::bridge::shutdown_harness,
         crate::bridge::restart_harness,
+        crate::bridge::enter_safe_mode,
         crate::bridge::get_dsh_status,
         crate::bridge::get_preinstall_plugins,
         crate::bridge::get_preinstall_pending,
@@ -512,6 +530,13 @@ pub fn handler() -> impl Fn(Invoke<Wry>) -> bool + Send + Sync + 'static {
         crate::bridge::refresh_plugin_updates,
         crate::bridge::update_dsh_plugin,
         crate::bridge::remove_dsh_plugin,
+        crate::bridge::disable_dsh_plugin,
+        crate::bridge::enable_dsh_plugin,
+        crate::bridge::snapshot_plugin,
+        crate::bridge::snapshot_plugins,
+        crate::bridge::get_plugin_backup,
+        crate::bridge::restore_plugin,
+        crate::bridge::delete_plugin_backup,
         crate::bridge::report_plugin_error,
         crate::bridge::detect_plugin_recovery,
         crate::bridge::recover_plugin,
@@ -519,6 +544,11 @@ pub fn handler() -> impl Fn(Invoke<Wry>) -> bool + Send + Sync + 'static {
         crate::bridge::create_profile,
         crate::bridge::set_active_profile,
         crate::bridge::remove_profile,
+        crate::bridge::clone_profile,
+        crate::bridge::backup_profile,
+        crate::bridge::restore_profile,
+        crate::bridge::list_backups,
+        crate::bridge::delete_backup,
         crate::bridge::get_cores,
         crate::bridge::set_active_core,
         crate::bridge::download_core,
@@ -551,48 +581,148 @@ pub fn handler() -> impl Fn(Invoke<Wry>) -> bool + Send + Sync + 'static {
         crate::bridge::get_desktop_about,
         crate::bridge::open_external_url,
         crate::bridge::read_clipboard_image,
+        crate::bridge::write_clipboard_text,
         crate::desktop::notification::show_native_notification,
         crate::bridge::log_frontend,
+        crate::bridge::get_pet_status,
+        crate::bridge::set_pet_enabled,
+        crate::bridge::set_active_pet,
+        crate::bridge::set_pet_size,
+        crate::bridge::push_pet_session,
+        crate::bridge::move_pet_window,
+        crate::bridge::show_pet,
+        crate::bridge::hide_pet,
+        crate::bridge::set_pet_ignore_cursor_events,
+        crate::bridge::list_pets,
+        crate::bridge::import_pet,
+        crate::bridge::get_pet_asset,
+        crate::bridge::preset_pet::get_preset_pet_config,
+        crate::bridge::preset_pet::get_preset_pet_assets,
+        crate::bridge::list_preset_pets,
+        crate::bridge::download_preset_pet,
+        crate::bridge::update_preset_pet,
+        crate::bridge::get_preset_download_progress,
+        crate::desktop::pet_mouse::start_pet_mouse_stream,
     ]
 }
 
 // configure tauri builder
 pub fn builder() -> tauri::Builder<tauri::Wry> {
     let builder = tauri::Builder::default()
+        .manage(crate::desktop::pet_mouse::PetMouseStreamState::default())
+        .register_asynchronous_uri_scheme_protocol("dsh-pet", |context, request, responder| {
+            let app = context.app_handle().clone();
+            let label = context.webview_label().to_owned();
+            std::thread::spawn(move || {
+                responder.respond(crate::bridge::preset_pet::preset_pet_asset_response(&app, &label, request));
+            });
+        })
         .setup(|app| {
             let app_handle = app.handle().clone();
+            // 首装检测必须最先执行：窗口几何恢复/退出保存等任何 store 写入都会
+            // 创建 store 文件，判定晚于它们会把首装误判为升级（见
+            // config::detect_first_install 的时序说明）。
+            crate::config::detect_first_install(&app_handle);
             build_main_window(&app_handle)?;
             #[cfg(target_os = "macos")]
             install_macos_menu(&app_handle)?;
             tray(&app_handle)?;
+            // 桌宠窗口：按「是否启用」设置惰性创建/显示（幂等）。
+            crate::desktop::pet::init_pet_window(&app_handle);
             setup(app_handle.clone());
+            // 方案 1（host → rust → pet）：Rust 作为宿主会话增量 SSE 流的消费者，
+            // 不再依赖 iframe 的 invoke 桥转发（#396 根因）。断连自动重连。
+            crate::bridge::pet::spawn_pet_session_stream(app_handle.clone());
             Ok(())
         })
         .on_menu_event(|app, event| match event.id().as_ref() {
             "desktop-config"
             | "desktop-about"
             | "desktop-copy-run-logs"
-            | "desktop-check-update" => {
+            | "desktop-check-update"
+            | "desktop-restart" => {
                 if let Err(error) = app.emit("macos-menu-action", event.id().as_ref()) {
                     log::warn!("[menu] failed to emit macOS menu action: {error}");
                 }
             }
             _ => {}
         })
-        // 点击关闭按钮时隐藏到托盘而不是退出程序
+        // 关闭行为由设置项 `setting.close_action` 控制（D-08 / D-09）：
+        // - quit：关窗即完整退出进程，不驻留托盘、不切 Accessory；
+        // - tray（默认）：阻止关闭，应用级 hide（Cmd+H 语义）并切 Accessory 隐藏 Dock。
+        // 退出分支**故意不加** `#[cfg(target_os = "macos")]` 门控 —— 「关闭窗口＝
+        // 退出应用」是用户可选项，语义上应当三平台一致，不是 macOS 专属；而
+        // `activation::on_window_hidden` 仅在 macOS 上有实现，故它保留 macOS 门控。
+        // 点击关闭按钮时按设置决定：隐藏到托盘驻留，还是完整退出程序
         .on_window_event(|window, event| match event {
             tauri::WindowEvent::CloseRequested { api, .. } => {
+                if window.label() == crate::desktop::pet::PET_WINDOW_LABEL {
+                    api.prevent_close();
+                    let _ = window.hide();
+                    return;
+                }
+                // get_store_dat_setting 内部已归一化，取值只可能是 tray 或 quit
+                let close_action =
+                    crate::config::get_store_dat_setting(&window.app_handle()).close_action;
+                if close_action == crate::desktop::activation::CLOSE_ACTION_QUIT {
+                    // 不 prevent_close、不 hide：直接退出。app.exit(0) 会走
+                    // RunEvent::ExitRequested，既有的几何保存逻辑照常触发
+                    window.app_handle().exit(0);
+                    return;
+                }
                 api.prevent_close();
+                // macOS 上隐藏不能用窗口级 orderOut（window.hide()）：应用隐藏
+                // 最后一个窗口后会被系统在 ~1.5s 后发 quit Apple Event 终止
+                // （macOS 26/27 对「无可见窗口」应用的回收行为）。正确顺序：
+                // 先切 Accessory（此时窗口仍可见，避免 Accessory 下 show 的
+                // tauri #5122 问题），再用应用级 hide（Cmd+H 语义）—— 系统不会
+                // 回收 hide: 隐藏的应用。恢复路径见 utils::show_main_window 的
+                // app.show()（unhide）配对。
+                #[cfg(target_os = "macos")]
+                {
+                    crate::desktop::activation::on_window_hidden(window, &close_action);
+                    if let Err(error) = window.app_handle().hide() {
+                        // 应用级 hide 失败（理论不发生）时**保持窗口可见**：
+                        // 窗口级 hide() 是 orderOut，会落入 macOS 26/27 对
+                        // 「无可见窗口」应用的 ~1.5s quit 回收 —— 比可见窗口
+                        // 更糟。可见窗口是严格更安全的降级态。
+                        // 同时回退到 Regular 策略：on_window_hidden 已切到 Accessory，
+                        // hide 失败意味着应用实际未隐藏，若不恢复 Regular 会丢失 Dock
+                        // 与 Cmd-Tab 入口。
+                        // hide 失败意味着应用仍停留在 Accessory（on_window_hidden
+                        // 已提前切过去），可见窗口配合消失的 Dock/⌘-Tab 会让用户
+                        // 无法将应用拉回前台，故这里必须切回 regular 恢复 Dock。
+                        crate::desktop::activation::set_regular_policy(window.app_handle());
+                        log::error!("[activation] APP_HIDE_FAILED: {error}");
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
                 let _ = window.hide();
             }
             // 移动/缩放主窗口时记录几何，重启后据此恢复（见 config::window_state）
-            tauri::WindowEvent::Moved(_) => {
-                crate::config::save_geometry(window);
+            tauri::WindowEvent::Moved(_) => match window.label() {
+                label if label == crate::desktop::pet::PET_WINDOW_LABEL => {
+                    crate::desktop::pet::save_pet_window_geometry(window);
+                }
+                _ => crate::config::save_geometry(window),
+            },
+            tauri::WindowEvent::ScaleFactorChanged { .. } => {
+                if window.label() == crate::desktop::pet::PET_WINDOW_LABEL {
+                    crate::desktop::pet::apply_pet_size(&window.app_handle());
+                }
             }
             tauri::WindowEvent::Resized(_) => {
-                crate::config::save_geometry(window);
+                match window.label() {
+                    label if label == crate::desktop::pet::PET_WINDOW_LABEL => {
+                        crate::desktop::pet::save_pet_window_geometry(window);
+                    }
+                    _ => crate::config::save_geometry(window),
+                }
                 #[cfg(target_os = "macos")]
                 sync_macos_fullscreen_menu(window);
+                // 退出全屏后补做全屏期间被推迟的 Accessory 切换
+                #[cfg(target_os = "macos")]
+                crate::desktop::activation::on_window_resized(window);
             }
             _ => {}
         });
@@ -625,6 +755,4 @@ pub fn builder() -> tauri::Builder<tauri::Wry> {
         .plugin(tauri_plugin_fs::init())
         // Simple Store plugin
         .plugin(tauri_plugin_store::Builder::new().build())
-        // Clipboard plugin
-        .plugin(tauri_plugin_clipboard_manager::init())
 }

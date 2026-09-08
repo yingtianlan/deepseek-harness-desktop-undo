@@ -6,8 +6,8 @@
 
 use crate::config;
 use crate::logger;
+use crate::service::core;
 use tauri::AppHandle;
-use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_opener::OpenerExt;
 
 /// 健康检查（通过 Rust 代理，避免 WebView CORS 问题）
@@ -21,7 +21,9 @@ pub async fn proxy_health_check(app_handle: AppHandle) -> Result<String, String>
 #[tauri::command]
 pub async fn get_runtime_info(app_handle: AppHandle) -> Result<config::RuntimeInfo, String> {
     let port = config::get_store_dat_setting(&app_handle).port;
-    Ok(config::runtime_info(&app_handle, port))
+    let mut info = config::runtime_info(&app_handle, port);
+    info.dsh_version = core::active_version(&app_handle).or(info.dsh_version);
+    Ok(info)
 }
 
 /// 在系统浏览器中打开 Harness 界面
@@ -35,13 +37,14 @@ pub async fn open_in_browser(app_handle: AppHandle) -> Result<(), String> {
 }
 
 /// 复制 Harness 服务地址到剪贴板
+///
+/// 走 `bridge::clipboard::write_clipboard_text`（惰性短期 `arboard` 句柄），规避
+/// Linux Wayland 合成器不支持 data-control 时 `tauri-plugin-clipboard-manager`
+/// 单例剪贴板导致的崩溃/挂死（同「复制日志」）。
 #[tauri::command]
 pub async fn copy_service_url(app_handle: AppHandle) -> Result<(), String> {
     let url = config::get_dsh_service_url(config::get_store_dat_setting(&app_handle).port);
-    app_handle
-        .clipboard()
-        .write_text(url)
-        .map_err(|e| e.to_string())
+    crate::bridge::write_clipboard_text(url).await
 }
 
 /// 在系统文件管理器中定位指定文件（Session 日志下载完成后的"在文件夹中显示"）
@@ -193,7 +196,8 @@ pub async fn read_run_logs(app_handle: AppHandle) -> Result<String, String> {
     };
 
     // 环境信息：桌面端应用版本、dsh 发行版本、Node 版本与系统平台/架构，便于报障时快速定位环境差异
-    let dsh_version = config::get_dsh_version(&app_handle)
+    let dsh_version = core::active_version(&app_handle)
+        .or_else(|| config::get_dsh_version(&app_handle))
         .map(|v| format!("dsh: {v}\n"))
         .unwrap_or_default();
     let env_text = format!(

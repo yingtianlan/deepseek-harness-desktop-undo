@@ -1,6 +1,6 @@
 node_modules
-.pnpm-store
 dist
+.build-plugins-tmp
 src-tauri/target
 src-tauri/gen
 src-tauri/resources/node
@@ -13,9 +13,11 @@ src-tauri/resources/internal-plugins/
 *.local
 .env
 .tmp
+.temp/
 release-msi-version.tmp.json
 skills
 .serena
-.cargo/config.toml
+# 参考源码克隆（如 source/dsh-automation），不作为本仓库内容提交
 source/
 .gitmodules
+.tmp-alpha-inspect

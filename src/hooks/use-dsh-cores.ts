@@ -25,6 +25,11 @@ export interface HarnessCore {
   active: boolean
   /** 是否预览版（GitHub Pre-release label 或 tag 命名判定）：预览版不参与更新提示，仅列表展示 */
   preview: boolean
+  /** 是否高于 resources/version-recommend.json 中的推荐版本 */
+  aboveRecommended: boolean
+  /** 本地存在但 pkg 仓库已不再提供的历史槽位 */
+  orphaned: boolean
+  recommendedVersion: string | null
   error?: string | null
 }
 
@@ -106,9 +111,9 @@ export function useDshCores(): UseDshCoresResult {
     loading: isLoading,
     error: error ? String(error) : '',
     setActiveCore: async (id) => {
-      const activated = await activate.mutateAsync(id)
-      await refetch()
-      return activated
+      // 激活后由 restart 完成时统一失效核心查询；这里不等待联网列表重拉，
+      // 避免 setting 已切换但旧服务仍运行期间人为扩大竞态窗口。
+      return activate.mutateAsync(id)
     },
     downloadCore: async (tag) => {
       const core = await download.mutateAsync(tag)

@@ -1,9 +1,12 @@
-import { CircleExclamation } from '@gravity-ui/icons'
+import { CircleExclamation, ShieldCheck } from '@gravity-ui/icons'
 import { Button, Chip, Description, Spinner } from '@heroui/react'
+import { invoke } from '@tauri-apps/api/core'
+import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { If } from 'react-if-lite'
 import { useStore } from 'valtio-define'
 import { store } from '@/store'
+import { silence } from '@/utils/silence'
 
 /** 插件异常修复界面最多自动提示的次数（与 store 的 MAX_RECOVERY_ATTEMPTS 一致） */
 const MAX_RECOVERY_ATTEMPTS = 3
@@ -34,6 +37,39 @@ export function PluginRecovery({ fullScreen = false }: { fullScreen?: boolean })
   const { t } = useTranslation()
   const { recovery } = useStore(store.harness)
 
+  // 检测问题插件哪些已有单插件快照：仅对「确实有快照」的插件提供「从快照还原」入口
+  // （issue #303）。无快照的插件还原会 SNAPSHOT_NOT_FOUND，故必须按 id 过滤，
+  // 避免多插件场景下整体还原失败。
+  const [restorableIds, setRestorableIds] = useState<string[]>([])
+  useEffect(() => {
+    if (!recovery.required || !recovery.info) {
+      return
+    }
+    let disposed = false
+    Promise.all(recovery.info.plugins.map(async (id) => {
+      try {
+        const r = await invoke<{ exists: boolean }>('get_plugin_backup', { id })
+        return r.exists ? id : null
+      }
+      catch (e) {
+        silence(e, 'plugin recovery: backup check failed, will retry')
+        return null
+      }
+    }))
+      .then((results) => {
+        if (!disposed)
+          setRestorableIds(results.filter((id): id is string => id !== null))
+      })
+      .catch((err) => {
+        console.error('[PluginRecovery] check snapshot failed:', err)
+        if (!disposed)
+          setRestorableIds([])
+      })
+    return () => {
+      disposed = true
+    }
+  }, [recovery.required, recovery.info])
+
   if (!recovery.required || !recovery.info) {
     return null
   }
@@ -48,6 +84,9 @@ export function PluginRecovery({ fullScreen = false }: { fullScreen?: boolean })
   const primaryLabel = multiple
     ? t('recovery.remove_many', { count: info.plugins.length })
     : t('recovery.remove_one')
+  const restoreLabel = restorableIds.length > 1
+    ? t('recovery.restore_many', { count: restorableIds.length })
+    : t('recovery.restore_one')
   const reasonDetail = info.detail
     ? t(reasonKeys.detail, { detail: info.detail })
     : t(reasonKeys.detail)
@@ -99,6 +138,20 @@ export function PluginRecovery({ fullScreen = false }: { fullScreen?: boolean })
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            {/* 还原快照：优先级高于卸载——有快照的插件优先用快照还原，避免误删插件；
+                仅传「确有快照」的 id，无快照的插件保持不动（还原会 SNAPSHOT_NOT_FOUND） */}
+            <If cond={restorableIds.length > 0}>
+              <Button
+                className="rounded-md"
+                variant="primary"
+                onPress={() => store.harness.restoreAndRedetect(restorableIds)}
+              >
+                <span className="flex items-center gap-1">
+                  <If cond={recovery.busy} then={<Spinner size="sm" color="current" />} />
+                  {recovery.busy ? t('recovery.restoring') : restoreLabel}
+                </span>
+              </Button>
+            </If>
             <Button
               className="rounded-md"
               variant="danger"
@@ -111,6 +164,12 @@ export function PluginRecovery({ fullScreen = false }: { fullScreen?: boolean })
             </Button>
             <Button className="rounded-md" variant="tertiary" onPress={() => store.harness.restart()}>
               {t('recovery.restart')}
+            </Button>
+            <Button className="rounded-md" variant="ghost" onPress={() => store.harness.enterSafeMode()}>
+              <span className="flex items-center gap-1">
+                <ShieldCheck className="size-4" />
+                {t('buttons.safe_mode')}
+              </span>
             </Button>
             <Button className="rounded-md" variant="ghost" onPress={() => store.harness.dismissRecovery()}>
               {t('recovery.dismiss')}

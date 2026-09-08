@@ -44,6 +44,19 @@ pub struct DshPlugin {
     pub repo_url: String,
     /// 是否在 `dsh.profile.bundles` 中（启动时自动加载）
     pub bundled: bool,
+    /// 是否在禁用清单（`disabled-plugins.json`）中。
+    ///
+    /// 与 `bundled` 独立：已安装但不在 `bundles` 中的插件，仅当同时存在于
+    /// 禁用清单时才视为「已禁用」；否则为「未加载」（用户未主动禁用，
+    /// 启用操作会返回 `ENABLE_NOT_DISABLED`，前端不应展示启用入口）。
+    pub disabled: bool,
+    /// 是否在 profile 的 `cordis.patch.yml` 中被配置层禁用（`disabled: true`）。
+    ///
+    /// 与 `disabled`（桌面禁用清单）独立：patch 覆盖是用户/第三方直接写在
+    /// 配置文件里的更高优先级禁用，运行期同样不加载。桌面「启用」操作不会
+    /// 静默清除它——需用户确认后才会移除对应覆盖（见
+    /// `disable::strip_patch_disable`），避免「声称成功却仍被配置禁用」。
+    pub patch_disabled: bool,
     /// 预设清单中的「推荐」标记（绿色 chip）
     pub recommended: bool,
     /// 预设清单中的「修复」标记（黄色 chip）
@@ -57,6 +70,9 @@ pub struct DshPlugin {
     /// 判定得到的「最新版本」（registry latest / git HEAD SHA）；未判定或不可判定时缺省
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_version: Option<String>,
+    /// 是否有单插件快照（`$DSH_HOME/.plugin-backups/<id>.tgz`），前端据此展示
+    /// 还原 / 删除快照入口
+    pub has_snapshot: bool,
     /// 异常信息（安装/升级/卸载失败或页面运行期上报）；`None` = 正常
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<PluginError>,
@@ -145,6 +161,13 @@ fn parse_plugins(profile: &Path, presets: &[PreinstallPluginInfo]) -> Vec<DshPlu
         .map(|p| installed_name(p).to_string())
         .collect();
 
+    // 禁用清单：用于区分「已禁用」（用户主动禁用）与「未加载」（不在 bundles
+    // 但也不在禁用清单，启用会返回 ENABLE_NOT_DISABLED）。
+    let disabled_map = crate::service::plugin::disable::load_disabled(profile);
+    // 配置覆盖禁用集合（cordis.patch.yml 顶层 `disabled: true` 条目）：命中的
+    // 插件按「配置覆盖禁用」展示，与桌面禁用清单区分（优先级更高）。
+    let patch_disabled_set = crate::service::plugin::disable::load_patch_disabled(profile);
+
     let mut dep_ids: Vec<&String> = manifest.dependencies.keys().collect();
     // 稳定排序：启动加载（bundles）的插件在前，其余按 id 字典序
     dep_ids.sort_by_key(|id| (!bundled.contains(id.as_str()), id.as_str()));
@@ -164,13 +187,15 @@ fn parse_plugins(profile: &Path, presets: &[PreinstallPluginInfo]) -> Vec<DshPlu
                 .or_else(|| preset.map(|p| p.repo_url.clone()))
                 .map(|url| normalize_repo_url(&url))
                 .unwrap_or_default();
+            let name = meta
+                .as_ref()
+                .and_then(|m| m.name.clone())
+                .or_else(|| preset.map(|p| p.name.clone()))
+                .unwrap_or_else(|| id.clone());
+            let patch_disabled_by_name = patch_disabled_set.contains(name.as_str());
             Some(DshPlugin {
                 id: id.clone(),
-                name: meta
-                    .as_ref()
-                    .and_then(|m| m.name.clone())
-                    .or_else(|| preset.map(|p| p.name.clone()))
-                    .unwrap_or_else(|| id.clone()),
+                name,
                 version: meta
                     .as_ref()
                     .and_then(|m| m.version.clone())
@@ -182,11 +207,15 @@ fn parse_plugins(profile: &Path, presets: &[PreinstallPluginInfo]) -> Vec<DshPlu
                     .unwrap_or_default(),
                 repo_url,
                 bundled: bundled.contains(id.as_str()),
+                disabled: disabled_map.contains_key(id),
+                patch_disabled: patch_disabled_set.contains(id.as_str())
+                    || patch_disabled_by_name,
                 recommended: preset.map(|p| p.recommended).unwrap_or(false),
                 fix: preset.map(|p| p.fix).unwrap_or(false),
                 internal: internal_names.contains(id.as_str()),
                 update_available: false,
                 latest_version: None,
+                has_snapshot: false,
                 error: None,
             })
         })
@@ -215,6 +244,10 @@ pub fn list(app_handle: &AppHandle) -> Vec<DshPlugin> {
     // 已恢复的安装错误会被过滤，避免持久化历史状态污染当前健康状态。
     let registry = errors::load(app_handle);
     merge_current_errors(&mut plugins, &registry);
+    // 单插件快照存在性（快照不在 profile 文件指纹里，须单独探测）
+    for plugin in &mut plugins {
+        plugin.has_snapshot = super::snapshot::has_snapshot(app_handle, &plugin.id);
+    }
     plugins
 }
 
@@ -240,10 +273,13 @@ pub fn force_emit(app_handle: &AppHandle) {
     emit(app_handle);
 }
 
-/// 变化指纹：profile package.json 与各直接依赖插件 package.json 的内容拼接。
+/// 变化指纹：profile package.json、各直接依赖插件 package.json，以及
+/// `cordis.patch.yml` / `disabled-plugins.json` 的内容拼接。
 ///
 /// pnpm add/remove/install 会重写 profile 清单（依赖与 bundles）并落盘插件包，
-/// 任一变化都会改变指纹；profile 未初始化（首次运行）时返回 None。
+/// 任一变化都会改变指纹；配置覆盖（patch）与桌面禁用清单被外部修改时也应
+/// 触发插件列表刷新（issue #399：监听 patch/禁用清单变化）。profile 未初始化
+/// （首次运行）时返回 None。
 fn fingerprint(app_handle: &AppHandle) -> Option<String> {
     let dir = profile_dir(app_handle);
     let manifest = std::fs::read_to_string(dir.join("package.json")).ok()?;
@@ -254,6 +290,13 @@ fn fingerprint(app_handle: &AppHandle) -> Option<String> {
     let mut parts = vec![manifest];
     for id in dep_ids {
         if let Ok(content) = std::fs::read_to_string(plugin_dir(&dir, id).join("package.json")) {
+            parts.push(content);
+        }
+    }
+    // 配置覆盖与桌面禁用清单不在依赖文件里，但直接影响插件列表的展示态：
+    // 一并纳入指纹，外部直接编辑这些文件时也能实时刷新。
+    for extra in ["cordis.patch.yml", "disabled-plugins.json"] {
+        if let Ok(content) = std::fs::read_to_string(dir.join(extra)) {
             parts.push(content);
         }
     }
@@ -470,11 +513,14 @@ mod tests {
             description: String::new(),
             repo_url: String::new(),
             bundled: true,
+            disabled: false,
+            patch_disabled: false,
             recommended: false,
             fix: false,
             internal: false,
             update_available: false,
             latest_version: None,
+            has_snapshot: false,
             error: None,
         }];
         let registry = HashMap::from([(
@@ -500,11 +546,14 @@ mod tests {
             description: String::new(),
             repo_url: String::new(),
             bundled: true,
+            disabled: false,
+            patch_disabled: false,
             recommended: false,
             fix: false,
             internal: false,
             update_available: false,
             latest_version: None,
+            has_snapshot: false,
             error: None,
         };
         let install_error = PluginError {
@@ -541,6 +590,121 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         assert!(parse_plugins(&dir, &[]).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 覆盖 `disabled` 字段的状态组合：
+    /// - 在 bundles 且不在禁用清单 → bundled=true, disabled=false（正常加载）
+    /// - 不在 bundles 但在禁用清单 → bundled=false, disabled=true（已禁用，可启用）
+    /// - 不在 bundles 且不在禁用清单 → bundled=false, disabled=false（未加载，启用会失败）
+    #[test]
+    fn parse_plugins_distinguishes_disabled_from_unloaded() {
+        let dir = std::env::temp_dir().join(format!(
+            "dsh-watch-disabled-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir.join("node_modules")).unwrap();
+        let manifest = serde_json::json!({
+            "name": "dsh-profile-web",
+            "private": true,
+            "dependencies": {
+                "dsh-loaded": "1.0.0",
+                "dsh-disabled": "1.0.0",
+                "dsh-unloaded": "1.0.0"
+            },
+            "dsh": { "profile": { "bundles": ["dsh-loaded"] } }
+        });
+        std::fs::write(
+            dir.join("package.json"),
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        for id in ["dsh-loaded", "dsh-disabled", "dsh-unloaded"] {
+            let pkg_dir = dir.join("node_modules").join(id);
+            std::fs::create_dir_all(&pkg_dir).unwrap();
+            std::fs::write(pkg_dir.join("package.json"), format!(r#"{{"name":"{id}"}}"#)).unwrap();
+        }
+        // 仅 dsh-disabled 写入禁用清单。
+        let disabled = serde_json::json!({
+            "dsh-disabled": { "disabledAt": "1700000000", "reason": "user" }
+        });
+        std::fs::write(
+            dir.join("disabled-plugins.json"),
+            serde_json::to_string_pretty(&disabled).unwrap(),
+        )
+        .unwrap();
+
+        let plugins = parse_plugins(&dir, &[]);
+        let loaded = plugins.iter().find(|p| p.id == "dsh-loaded").unwrap();
+        assert!(loaded.bundled);
+        assert!(!loaded.disabled);
+        let disabled_plugin = plugins.iter().find(|p| p.id == "dsh-disabled").unwrap();
+        assert!(!disabled_plugin.bundled);
+        assert!(disabled_plugin.disabled);
+        let unloaded = plugins.iter().find(|p| p.id == "dsh-unloaded").unwrap();
+        assert!(!unloaded.bundled);
+        assert!(!unloaded.disabled);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `cordis.patch.yml` 配置覆盖禁用（`disabled: true`）独立于桌面禁用清单：
+    /// 命中条目目标（依赖键或包内 name 别名）的插件标记 `patch_disabled`，
+    /// `disabled: false` 与未禁用的条目不标记。
+    #[test]
+    fn parse_plugins_marks_config_override_disabled() {
+        let dir = build_profile(
+            "patch",
+            &[
+                (
+                    "dshmarket",
+                    r#"{"name":"dshmarket","version":"1.13.1","dsh":{"bundle":{}}}"#,
+                ),
+                ("dsh-tauri-pet", r#"{"name":"dsh-tauri-pet","version":"0.1.0"}"#),
+                ("dsh-other", r#"{"name":"dsh-other","version":"0.1.0"}"#),
+            ],
+        );
+        // dshmarket 由配置覆盖禁用；dsh-tauri-pet 显式 disabled: false（非禁用）
+        std::fs::write(
+            dir.join("cordis.patch.yml"),
+            "- id: dshmarket\n  disabled: true\n- id: dsh-tauri-pet\n  disabled: false\n",
+        )
+        .unwrap();
+        let plugins = parse_plugins(&dir, &presets_for_test());
+        let market = plugins.iter().find(|p| p.id == "dshmarket").unwrap();
+        assert!(market.patch_disabled);
+        let pet = plugins.iter().find(|p| p.id == "dsh-tauri-pet").unwrap();
+        assert!(!pet.patch_disabled);
+        let other = plugins.iter().find(|p| p.id == "dsh-other").unwrap();
+        assert!(!other.patch_disabled);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 包内 `name` 与依赖键不一致（loader 别名形态）时，patch 条目按
+    /// package.json name 命中同样标记为配置覆盖禁用。
+    #[test]
+    fn parse_plugins_marks_patch_disabled_by_package_name_alias() {
+        let dir = build_profile(
+            "patch-alias",
+            &[(
+                "dsh-better-sidebar",
+                r#"{"name":"better-sidebar","version":"1.0.0"}"#,
+            )],
+        );
+        std::fs::write(
+            dir.join("cordis.patch.yml"),
+            "- id: better-sidebar\n  disabled: true\n",
+        )
+        .unwrap();
+        let plugins = parse_plugins(&dir, &[]);
+        let sidebar = plugins
+            .iter()
+            .find(|p| p.id == "dsh-better-sidebar")
+            .unwrap();
+        assert!(sidebar.patch_disabled);
+
         std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -4,7 +4,7 @@ use regex::Regex;
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
-use super::is_actionable_plugin_ref;
+use super::is_package_name;
 
 /// 插件引用提取模式（编译一次复用，避免每次 `detect` 都重新编译正则）。
 static PLUGIN_REF_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
@@ -17,6 +17,11 @@ static PLUGIN_REF_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         r#"profile bundle\s+["']?([^"'\n]+)["']?\s+declares no dsh\.bundle"#,
         // plugin(s) failed to load: <pkg>
         r#"plugins? failed to load:\s*([A-Za-z0-9@/_.\-]+)"#,
+        // 启动卡在等待服务：<pkg>: pending (waiting for service: <svc>)
+        // （对齐 dsh-desktop harness-runtime.ts 的 extractPluginReferences pending 行；
+        //  形如 `dsh-tauri-rightclick: pending (waiting for service: remote.session)`，
+        //  此前因含冒号括号不被 is_package_name 接受而漏检）
+        r#"([A-Za-z0-9@/_.\-]+):\s*pending\s*\(waiting for service:[^)]*\)"#,
     ]
     .iter()
     .map(|p| Regex::new(p).expect("static plugin ref pattern"))
@@ -43,7 +48,7 @@ pub(super) fn extract_plugin_refs(text: &str) -> Vec<String> {
         for cap in re.captures_iter(text) {
             if let Some(m) = cap.get(1) {
                 let cand = m.as_str().trim();
-                if is_actionable_plugin_ref(cand) {
+                if is_package_name(cand) {
                     refs.insert(cand.to_string());
                 }
             }
@@ -54,7 +59,7 @@ pub(super) fn extract_plugin_refs(text: &str) -> Vec<String> {
         let rest = &text[m.end()..];
         for line in rest.lines().take(12) {
             let cand = line.trim().trim_end_matches(['.', ',', ' ']);
-            if is_actionable_plugin_ref(cand) {
+            if is_package_name(cand) {
                 refs.insert(cand.to_string());
             }
         }
@@ -131,6 +136,36 @@ mod tests {
     }
 
     #[test]
+    fn extract_refs_keeps_valid_official_leaf() {
+        let log = r#"failed to import loader entry dshClientUi (@deepseek-ai/dsh-client-ui-chat)"#;
+        let refs = extract_plugin_refs(log);
+
+        assert_eq!(refs, vec!["@deepseek-ai/dsh-client-ui-chat"]);
+    }
+
+    #[test]
+    fn extract_boot_card_keeps_valid_official_leaf() {
+        let log = "Failed to load plugins\n@deepseek-ai/dsh-client-ui-chat\n";
+        let refs = extract_plugin_refs(log);
+
+        assert_eq!(refs, vec!["@deepseek-ai/dsh-client-ui-chat"]);
+    }
+
+    #[test]
+    fn extract_refs_rejects_malformed_log_candidates() {
+        let log = r#"
+failed to apply loader entry badTraversal (foo/../../target)
+cannot resolve profile bundle "@scope/pkg/extra"
+profile bundle "@scope/.." declares no dsh.bundle
+Failed to load plugins
+@scope/.hidden
+foo bar
+"#;
+
+        assert!(extract_plugin_refs(log).is_empty());
+    }
+
+    #[test]
     fn extract_refs_from_boot_card() {
         let log = "Failed to load plugins\ndsh-better-sidebar\n@scope/another\nAn unknown error occurred\n";
         let refs = extract_plugin_refs(log);
@@ -138,6 +173,30 @@ mod tests {
         assert!(refs.contains(&"@scope/another".to_string()));
         // 非包名行不应被当作插件引用
         assert!(!refs.iter().any(|r| r.contains("unknown")));
+    }
+
+    #[test]
+    fn extract_refs_from_pending_service_line() {
+        // 用户报告的真实失败行：含冒号括号，旧逻辑 is_package_name 无法接受
+        let log = "Failed to load plugins\nweb boot: 1 entry did not activate\ndsh-tauri-rightclick: pending (waiting for service: remote.session)\n";
+        let refs = extract_plugin_refs(log);
+        assert_eq!(refs, vec!["dsh-tauri-rightclick"]);
+    }
+
+    #[test]
+    fn extract_refs_from_pending_service_line_with_scope() {
+        let log = "@scope/dsh-plugin-x: pending (waiting for service: uiRenderer)\n";
+        let refs = extract_plugin_refs(log);
+        assert_eq!(refs, vec!["@scope/dsh-plugin-x"]);
+    }
+
+    #[test]
+    fn extract_refs_rejects_malformed_pending_line() {
+        // 缺 waiting for service 结构 → 不命中（防普通文本误报）
+        let log = "dsh-tauri-rightclick: pending (waiting for nothing)\n";
+        assert!(extract_plugin_refs(log).is_empty());
+        let log2 = "some package: pending without parentheses\n";
+        assert!(extract_plugin_refs(log2).is_empty());
     }
 
     #[test]

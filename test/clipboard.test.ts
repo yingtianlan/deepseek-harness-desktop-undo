@@ -1,16 +1,17 @@
 import { readFileSync } from 'node:fs'
-import { writeText } from '@tauri-apps/plugin-clipboard-manager'
+import { invoke } from '@tauri-apps/api/core'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { writeClipboardText } from '../src/utils/clipboard'
 
-vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({
-  writeText: vi.fn(),
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: vi.fn(),
 }))
 
 const CLIPBOARD_CALL_SITES = [
   '../src/components/config-debug.tsx',
   '../src/layout/components/navbar.tsx',
   '../src/layout/components/preinstall-setup.tsx',
+  '../src/layout/components/setup.tsx',
 ]
 
 describe('clipboard integration', () => {
@@ -32,17 +33,17 @@ describe('clipboard integration', () => {
     }
   })
 
-  it('writes the exact text through the native clipboard plugin', async () => {
-    vi.mocked(writeText).mockResolvedValue()
+  it('writes the exact text through the native clipboard command', async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined as never)
 
     await expect(writeClipboardText('diagnostic logs')).resolves.toBeUndefined()
 
-    expect(writeText).toHaveBeenCalledExactlyOnceWith('diagnostic logs')
+    expect(invoke).toHaveBeenCalledExactlyOnceWith('write_clipboard_text', { text: 'diagnostic logs' })
   })
 
   it('propagates native clipboard failures to the caller', async () => {
     const failure = new Error('clipboard unavailable')
-    vi.mocked(writeText).mockRejectedValue(failure)
+    vi.mocked(invoke).mockRejectedValue(failure)
 
     await expect(writeClipboardText('diagnostic logs')).rejects.toBe(failure)
   })

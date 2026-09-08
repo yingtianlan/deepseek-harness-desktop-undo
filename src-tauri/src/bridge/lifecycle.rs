@@ -7,6 +7,7 @@ use std::sync::OnceLock;
 
 use crate::config;
 use crate::service::cli;
+use crate::service::core;
 use crate::service::download::{self, Installable};
 use crate::service::workflow;
 use tauri::AppHandle;
@@ -16,6 +17,25 @@ use tauri::AppHandle;
 /// 改用独立的进程内互斥锁覆盖完整安装生命周期，避免两路并发 install 的
 /// TOCTOU 与安装失败后状态卡死导致后续请求被静默跳过。
 static INSTALL_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+/// 返回当前实际选中的核心版本，不能直接读取固定预打包目录。
+fn active_dsh_version(app_handle: &AppHandle) -> Option<String> {
+    core::active_version(app_handle).or_else(|| config::get_dsh_version(app_handle))
+}
+
+/// 已安装版本高于推荐版本时保留现有核心，避免依赖自愈流程触发降级。
+fn preserve_newer_installed_dsh(
+    installed_version: Option<&str>,
+    recommended_version: Option<&str>,
+) -> bool {
+    match (
+        installed_version.and_then(|version| semver::Version::parse(version).ok()),
+        recommended_version.and_then(|version| semver::Version::parse(version).ok()),
+    ) {
+        (Some(installed), Some(recommended)) => installed > recommended,
+        _ => false,
+    }
+}
 
 fn install_lock() -> &'static tokio::sync::Mutex<()> {
     INSTALL_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
@@ -110,18 +130,39 @@ pub async fn install_dependencies(app_handle: AppHandle) -> Result<bool, String>
         return Ok(false);
     }
 
-    let dsh_latest = download::fetch_latest_dsh_pkg_info().await;
+    // 安装目标遵循应用资源中的推荐版本，而不是 GitHub 的 latest。
+    // latest 可能是 alpha/beta 等超出推荐范围的预览版；并且 `/releases/latest`
+    // 不保证与推荐版本的摘要属于同一 release。按推荐 SemVer 反查固定 tag，后续
+    // 资产 URL 与 digest 都从该 tag 获取。
+    let recommended_version = config::recommended_dsh_version(&app_handle);
+    let installed_version = dsh_files_ok
+        .then(|| active_dsh_version(&app_handle))
+        .flatten();
+    let preserve_installed =
+        preserve_newer_installed_dsh(installed_version.as_deref(), recommended_version.as_deref());
+    let dsh_latest = if preserve_installed {
+        log::info!(
+            "Keeping installed dsh version above recommendation: {}",
+            installed_version.as_deref().unwrap_or_default()
+        );
+        None
+    } else {
+        Some(match recommended_version {
+            Some(version) => download::fetch_dsh_pkg_version(&version).await,
+            None => download::fetch_latest_dsh_pkg_info().await,
+        })
+    };
 
     // 已安装文件在盘时，用 resolve_update 甄别「记录滞后」与「真更新」：
     // 记录滞后（HealUpToDate）只修正 store 记录、绝不整包重下。否则会把一个
     // 可用的 node_modules 整目录删除重解压，Windows 上原生模块 DLL 锁/重解压
     // 很容易留下破损安装，导致启动报找不到 @deepseek-ai/dsh-client-ui-settings
     // 或 HARNESS_NOT_FOUND。仅在真更新（UpdateAvailable）时才允许重新下载。
-    let dsh_need_install = match &dsh_latest {
-        Ok(latest) if dsh_files_ok => {
+    let dsh_need_install = match dsh_latest.as_ref() {
+        None => false,
+        Some(Ok(latest)) if dsh_files_ok => {
             let record_commit = config::get_dsh_pkg_commit(&app_handle);
             let record_tag = config::get_dsh_pkg_tag(&app_handle);
-            let installed_version = config::get_dsh_version(&app_handle);
             // 老记录没有 tag，反查 pkg 仓库 tags 列表确认记录对应的发布版本；
             // 反查失败时由 resolve_update 回退到“以实际文件为准”的保守分支
             let legacy_tags = if record_tag.is_none() {
@@ -167,8 +208,8 @@ pub async fn install_dependencies(app_handle: AppHandle) -> Result<bool, String>
             }
         }
         // 核心文件缺失（首次安装或目录被清空）→ 需要安装
-        Ok(_) => true,
-        Err(e) => {
+        Some(Ok(_)) => true,
+        Some(Err(e)) => {
             // 网络不可用或 GitHub API 限流时保留本地安装，不阻塞启动
             log::warn!(
                 "Failed to check latest dsh release info, keeping local install: {}",
@@ -194,7 +235,10 @@ pub async fn install_dependencies(app_handle: AppHandle) -> Result<bool, String>
     workflow::status::emit_status(&app_handle);
     // 返回 dsh 是否真正落盘更新：仅重装 Node/pnpm 或全部任务被跳过（例如
     // 版本相同仅记录滞后）时为 false，前端据此决定是否重启页面/保留更新提示
-    let updated = match workflow::install(&app_handle, dsh_latest.ok()).await {
+    // 高于推荐版本的核心没有 release 元数据，因此仅补装 Node/pnpm 时不会被
+    // workflow 当作过期并下载较旧核心。
+    let install_target = dsh_latest.and_then(Result::ok);
+    let updated = match workflow::install(&app_handle, install_target).await {
         Ok(updated) => updated,
         Err(e) => {
             // 安装失败把状态复位，避免后续 install_dependencies 命中
@@ -227,41 +271,50 @@ pub async fn check_dsh_update(
         return Ok(None);
     }
 
+    // 当前运行的是预览版时不提示稳定/RC 更新：预览版可能高于当前 release，
+    // 但不能把用户主动选择的 alpha/beta 版本降级成较旧的 rc。
+    if config::get_store_dat_setting(&app_handle)
+        .active_core
+        .as_deref()
+        == Some("app")
+        && config::get_dsh_pkg_tag(&app_handle)
+            .as_deref()
+            .is_some_and(download::is_preview_tag)
+    {
+        log::info!("Suppressing dsh update because a preview core is active");
+        return Ok(None);
+    }
+
     let latest = download::fetch_latest_dsh_pkg_info().await?;
-    let record_commit = config::get_dsh_pkg_commit(&app_handle);
-    let record_tag = config::get_dsh_pkg_tag(&app_handle);
-    let installed_version = config::get_dsh_version(&app_handle);
 
-    // 老记录没有 tag，反查 pkg 仓库 tags 列表确认记录对应的发布版本；
-    // 反查失败时由 resolve_update 回退到“以实际文件为准”的保守分支
-    let legacy_tags = if record_tag.is_none() {
-        download::fetch_dsh_pkg_tags().await.unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-
-    match download::resolve_update(
-        record_commit.as_deref(),
-        record_tag.as_deref(),
-        installed_version.as_deref(),
-        &latest,
-        &legacy_tags,
-    ) {
-        download::UpdateCheck::UpToDate => Ok(None),
-        download::UpdateCheck::UpdateAvailable => Ok(Some(latest)),
-        download::UpdateCheck::HealUpToDate => {
-            // 安装文件已是最新 release，只是记录滞后：修正记录后下次启动
-            // 直接走 commit 比对快速路径，不再误报
+    // 关键修复1：最新 release 的版本号已经在已装核心列表里（含 active 和非 active
+    // 槽位），就不提示更新。避免「老版本激活 + 新版已下载但未切换」场景下白点一次
+    // 「立即更新」做整包重下——版本号（用户视角的版本）已经在那了，没必要再拉一遍。
+    if let Some(version) = download::parse_version_from_tag(&latest.tag) {
+        if core::has_installed_version(&app_handle, &version).await {
             log::info!(
-                "Installed Harness files already at latest release, healing stale record: {} ({})",
-                latest.tag,
-                latest.commit
+                "Suppressing dsh update toast because latest version is already installed: {}",
+                version
             );
-            config::set_dsh_pkg_commit(&app_handle, latest.commit.clone());
-            config::set_dsh_pkg_tag(&app_handle, latest.tag.clone());
-            Ok(None)
+            return Ok(None);
         }
     }
+
+    // 关键修复2：最新 release 高于推荐版本时（通常是 alpha/beta/preview 序号
+    // 大于稳定 RC）不自动推。stable 用户不该被打扰去装 alpha 测试版；用户想追
+    // preview 自行去核心面板下载。这条规则先于「installed 比 latest 低」检查，
+    // 否则装了 0.1.1-rc.1 的用户会被弹 0.1.3-alpha.1 更新。
+    if let Some(version) = download::parse_version_from_tag(&latest.tag) {
+        if config::is_dsh_version_above_recommended(&app_handle, &version) {
+            log::info!(
+                "Suppressing dsh update toast because latest is above recommended (preview/alpha): {}",
+                version
+            );
+            return Ok(None);
+        }
+    }
+
+    Ok(Some(latest))
 }
 
 /// 启动 Harness 服务
@@ -280,6 +333,18 @@ pub async fn shutdown_harness(app_handle: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub async fn restart_harness(app_handle: AppHandle) -> Result<(), String> {
     workflow::restart(app_handle).await
+}
+
+/// 进入安全模式：确保安全档案存在并切换为当前档案（不重启，由前端走标准重启链路）。
+///
+/// 错误界面「安全模式」按钮的入口：安全档案只含 web 模板核心 bundles、不带
+/// 用户插件/补丁层，启动失败的插件（如 pending waiting for service）被隔离，
+/// 应用先恢复可用；用户在档案列表切回原档案即退出安全模式。
+#[tauri::command]
+pub async fn enter_safe_mode(app_handle: AppHandle) -> Result<(), String> {
+    crate::service::profile::ensure_safe_profile(&app_handle)?;
+    crate::service::profile::set_active(&app_handle, crate::service::profile::SAFE_PROFILE)?;
+    Ok(())
 }
 
 /// 获取当前 Harness 服务状态
@@ -305,7 +370,7 @@ pub fn runtime_ready(app_handle: AppHandle) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::install_lock;
+    use super::{install_lock, preserve_newer_installed_dsh};
 
     #[test]
     fn install_lock_is_exclusive_while_held() {
@@ -318,5 +383,21 @@ mod tests {
         // 释放后可重新获取
         drop(guard);
         assert!(lock.try_lock().is_ok());
+    }
+
+    #[test]
+    fn newer_installed_dsh_is_preserved_from_recommended_downgrade() {
+        assert!(preserve_newer_installed_dsh(
+            Some("0.1.1-rc.3"),
+            Some("0.1.1-rc.2")
+        ));
+        assert!(!preserve_newer_installed_dsh(
+            Some("0.1.1-rc.2"),
+            Some("0.1.1-rc.2")
+        ));
+        assert!(!preserve_newer_installed_dsh(
+            Some("0.1.1-rc.1"),
+            Some("0.1.1-rc.2")
+        ));
     }
 }

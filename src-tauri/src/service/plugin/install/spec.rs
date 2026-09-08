@@ -25,8 +25,8 @@ pub(super) fn bundled_dir_of(
 /// 路径正确性由 [`crate::service::plugin::internal::ensure`] 启动自愈核对）；
 /// 普通插件沿用清单声明。
 ///
-/// 捆绑目录缺失时返回错误：内置插件缺失意味着构建期 prebuild 未执行或产物被
-/// 删，属发布缺陷而非用户侧的普通安装失败，错误前缀便于区分。
+/// 捆绑目录缺失时返回错误：内置插件缺失意味着构建期 build:plugins 未执行或产物
+/// 被删，属发布缺陷而非用户侧的普通安装失败，错误前缀便于区分。
 pub(super) fn preset_spec_for_install(
     preset: &PreinstallPluginInfo,
     bundled_dir: Option<PathBuf>,
@@ -36,23 +36,34 @@ pub(super) fn preset_spec_for_install(
     }
     let dir = bundled_dir.ok_or_else(|| {
         format!(
-            "BUNDLED_PLUGIN_MISSING: no bundled dir for internal plugin {} (run scripts/prebuild.ts at build time)",
+            "BUNDLED_PLUGIN_MISSING: no bundled dir for internal plugin {} (run pnpm build:plugins at build time)",
             preset.id
         )
     })?;
     Ok(bundled_dep_spec(&dir))
 }
 
-/// 把 `github:owner/repo[#ref]` 一类的 GitHub 简写规范为显式 HTTPS 依赖形式
+/// 把 `github:owner/repo[#ref]` 与裸 `git+ssh://git@github.com/...` 一类的
+/// GitHub 依赖 spec 规范为显式 HTTPS 依赖形式
 /// （`git+https://github.com/owner/repo.git[#ref]`）。
 ///
 /// 动机：pnpm 解析 GitHub 简写时，「HTTPS 可达性探测一旦失败就回退 git+ssh」
 /// 是已知缺陷（issue #3948 / #7243 / #13276，官方已 accepted 仍未修）。公开仓库
 /// 一旦落进 git+ssh，在无 SSH 配置的桌面机上（非交互子进程无法应答 known_hosts
 /// 询问）必然硬失败。规范为显式 `git+https:` 后 pnpm 直接走 HTTPS 克隆，绕开该
-/// 回退；非 `github:` 形式（如纯 npm 包名）原样返回。
+/// 回退。
+///
+/// 同时覆盖上游依赖锁定的裸 `git+ssh://git@github.com/owner/repo[.git][#ref]`
+/// spec（如 pnpm-lock 里 `github:` 被解析成的形态）：这类公开仓库经 SSH 拉取在
+/// 无 SSH 密钥的桌面机上同样必败（issue #369 的次要问题），一并改写为 HTTPS。
+/// 非 GitHub 形式（纯 npm 包名 / 其他主机的 git spec）原样返回。
 pub(super) fn normalize_git_spec(spec: &str) -> String {
-    let Some(rest) = spec.strip_prefix("github:") else {
+    // 兼容带 `#ref` fragment 的两种宿主形态：`github:owner/repo` 简写与
+    // `git+ssh://git@github.com/owner/repo[.git]` 裸 SSH URL
+    let rest = spec
+        .strip_prefix("github:")
+        .or_else(|| spec.strip_prefix("git+ssh://git@github.com/"));
+    let Some(rest) = rest else {
         return spec.to_string();
     };
     let (path, fragment) = match rest.split_once('#') {
@@ -78,7 +89,7 @@ pub(super) fn normalize_git_spec(spec: &str) -> String {
 /// - Windows：`shell:true` 时 Node 只把参数按空格拼接、不做引号转义（官方文档
 ///   DEP0190：arguments are not escaped, only concatenated）。内置插件的依赖是
 ///   `link:<应用安装目录>`，而 Windows 安装目录常含空格（如
-///   `G:\Deepseek Harness Desktop\resources\internal-plugins\dsh-tauri`），拼进
+///   `G:\Deepseek Harness Desktop\resources\node_modules\dsh-tauri`），拼进
 ///   shell 后会被切碎成多个 spec，pnpm 报 `ERR_PNPM_SPEC_NOT_SUPPORTED` / 装成
 ///   错误依赖，导致启动自愈每轮都重装（死循环）。包一层双引号让 cmd 把整条
 ///   spec 视为一个参数；pnpm 解析后自行剥离引号，落盘 `package.json` 的值仍是
@@ -183,11 +194,31 @@ mod tests {
     }
 
     #[test]
+    fn normalize_ssh_github_url_to_git_https() {
+        // issue #369：裸 git+ssh://git@github.com/... spec（pnpm-lock 常见形态）
+        // 同样改写为 HTTPS，避免公开仓库经 SSH 拉取在无密钥桌面机上必败
+        assert_eq!(
+            normalize_git_spec("git+ssh://git@github.com/omdsh-dev/DSH-better-sidebar.git"),
+            "git+https://github.com/omdsh-dev/DSH-better-sidebar.git"
+        );
+        // 带 #ref 与不带 .git 后缀
+        assert_eq!(
+            normalize_git_spec("git+ssh://git@github.com/omdsh-dev/DSH-better-sidebar#next"),
+            "git+https://github.com/omdsh-dev/DSH-better-sidebar.git#next"
+        );
+    }
+
+    #[test]
     fn normalize_non_github_spec_passes_through() {
         assert_eq!(normalize_git_spec("dshmarket"), "dshmarket");
         assert_eq!(
             normalize_git_spec("git+https://github.com/foo/bar.git"),
             "git+https://github.com/foo/bar.git"
+        );
+        // 非 GitHub 主机的 SSH spec 不受影响（只规范 GitHub 公开仓库）
+        assert_eq!(
+            normalize_git_spec("git+ssh://git@gitlab.com/foo/bar.git"),
+            "git+ssh://git@gitlab.com/foo/bar.git"
         );
     }
 

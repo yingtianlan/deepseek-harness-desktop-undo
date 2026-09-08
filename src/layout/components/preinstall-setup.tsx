@@ -4,7 +4,7 @@ import { Button, Checkbox, Chip, Label, Spinner, Typography } from '@heroui/reac
 import { invoke } from '@tauri-apps/api/core'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { If } from 'react-if-lite'
+import { Else, If, Then } from 'react-if-lite'
 import { useStore } from 'valtio-define'
 import { Empty } from '@/components/empty'
 import { Item } from '@/components/item'
@@ -19,15 +19,31 @@ import { toast } from '@/utils/toast'
  * 或跳过；两者都会标记完成并继续启动服务。
  */
 
-/** 派生默认勾选集合：未安装的推荐/修复/默认勾选项（用户手动调整前的基础态） */
-function defaultSelectedSet(plugins: readonly PreinstallPlugin[]): Set<string> {
-  return new Set(plugins.filter(p => !p.installed && (p.recommended || p.fix || p.defaultChecked)).map(p => p.id))
+/**
+ * 初始勾选态 = 已安装 + 推荐/修复/默认勾选（进入页面时的完整勾选集合）。
+ * 用于和用户最终选择做 diff，得出 toInstall / toUninstall。
+ *
+ * 策略由 isFirstTime 决定：
+ * - 首次安装引导（isFirstTime=true）：已安装 + 推荐/修复/默认勾选均默认勾上
+ * - 手动打开（isFirstTime=false）：只有已安装的插件才默认勾上（已卸载的推荐项不勾）
+ */
+function initialCheckedSet(plugins: readonly PreinstallPlugin[], isFirstTime: boolean): Set<string> {
+  return new Set(plugins.filter((p) => {
+    if (p.installed)
+      return true
+    // 非首次场景：不推荐未安装的插件，避免已卸载的推荐项仍默认勾着
+    if (!isFirstTime)
+      return false
+    return p.recommended || p.fix || p.defaultChecked
+  }).map(p => p.id))
 }
 
-/** 插件列表的一行：名称 + 推荐/已安装标签在左，勾选框 + 仓库跳转按钮在右 */
-function PluginRow({ plugin, checked, disabled, onToggle, onOpenRepo }: {
+/** 插件列表的一行：名称 + 推荐/已安装/待卸载标签在左，勾选框 + 仓库跳转按钮在右 */
+function PluginRow({ plugin, checked, toUninstall, disabled, onToggle, onOpenRepo }: {
   plugin: PreinstallPlugin
   checked: boolean
+  /** 已安装但被取消勾选 → 待卸载（删除线 + 警告 chip） */
+  toUninstall: boolean
   disabled: boolean
   onToggle: (id: string, checked: boolean) => void
   onOpenRepo: (id: string) => void
@@ -38,22 +54,27 @@ function PluginRow({ plugin, checked, disabled, onToggle, onOpenRepo }: {
     <Item
       left={(
         <>
-          <Label className={`min-w-0 truncate text-sm font-medium ${plugin.installed ? 'text-muted line-through' : 'text-ink'}`}>
+          <Label className="min-w-0 truncate text-sm font-medium">
             {plugin.name}
           </Label>
-          <If cond={plugin.recommended && !plugin.installed}>
+          <If cond={plugin.recommended && !plugin.installed && !toUninstall}>
             <Chip size="sm" variant="soft" color="success" className="shrink-0 font-medium">
               {t('preinstall.recommend')}
             </Chip>
           </If>
-          <If cond={plugin.fix && !plugin.installed}>
+          <If cond={plugin.fix && !plugin.installed && !toUninstall}>
             <Chip size="sm" variant="soft" color="warning" className="shrink-0 font-medium">
               {t('preinstall.fix')}
             </Chip>
           </If>
-          <If cond={plugin.installed}>
+          <If cond={plugin.installed && !toUninstall}>
             <Chip size="sm" variant="soft" color="success" className="shrink-0 font-medium">
               {t('preinstall.installed')}
+            </Chip>
+          </If>
+          <If cond={toUninstall}>
+            <Chip size="sm" variant="soft" color="warning" className="shrink-0 font-medium">
+              {t('preinstall.to_uninstall')}
             </Chip>
           </If>
         </>
@@ -61,8 +82,8 @@ function PluginRow({ plugin, checked, disabled, onToggle, onOpenRepo }: {
       right={(
         <>
           <Checkbox
-            isSelected={checked || plugin.installed}
-            isDisabled={disabled || plugin.installed}
+            isSelected={checked}
+            isDisabled={disabled}
             onChange={isSelected => onToggle(plugin.id, isSelected)}
             className="shrink-0"
             aria-label={plugin.name}
@@ -138,18 +159,18 @@ export function PreinstallSetup() {
     void store.harness.loadPreinstallPlugins()
   }, [])
 
-  // 默认勾选：未安装的推荐插件 +「修复」类项 + 无 chip 但标记默认勾选的项（如 dsh-notification）。
+  // 默认勾选：已安装 + 未安装的推荐插件 +「修复」类项 + 无 chip 但标记默认勾选的项（如 dsh-notification）。
   // 派生计算而非在加载回调里 setState，避免与 store 的加载去重守卫竞争，
   // 保证插件到位后默认勾选必定生效（用户手动调整后以用户选择为准）。
   const effectiveSelected = !touched
-    ? defaultSelectedSet(preinstall.plugins)
+    ? initialCheckedSet(preinstall.plugins, preinstall.isFirstTime)
     : selected
 
   function toggle(id: string, checked: boolean) {
     // 首次交互以「当前默认勾选」为起点：selected 初始为空，若直接在其上增删，
-    // 取消一个会误把其余默认项一并取消。这里先以 defaultSelectedSet 播种，
+    // 取消一个会误把其余默认项一并取消。这里先以 initialCheckedSet 播种，
     // 再应用本次勾选，保证「取消一个 = 只取消这一个」。
-    const seed = !touched ? defaultSelectedSet(preinstall.plugins) : null
+    const seed = !touched ? initialCheckedSet(preinstall.plugins, preinstall.isFirstTime) : null
     setTouched(true)
     setSelected((prev) => {
       const next = new Set(seed ?? prev)
@@ -170,23 +191,31 @@ export function PreinstallSetup() {
   }
 
   function handleConfirm() {
-    void store.harness.confirmPreinstall([...effectiveSelected])
+    // 基于 plugin.installed 推导操作：选中且未安装 → 安装；已安装且未选中 → 卸载
+    const toInstall = preinstall.plugins
+      .filter(p => effectiveSelected.has(p.id) && !p.installed)
+      .map(p => p.id)
+    const toUninstall = preinstall.plugins
+      .filter(p => p.installed && !effectiveSelected.has(p.id))
+      .map(p => p.id)
+    void store.harness.confirmPreinstall({ installIds: toInstall, uninstallIds: toUninstall })
   }
 
   function handleSkip() {
     void store.harness.skipPreinstall()
   }
 
-  // 可选中的插件（未安装项）勾选数，用于禁用"确定"
-  const selectableCount = preinstall.plugins.filter(p => !p.installed).length
-  const selectedCount = [...effectiveSelected].filter(id => preinstall.plugins.some(p => p.id === id && !p.installed)).length
+  // 是否有变更：存在需安装或需卸载的插件时启用"确定"
+  const toInstallCount = preinstall.plugins.filter(p => effectiveSelected.has(p.id) && !p.installed).length
+  const toUninstallCount = preinstall.plugins.filter(p => p.installed && !effectiveSelected.has(p.id)).length
+  const hasChanges = toInstallCount > 0 || toUninstallCount > 0
   const installing = preinstall.installing
 
   return (
     <div className="flex h-full w-full items-center justify-center bg-canvas">
       <div className="flex w-[min(560px,88vw)] flex-col gap-5">
         <header className="flex flex-col items-center gap-1.5 text-center">
-          <Typography type="h4">{t('preinstall.title')}</Typography>
+          <Typography type="h4" className="!text-ink">{t('preinstall.title')}</Typography>
           <Typography color="muted" type="body-sm" className="max-w-[440px]">{t('preinstall.subtitle')}</Typography>
         </header>
 
@@ -227,34 +256,62 @@ export function PreinstallSetup() {
                           <Empty>{t('preinstall.empty')}</Empty>
                         )}
                       >
-                        {preinstall.plugins.map(plugin => (
-                          <PluginRow
-                            key={plugin.id}
-                            plugin={plugin}
-                            checked={effectiveSelected.has(plugin.id)}
-                            disabled={installing}
-                            onToggle={toggle}
-                            onOpenRepo={openRepo}
-                          />
-                        ))}
+                        {preinstall.plugins.map((plugin) => {
+                          const checked = effectiveSelected.has(plugin.id)
+                          // 已安装但用户取消勾选 → 待卸载
+                          const toUninstall = plugin.installed && !checked
+                          return (
+                            <PluginRow
+                              key={plugin.id}
+                              plugin={plugin}
+                              checked={checked}
+                              toUninstall={toUninstall}
+                              disabled={installing}
+                              onToggle={toggle}
+                              onOpenRepo={openRepo}
+                            />
+                          )
+                        })}
                       </If>
                     </If>
                   </div>
 
-                  {/* 操作区：跳过 / 确定 */}
+                  {/* 可取消勾选提示：让用户知道预设插件可减选，取消后不会安装 */}
+                  <If cond={preinstall.plugins.length > 0 && !installing && preinstall.error === ''}>
+                    <p className="text-center text-xs text-muted">{t('preinstall.can_uncheck_hint')}</p>
+                  </If>
+
+                  {/* 操作区：有变更 → 弱「跳过」+ 主「确认」；无变更 → 主按钮独占「跳过」，避免重复入口 */}
                   <div className="flex items-center justify-end gap-2">
-                    <Button className="h-8 rounded-md" size="sm" variant="tertiary" onPress={handleSkip} isDisabled={installing}>
-                      {t('preinstall.skip')}
-                    </Button>
-                    <Button
-                      className="h-8 rounded-md"
-                      size="sm"
-                      variant="primary"
-                      onPress={handleConfirm}
-                      isDisabled={installing || selectedCount === 0 || selectableCount === 0}
-                    >
-                      {t('preinstall.confirm')}
-                    </Button>
+                    <If cond={hasChanges}>
+                      <Button className="h-8 rounded-md" size="sm" variant="tertiary" onPress={handleSkip} isDisabled={installing}>
+                        {t('preinstall.skip')}
+                      </Button>
+                    </If>
+                    <If cond={!hasChanges}>
+                      <Then>
+                        <Button
+                          className="h-8 rounded-md"
+                          size="sm"
+                          variant="primary"
+                          onPress={handleSkip}
+                          isDisabled={installing}
+                        >
+                          {t('preinstall.skip')}
+                        </Button>
+                      </Then>
+                      <Else>
+                        <Button
+                          className="h-8 rounded-md"
+                          size="sm"
+                          variant="primary"
+                          onPress={handleConfirm}
+                          isDisabled={installing}
+                        >
+                          {t('preinstall.confirm')}
+                        </Button>
+                      </Else>
+                    </If>
                   </div>
                 </>
               )}
@@ -277,7 +334,7 @@ export function PreinstallSetup() {
                     size="sm"
                     variant="primary"
                     onPress={handleConfirm}
-                    isDisabled={installing || selectedCount === 0 || selectableCount === 0}
+                    isDisabled={installing || !hasChanges}
                   >
                     {t('app.retry')}
                   </Button>

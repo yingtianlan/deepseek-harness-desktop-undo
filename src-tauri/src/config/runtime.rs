@@ -410,20 +410,20 @@ fn user_home_dir() -> Option<PathBuf> {
 /// Harness 用户数据目录（$DSH_HOME）。
 ///
 /// 与官方 dsh（`${DSH_HOME:-$HOME/.dsh}`）保持一致：
-/// - 环境变量 `DSH_HOME` 非空时优先使用（用户显式指定优先于构建差异）；
-/// - 否则 release 构建默认 `~/.dsh`（Windows `%USERPROFILE%\.dsh`，Unix
-///   `$HOME/.dsh`，与官方 node 安装共用同一份数据）；
-/// - debug 构建默认 `~/.dsh.dev`：开发版与生产版同时运行时，会话、档案、
-///   插件与主题等数据互不干扰，也不会互相污染对方的会话。
+/// - release 构建使用非空环境变量 `DSH_HOME`，否则默认 `~/.dsh`；
+/// - debug 构建始终使用 `~/.dsh.dev`，忽略从旧 desktop checkout、终端或 release
+///   shim 继承的 `DSH_HOME`，避免两个构建误用同一 profile 并发改写；
+/// - debug 子进程由 launch 显式收到同一个 `~/.dsh.dev`，开发版与生产版的会话、档案、
+///   插件与主题因此互不干扰。
 pub fn get_dsh_data_path<R: Runtime>(_app_handle: &AppHandle<R>) -> PathBuf {
-    if let Some(home) = std::env::var_os("DSH_HOME") {
-        if !home.is_empty() {
-            return PathBuf::from(home);
-        }
-    }
     let dir_name = if cfg!(debug_assertions) {
         DSH_HOME_DEV_DIR_NAME
     } else {
+        if let Some(home) = std::env::var_os("DSH_HOME") {
+            if !home.is_empty() {
+                return PathBuf::from(home);
+            }
+        }
         DSH_HOME_DIR_NAME
     };
     user_home_dir()
@@ -468,14 +468,13 @@ fn parse_node_version(output: &str) -> Option<(u64, u64, u64)> {
     Some((major, minor, patch))
 }
 
-/// 兼容性规则：v22.15.0+ 或 v23.8.0+（v24+ 也满足）
+/// 兼容性规则与当前 DSH `engines.node` 一致：v22.19.0+ 或 v24+；v23 不受支持。
 fn is_supported_node_version(version: &str) -> bool {
     let Some((major, minor, _patch)) = parse_node_version(version) else {
         return false;
     };
     match major {
-        22 => minor >= 15,
-        23 => minor >= 8,
+        22 => minor >= 19,
         major if major >= 24 => true,
         _ => false,
     }
@@ -511,6 +510,15 @@ pub fn get_dsh_version<R: Runtime>(app_handle: &AppHandle<R>) -> Option<String> 
             value
                 .trim_start_matches(['^', '~', '=', '>', '<'])
                 .to_string()
+        })
+        .or_else(|| {
+            manifest
+                .get("name")
+                .and_then(|value| value.as_str())
+                .filter(|name| *name == "@deepseek-ai/dsh")
+                .and_then(|_| manifest.get("version"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
         })
 }
 
@@ -596,6 +604,17 @@ mod tests {
     fn node_base_url_switches_on_region() {
         assert_eq!(node_base_url(Region::Overseas), NODE_BASE_URL);
         assert_eq!(node_base_url(Region::Domestic), NODE_MIRROR_BASE_URL);
+    }
+
+    /// 当前 DSH 明确支持 22.19+ 与 24+，不支持 22.18 及整个 Node 23 系列。
+    #[test]
+    fn node_runtime_boundary_matches_current_dsh_engine() {
+        assert!(!is_supported_node_version("v22.18.0"));
+        assert!(is_supported_node_version("v22.19.0"));
+        assert!(!is_supported_node_version("v22.19.0-rc.1"));
+        assert!(!is_supported_node_version("v23.99.0"));
+        assert!(is_supported_node_version("v24.0.0"));
+        assert!(!is_supported_node_version("v24.0.0-nightly.1"));
     }
 
     #[test]
